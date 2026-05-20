@@ -22,8 +22,8 @@
       <section class="panel controls">
         <div class="control-grid">
           <label class="field">
-            <span class="has-tooltip" data-tooltip="The stock or ETF symbol the bot will monitor and trade.">Ticker</span>
-            <input id="symbolInput" type="text" value="F" autocomplete="off" aria-label="Ticker">
+            <span class="has-tooltip" data-tooltip="SOXL is the regime source. EdgeWalker routes between SOXL, SOXS, or no trade.">Signal</span>
+            <input id="symbolInput" type="text" value="SOXL" autocomplete="off" aria-label="Signal ticker">
           </label>
 
           <label class="field">
@@ -44,6 +44,11 @@
           <label class="field">
             <span class="has-tooltip" data-tooltip="Minutes before Alpaca's reported market close when the bot will sell the full open position.">Closeout min</span>
             <input id="closeoutInput" type="number" min="1" step="1" value="5" aria-label="Closeout minutes">
+          </label>
+
+          <label class="field">
+            <span class="has-tooltip" data-tooltip="Minimum fast/slow SMA separation percent required to call the regime a trend instead of chop.">Regime gap %</span>
+            <input id="regimeGapInput" type="number" min="0" step="0.01" value="0.20" aria-label="Regime gap percent">
           </label>
 
           <label class="field">

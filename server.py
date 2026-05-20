@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from bot import AlpacaClient, BotConfig, BotError, TrailingStopBot, load_dotenv
+from bot import AlpacaClient, BotConfig, BotError, EdgeWalkerBot, load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -31,6 +31,7 @@ class RunnerSnapshot:
     dry_run: bool
     poll_seconds: int
     close_liquidate_minutes: int
+    regime_gap_threshold: str
     position_notional: str
     trail_percent: str
     fast_sma_minutes: int
@@ -125,7 +126,7 @@ class BotRunner:
         error: str | None = None
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                TrailingStopBot(config, AlpacaClient(config)).run_once()
+                EdgeWalkerBot(config, AlpacaClient(config)).run_once()
         except BotError as exc:
             error = str(exc)
         except Exception as exc:  # Keep the local control server alive on surprises.
@@ -201,6 +202,7 @@ class BotRunner:
             dry_run=self._config.dry_run,
             poll_seconds=self._config.poll_seconds,
             close_liquidate_minutes=self._config.close_liquidate_minutes,
+            regime_gap_threshold=str(self._config.regime_gap_threshold),
             position_notional=str(self._config.position_notional),
             trail_percent=str(self._config.trail_percent),
             fast_sma_minutes=self._config.fast_sma_minutes,
@@ -220,12 +222,21 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def decimal_from_payload(payload: dict[str, Any], key: str, fallback: Decimal) -> Decimal:
+def decimal_from_payload(
+    payload: dict[str, Any],
+    key: str,
+    fallback: Decimal,
+    allow_zero: bool = False,
+) -> Decimal:
     raw = payload.get(key, str(fallback))
     try:
         value = Decimal(str(raw))
     except InvalidOperation as exc:
         raise BotError(f"{key} must be a valid number") from exc
+    if allow_zero:
+        if value < 0:
+            raise BotError(f"{key} must be at least 0")
+        return value
     if value <= 0:
         raise BotError(f"{key} must be greater than 0")
     return value
@@ -260,6 +271,12 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         base.close_liquidate_minutes,
         1,
     )
+    regime_gap_threshold = decimal_from_payload(
+        payload,
+        "regimeGapThreshold",
+        base.regime_gap_threshold,
+        allow_zero=True,
+    )
     dry_run = bool(payload.get("dryRun", base.dry_run))
 
     return replace(
@@ -268,6 +285,7 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         dry_run=dry_run,
         poll_seconds=poll_seconds,
         close_liquidate_minutes=close_liquidate_minutes,
+        regime_gap_threshold=regime_gap_threshold,
         position_notional=decimal_from_payload(
             payload, "positionNotional", base.position_notional
         ),

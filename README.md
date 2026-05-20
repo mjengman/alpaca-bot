@@ -1,6 +1,6 @@
 # Alpaca Trailing Stop Bot
 
-A small local proof of concept for Alpaca paper trading. It polls one-minute market data, enters a long position when a fast moving average crosses above a slow moving average, and protects any open position with a bot-managed trailing stop that can sell fractional shares.
+A small local proof of concept for Alpaca paper trading. EdgeWalker polls one-minute SOXL market data, classifies the semiconductor regime, routes to one specialist bot, and protects any open position with a bot-managed trailing stop that can sell fractional shares.
 
 ## Quick Start
 
@@ -17,24 +17,29 @@ Do not open `web/index.html` directly unless the server is also running. The pag
 CLI:
 
 ```bash
-python3 bot.py --once
+python3 bot.py --once --edgewalker
 ```
 
 That runs one dry-run cycle using the credentials in `.env`. To run continuously:
 
 ```bash
-python3 bot.py
+python3 bot.py --edgewalker
 ```
+
+Omit `--edgewalker` to run the original single-symbol trailing stop bot.
 
 The checked-in `.env.example` shows the settings. The local `.env` file is ignored by git.
 The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
 
 ## Strategy
 
-- Symbol: `SYMBOL`, default `F`
-- Entry: buy when the fast SMA crosses above the slow SMA
+- Regime source: `SOXL`
+- Regimes: `UPTREND`, `SIDEWAYS`, `DOWNTREND` from fast/slow SMA separation
+- Router: `MomentumBot` trades `SOXL`, `InverseBot` trades `SOXS`, `ChopBot` is a no-trade placeholder
+- Entry: active routed bot may buy when its fast SMA crosses above its slow SMA
 - Position size: market buy by `POSITION_NOTIONAL`, which supports fractional shares through Alpaca notional orders
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
+- Regime flip guard: stale opposite exposure is sold first, with no same-cycle reversal
 - Poll interval: `POLL_SECONDS`, default 60 seconds
 - Closeout guard: sell the full open position inside `CLOSE_LIQUIDATE_MINUTES`, default 5, before Alpaca's reported market close
 - Market data feed: `DATA_FEED=iex`, suitable for free Alpaca market data plans
@@ -45,8 +50,9 @@ The bot defaults to `DRY_RUN=true`, so it will show what it would do without pla
 ## Useful Commands
 
 ```bash
+python3 bot.py --once --edgewalker --dry-run
+python3 bot.py --once --edgewalker --live
 python3 bot.py --once --dry-run
-python3 bot.py --once --live
 python3 bot.py --symbol AAPL --notional 50 --trail-percent 2
 python3 bot.py --symbol F --buy-qty 1 --live
 python3 bot.py --symbol F --sell-qty 1 --live

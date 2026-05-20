@@ -1,6 +1,7 @@
 const state = {
   running: false,
   hydrated: false,
+  logHydrated: false,
   busy: false,
 };
 
@@ -15,6 +16,7 @@ const els = {
   trail: document.querySelector("#trailInput"),
   poll: document.querySelector("#pollInput"),
   closeout: document.querySelector("#closeoutInput"),
+  regimeGap: document.querySelector("#regimeGapInput"),
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
@@ -34,6 +36,7 @@ const settingInputs = [
   els.trail,
   els.poll,
   els.closeout,
+  els.regimeGap,
   els.fast,
   els.slow,
   els.dryRun,
@@ -52,6 +55,7 @@ function payloadFromForm() {
     trailPercent: els.trail.value,
     pollSeconds: els.poll.value,
     closeLiquidateMinutes: els.closeout.value,
+    regimeGapThreshold: els.regimeGap.value,
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: els.dryRun.checked,
@@ -85,11 +89,12 @@ function hydrateForm(data) {
   if (state.hydrated || document.activeElement.tagName === "INPUT") {
     return;
   }
-  els.symbol.value = data.symbol || "F";
+  els.symbol.value = data.symbol || "SOXL";
   els.notional.value = data.position_notional || "25";
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
   els.closeout.value = data.close_liquidate_minutes || "5";
+  els.regimeGap.value = data.regime_gap_threshold || "0.20";
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
   els.dryRun.checked = Boolean(data.dry_run);
@@ -99,6 +104,34 @@ function hydrateForm(data) {
 function renderMode(isDryRun) {
   document.body.classList.toggle("live-paper", !isDryRun);
   els.mode.textContent = isDryRun ? "Dry run" : "Paper live";
+}
+
+function renderLog(data) {
+  const logText =
+    data.activity_log && data.activity_log.length
+      ? data.activity_log.join("\n")
+      : data.last_output && data.last_output.length
+      ? data.last_output.join("\n")
+      : "Waiting for a run.";
+
+  if (els.log.textContent === logText) {
+    return;
+  }
+
+  const previousHeight = els.log.scrollHeight;
+  const previousTop = els.log.scrollTop;
+  const wasNearBottom =
+    previousHeight - previousTop - els.log.clientHeight < 48;
+
+  els.log.textContent = logText;
+
+  if (!state.logHydrated || wasNearBottom) {
+    els.log.scrollTop = els.log.scrollHeight;
+  } else {
+    els.log.scrollTop = previousTop + (els.log.scrollHeight - previousHeight);
+  }
+
+  state.logHydrated = true;
 }
 
 function render(data) {
@@ -126,12 +159,7 @@ function render(data) {
     : "Idle";
   els.cycles.textContent = String(data.cycle_count || 0);
   els.error.textContent = data.last_error || "";
-  els.log.textContent =
-    data.activity_log && data.activity_log.length
-      ? data.activity_log.join("\n")
-      : data.last_output && data.last_output.length
-      ? data.last_output.join("\n")
-      : "Waiting for a run.";
+  renderLog(data);
 }
 
 async function refresh() {

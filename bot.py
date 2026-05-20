@@ -20,6 +20,14 @@ TRADING_BASE_URL_DEFAULT = "https://paper-api.alpaca.markets/v2"
 DATA_BASE_URL_DEFAULT = "https://data.alpaca.markets/v2"
 STATE_PATH_DEFAULT = Path(__file__).resolve().with_name(".bot_state.json")
 FRACTIONAL_QTY_STEP = Decimal("0.000000001")
+SOXL = "SOXL"
+SOXS = "SOXS"
+UPTREND = "UPTREND"
+SIDEWAYS = "SIDEWAYS"
+DOWNTREND = "DOWNTREND"
+MOMENTUM_BOT = "MomentumBot"
+CHOP_BOT = "ChopBot"
+INVERSE_BOT = "InverseBot"
 
 
 class BotError(Exception):
@@ -79,6 +87,7 @@ class BotConfig:
     slow_sma_minutes: int
     poll_seconds: int
     close_liquidate_minutes: int
+    regime_gap_threshold: Decimal
     data_feed: str
     dry_run: bool
 
@@ -112,6 +121,10 @@ class BotConfig:
         if close_liquidate_minutes < 1:
             raise BotError("CLOSE_LIQUIDATE_MINUTES must be at least 1")
 
+        regime_gap_threshold = env_decimal("REGIME_GAP_THRESHOLD", "0.20")
+        if regime_gap_threshold < 0:
+            raise BotError("REGIME_GAP_THRESHOLD must be at least 0")
+
         return cls(
             trading_base_url=os.environ.get(
                 "ALPACA_TRADING_BASE_URL", TRADING_BASE_URL_DEFAULT
@@ -121,13 +134,14 @@ class BotConfig:
             ).rstrip("/"),
             api_key_id=api_key_id,
             api_secret_key=api_secret_key,
-            symbol=os.environ.get("SYMBOL", "F").strip().upper(),
+            symbol=os.environ.get("SYMBOL", SOXL).strip().upper(),
             position_notional=position_notional,
             trail_percent=trail_percent,
             fast_sma_minutes=fast_sma,
             slow_sma_minutes=slow_sma,
             poll_seconds=poll_seconds,
             close_liquidate_minutes=close_liquidate_minutes,
+            regime_gap_threshold=regime_gap_threshold,
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", True),
         )
@@ -347,6 +361,50 @@ def latest_close_prices(bars: list[dict[str, Any]]) -> list[Decimal]:
     return prices
 
 
+@dataclass(frozen=True)
+class SmaSnapshot:
+    symbol: str
+    price: Decimal
+    fast_sma: Decimal
+    slow_sma: Decimal
+    fast_now_values: list[Decimal]
+    fast_prev_values: list[Decimal]
+    slow_now_values: list[Decimal]
+    slow_prev_values: list[Decimal]
+
+    @property
+    def gap_percent(self) -> Decimal:
+        if self.slow_sma == 0:
+            return Decimal("0")
+        return abs(self.fast_sma - self.slow_sma) / self.slow_sma * Decimal("100")
+
+    @property
+    def crossed_above(self) -> bool:
+        return crossed_above(
+            self.fast_now_values,
+            self.fast_prev_values,
+            self.slow_now_values,
+            self.slow_prev_values,
+        )
+
+
+@dataclass(frozen=True)
+class RegimeSignal:
+    source_symbol: str
+    price: Decimal
+    fast_sma: Decimal
+    slow_sma: Decimal
+    gap_percent: Decimal
+    regime: str
+
+
+@dataclass(frozen=True)
+class BotRoute:
+    active_bot: str
+    routed_symbol: str | None
+    allows_entry: bool
+
+
 def parse_clock_time(value: Any, field_name: str) -> datetime | None:
     if not value:
         return None
@@ -370,6 +428,10 @@ def closeout_status(
     seconds_to_close = (next_close - datetime.now(timezone.utc)).total_seconds()
     closeout_due = 0 <= seconds_to_close <= close_liquidate_minutes * 60
     return next_close, seconds_to_close, closeout_due
+
+
+def config_for_symbol(config: BotConfig, symbol: str) -> BotConfig:
+    return BotConfig(**{**config.__dict__, "symbol": symbol})
 
 
 class BotStateStore:
@@ -572,12 +634,7 @@ class TrailingStopBot:
             return None
         return prices[-1]
 
-    def _maybe_enter(self, symbol: str) -> None:
-        asset = self.client.get_asset(symbol)
-        if not asset.get("fractionable"):
-            print(f"{symbol}: asset is not fractionable; no notional entry submitted.")
-            return
-
+    def _sma_snapshot(self, symbol: str) -> SmaSnapshot | None:
         bars_needed = self.config.slow_sma_minutes + 1
         bars = self.client.get_recent_bars(symbol, bars_needed)
         prices = latest_close_prices(bars)
@@ -586,26 +643,39 @@ class TrailingStopBot:
                 f"{symbol}: need {bars_needed} one-minute bars, got {len(prices)}; "
                 "waiting for more data."
             )
-            return
+            return None
 
         fast_now_values = prices[-self.config.fast_sma_minutes :]
         fast_prev_values = prices[-(self.config.fast_sma_minutes + 1) : -1]
         slow_now_values = prices[-self.config.slow_sma_minutes :]
         slow_prev_values = prices[-(self.config.slow_sma_minutes + 1) : -1]
 
-        fast_now = sma(fast_now_values)
-        slow_now = sma(slow_now_values)
-        last_price = prices[-1]
-        has_entry_signal = crossed_above(
-            fast_now_values,
-            fast_prev_values,
-            slow_now_values,
-            slow_prev_values,
+        return SmaSnapshot(
+            symbol=symbol,
+            price=prices[-1],
+            fast_sma=sma(fast_now_values),
+            slow_sma=sma(slow_now_values),
+            fast_now_values=fast_now_values,
+            fast_prev_values=fast_prev_values,
+            slow_now_values=slow_now_values,
+            slow_prev_values=slow_prev_values,
         )
 
+    def _maybe_enter(self, symbol: str) -> None:
+        asset = self.client.get_asset(symbol)
+        if not asset.get("fractionable"):
+            print(f"{symbol}: asset is not fractionable; no notional entry submitted.")
+            return
+
+        snapshot = self._sma_snapshot(symbol)
+        if snapshot is None:
+            return
+
+        has_entry_signal = snapshot.crossed_above
+
         print(
-            f"{symbol}: last={last_price:.4f} "
-            f"fast_sma={fast_now:.4f} slow_sma={slow_now:.4f} "
+            f"{symbol}: last={snapshot.price:.4f} "
+            f"fast_sma={snapshot.fast_sma:.4f} slow_sma={snapshot.slow_sma:.4f} "
             f"entry_signal={has_entry_signal}"
         )
 
@@ -620,9 +690,283 @@ class TrailingStopBot:
         self.client.submit_market_buy(symbol, self.config.position_notional)
 
 
+class RegimeDetector:
+    def __init__(self, config: BotConfig, client: AlpacaClient) -> None:
+        self.config = config
+        self.client = client
+
+    def detect(self) -> tuple[RegimeSignal | None, SmaSnapshot | None]:
+        probe = TrailingStopBot(config_for_symbol(self.config, SOXL), self.client)
+        snapshot = probe._sma_snapshot(SOXL)
+        if snapshot is None:
+            return None, None
+
+        gap_percent = snapshot.gap_percent
+        if gap_percent < self.config.regime_gap_threshold:
+            regime = SIDEWAYS
+        elif snapshot.fast_sma > snapshot.slow_sma:
+            regime = UPTREND
+        else:
+            regime = DOWNTREND
+
+        return (
+            RegimeSignal(
+                source_symbol=SOXL,
+                price=snapshot.price,
+                fast_sma=snapshot.fast_sma,
+                slow_sma=snapshot.slow_sma,
+                gap_percent=gap_percent,
+                regime=regime,
+            ),
+            snapshot,
+        )
+
+
+class RegimeRouter:
+    def route(self, regime: str) -> BotRoute:
+        if regime == UPTREND:
+            return BotRoute(MOMENTUM_BOT, SOXL, True)
+        if regime == DOWNTREND:
+            return BotRoute(INVERSE_BOT, SOXS, True)
+        return BotRoute(CHOP_BOT, None, False)
+
+
+class EdgeWalkerBot:
+    basket_symbols = (SOXL, SOXS)
+
+    def __init__(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+        state_store: BotStateStore | None = None,
+    ) -> None:
+        self.config = config
+        self.client = client
+        self.state_store = state_store or BotStateStore()
+
+    def run_once(self) -> None:
+        clock = self.client.get_clock()
+        account = self.client.get_account()
+        market_open = bool(clock.get("is_open"))
+        next_close, seconds_to_close, closeout_due = closeout_status(
+            clock,
+            self.config.close_liquidate_minutes,
+        )
+        next_close_text = next_close.isoformat(timespec="seconds") if next_close else "unknown"
+        print(
+            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"edgewalker=True market_open={market_open} "
+            f"next_close={next_close_text} "
+            f"buying_power={account.get('buying_power')} "
+            f"portfolio_value={account.get('portfolio_value')}"
+        )
+
+        detector = RegimeDetector(self.config, self.client)
+        signal, soxl_snapshot = detector.detect()
+        if signal is None or soxl_snapshot is None:
+            print("EdgeWalker: no regime decision; entry_signal=False action_taken=wait_for_data")
+            return
+
+        route = RegimeRouter().route(signal.regime)
+        routed_symbol = route.routed_symbol or "NONE"
+        print(
+            f"{SOXL} regime check: price={signal.price:.4f} "
+            f"fast_sma={signal.fast_sma:.4f} slow_sma={signal.slow_sma:.4f} "
+            f"gap={signal.gap_percent:.2f}% threshold={self.config.regime_gap_threshold}%"
+        )
+        print(
+            f"regime={signal.regime} active_bot={route.active_bot} "
+            f"routed_symbol={routed_symbol}"
+        )
+
+        orders = self.client.list_open_orders()
+        positions = {symbol: self.client.get_position(symbol) for symbol in self.basket_symbols}
+
+        if closeout_due:
+            self._liquidate_all_before_close(positions, orders, seconds_to_close)
+            return
+
+        stale_symbol = self._stale_symbol(signal.regime, positions)
+        if stale_symbol:
+            self._close_stale_position(stale_symbol, positions[stale_symbol], orders, signal.regime)
+            return
+
+        if not market_open:
+            print("EdgeWalker: market is closed; entry_signal=False action_taken=no_entry")
+            return
+
+        if not route.allows_entry or route.routed_symbol is None:
+            print("entry_signal=False action_taken=chop_no_trade_placeholder")
+            return
+
+        routed_position = positions.get(route.routed_symbol)
+        routed_orders = [
+            order for order in orders if order.get("symbol") == route.routed_symbol
+        ]
+        routed_bot = TrailingStopBot(
+            config_for_symbol(self.config, route.routed_symbol),
+            self.client,
+            self.state_store,
+        )
+
+        if routed_position:
+            routed_bot._manage_trailing_stop(route.routed_symbol, routed_position, routed_orders)
+            print("entry_signal=False action_taken=manage_open_position")
+            return
+
+        if any(order.get("side") == "buy" for order in routed_orders):
+            print(
+                f"{route.routed_symbol}: buy order already open; "
+                "entry_signal=False action_taken=wait_for_open_order"
+            )
+            return
+
+        entry_signal = self._entry_signal_for_route(route, soxl_snapshot)
+        print(f"entry_signal={entry_signal}")
+        if not entry_signal:
+            print("action_taken=no_entry_signal")
+            return
+
+        asset = self.client.get_asset(route.routed_symbol)
+        if not asset.get("fractionable"):
+            print(
+                f"{route.routed_symbol}: asset is not fractionable; "
+                "action_taken=no_entry"
+            )
+            return
+
+        print(
+            f"{route.active_bot}: submitting ${self.config.position_notional} "
+            f"market buy for {route.routed_symbol}."
+        )
+        self.client.submit_market_buy(route.routed_symbol, self.config.position_notional)
+        print("action_taken=market_buy")
+
+    def _entry_signal_for_route(self, route: BotRoute, soxl_snapshot: SmaSnapshot) -> bool:
+        if route.active_bot == MOMENTUM_BOT:
+            return soxl_snapshot.crossed_above
+
+        if route.active_bot == INVERSE_BOT and route.routed_symbol:
+            inverse_bot = TrailingStopBot(
+                config_for_symbol(self.config, route.routed_symbol),
+                self.client,
+                self.state_store,
+            )
+            snapshot = inverse_bot._sma_snapshot(route.routed_symbol)
+            if snapshot is None:
+                return False
+            print(
+                f"{route.routed_symbol} entry check: price={snapshot.price:.4f} "
+                f"fast_sma={snapshot.fast_sma:.4f} slow_sma={snapshot.slow_sma:.4f}"
+            )
+            return snapshot.crossed_above
+
+        return False
+
+    def _stale_symbol(
+        self,
+        regime: str,
+        positions: dict[str, dict[str, Any] | None],
+    ) -> str | None:
+        held_symbols = [
+            symbol
+            for symbol, position in positions.items()
+            if self._position_qty(position) > 0
+        ]
+        if not held_symbols:
+            return None
+
+        if regime == UPTREND:
+            return SOXS if SOXS in held_symbols else None
+        if regime == DOWNTREND:
+            return SOXL if SOXL in held_symbols else None
+        if SOXL in held_symbols:
+            return SOXL
+        if SOXS in held_symbols:
+            return SOXS
+        return None
+
+    def _position_qty(self, position: dict[str, Any] | None) -> Decimal:
+        if not position:
+            return Decimal("0")
+        return decimal_from_api(position.get("qty"), "position qty")
+
+    def _close_stale_position(
+        self,
+        symbol: str,
+        position: dict[str, Any] | None,
+        orders: list[dict[str, Any]],
+        regime: str,
+    ) -> None:
+        symbol_orders = [order for order in orders if order.get("symbol") == symbol]
+        if any(order.get("side") == "sell" for order in symbol_orders):
+            print(
+                f"{symbol}: regime={regime} stale exposure, sell order already open; "
+                "entry_signal=False action_taken=wait_for_stale_close"
+            )
+            return
+
+        qty = self._position_qty(position).quantize(
+            FRACTIONAL_QTY_STEP,
+            rounding=ROUND_DOWN,
+        )
+        if qty <= 0:
+            print(f"{symbol}: stale exposure not found; entry_signal=False action_taken=noop")
+            return
+
+        print(
+            f"{symbol}: stale exposure under regime={regime}; "
+            f"selling qty={format_decimal(qty)}."
+        )
+        self.client.submit_market_sell_qty(symbol, qty)
+        self.state_store.clear_symbol(symbol)
+        print("entry_signal=False action_taken=close_stale_position_no_same_cycle_reversal")
+
+    def _liquidate_all_before_close(
+        self,
+        positions: dict[str, dict[str, Any] | None],
+        orders: list[dict[str, Any]],
+        seconds_to_close: float | None,
+    ) -> None:
+        minutes_text = "unknown"
+        if seconds_to_close is not None:
+            minutes_text = f"{max(seconds_to_close, 0) / 60:.1f}"
+
+        sold_any = False
+        sell_pending = False
+        for symbol in self.basket_symbols:
+            position = positions.get(symbol)
+            qty = self._position_qty(position)
+            if qty <= 0:
+                continue
+
+            symbol_orders = [order for order in orders if order.get("symbol") == symbol]
+            if any(order.get("side") == "sell" for order in symbol_orders):
+                print(f"{symbol}: closeout window active, sell order already open.")
+                sell_pending = True
+                continue
+
+            qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
+            print(
+                f"{symbol}: market closes in {minutes_text} minutes; "
+                f"selling all shares qty={format_decimal(qty)}."
+            )
+            self.client.submit_market_sell_qty(symbol, qty)
+            self.state_store.clear_symbol(symbol)
+            sold_any = True
+
+        if sold_any:
+            print("entry_signal=False action_taken=market_close_liquidation")
+        elif sell_pending:
+            print("entry_signal=False action_taken=wait_for_closeout_order")
+        else:
+            print("entry_signal=False action_taken=closeout_window_no_position")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Alpaca trailing stop bot POC")
     parser.add_argument("--once", action="store_true", help="Run one polling cycle")
+    parser.add_argument("--edgewalker", action="store_true", help="Run EdgeWalker router")
     parser.add_argument("--symbol", help="Override SYMBOL")
     parser.add_argument("--notional", type=Decimal, help="Override POSITION_NOTIONAL")
     parser.add_argument("--trail-percent", type=Decimal, help="Override TRAIL_PERCENT")
@@ -630,6 +974,11 @@ def parse_args() -> argparse.Namespace:
         "--close-liquidate-minutes",
         type=int,
         help="Override CLOSE_LIQUIDATE_MINUTES",
+    )
+    parser.add_argument(
+        "--regime-gap-threshold",
+        type=Decimal,
+        help="Override REGIME_GAP_THRESHOLD",
     )
     parser.add_argument("--buy-qty", type=Decimal, help="Submit a manual market buy")
     parser.add_argument("--sell-qty", type=Decimal, help="Submit a manual market sell")
@@ -642,17 +991,27 @@ def parse_args() -> argparse.Namespace:
 def apply_arg_overrides(config: BotConfig, args: argparse.Namespace) -> BotConfig:
     updates: dict[str, Any] = {}
     if args.symbol:
-        updates["symbol"] = args.symbol.upper()
-    if args.notional:
+        updates["symbol"] = args.symbol.strip().upper()
+    if args.notional is not None:
+        if args.notional <= 0:
+            raise BotError("POSITION_NOTIONAL must be greater than 0")
         updates["position_notional"] = args.notional
-    if args.trail_percent:
+    if args.trail_percent is not None:
+        if args.trail_percent <= 0:
+            raise BotError("TRAIL_PERCENT must be greater than 0")
         updates["trail_percent"] = args.trail_percent
-    if args.close_liquidate_minutes:
+    if args.close_liquidate_minutes is not None:
+        if args.close_liquidate_minutes < 1:
+            raise BotError("CLOSE_LIQUIDATE_MINUTES must be at least 1")
         updates["close_liquidate_minutes"] = args.close_liquidate_minutes
     if args.dry_run:
         updates["dry_run"] = True
     if args.live:
         updates["dry_run"] = False
+    if args.regime_gap_threshold is not None:
+        if args.regime_gap_threshold < 0:
+            raise BotError("REGIME_GAP_THRESHOLD must be at least 0")
+        updates["regime_gap_threshold"] = args.regime_gap_threshold
 
     if not updates:
         return config
@@ -664,7 +1023,8 @@ def main() -> int:
     load_dotenv(Path(".env"))
     args = parse_args()
     config = apply_arg_overrides(BotConfig.from_env(), args)
-    bot = TrailingStopBot(config, AlpacaClient(config))
+    client = AlpacaClient(config)
+    bot = TrailingStopBot(config, client)
 
     if args.buy_qty and args.sell_qty:
         raise BotError("Use either --buy-qty or --sell-qty, not both")
@@ -686,9 +1046,21 @@ def main() -> int:
                 f"status={result.get('status')}"
             )
     elif args.once:
-        bot.run_once()
+        if args.edgewalker:
+            EdgeWalkerBot(config, client).run_once()
+        else:
+            bot.run_once()
     else:
-        bot.run_forever()
+        if args.edgewalker:
+            print(
+                f"Starting EdgeWalker. dry_run={config.dry_run}, "
+                f"poll_seconds={config.poll_seconds}"
+            )
+            while True:
+                EdgeWalkerBot(config, client).run_once()
+                time.sleep(config.poll_seconds)
+        else:
+            bot.run_forever()
 
     return 0
 
