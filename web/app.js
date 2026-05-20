@@ -5,10 +5,12 @@ const state = {
   busy: false,
 };
 
+const THEME_KEY = "edgewalker-theme";
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
 const els = {
+  themeToggle: document.querySelector("#themeToggle"),
   statusPill: document.querySelector("#statusPill"),
   statusText: document.querySelector("#statusText"),
   symbol: document.querySelector("#symbolInput"),
@@ -43,7 +45,6 @@ const els = {
 };
 
 const settingInputs = [
-  els.symbol,
   els.notional,
   els.trail,
   els.poll,
@@ -52,7 +53,7 @@ const settingInputs = [
   els.fast,
   els.slow,
   els.dryRun,
-];
+].filter(Boolean);
 
 const tooltipBubble = document.createElement("div");
 tooltipBubble.className = "tooltip-bubble";
@@ -62,7 +63,7 @@ document.body.appendChild(tooltipBubble);
 
 function payloadFromForm() {
   return {
-    symbol: els.symbol.value.trim().toUpperCase(),
+    symbol: els.symbol ? els.symbol.value.trim().toUpperCase() : "SOXL",
     positionNotional: els.notional.value,
     trailPercent: els.trail.value,
     pollSeconds: els.poll.value,
@@ -101,7 +102,9 @@ function hydrateForm(data) {
   if (state.hydrated || document.activeElement.tagName === "INPUT") {
     return;
   }
-  els.symbol.value = data.symbol || "SOXL";
+  if (els.symbol) {
+    els.symbol.value = data.symbol || "SOXL";
+  }
   els.notional.value = data.position_notional || "25";
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
@@ -116,6 +119,48 @@ function hydrateForm(data) {
 function renderMode(isDryRun) {
   document.body.classList.toggle("live-paper", !isDryRun);
   els.mode.textContent = isDryRun ? "Dry run" : "Paper live";
+}
+
+function savedTheme() {
+  try {
+    return localStorage.getItem(THEME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveTheme(theme) {
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    return;
+  }
+}
+
+function applyTheme(theme) {
+  const useDark = theme === "dark";
+  document.body.classList.toggle("dark-theme", useDark);
+  if (els.themeToggle) {
+    els.themeToggle.setAttribute("aria-pressed", String(useDark));
+    els.themeToggle.dataset.tooltip = useDark
+      ? "Switch to light mode."
+      : "Switch to dark mode.";
+  }
+}
+
+function setupTheme() {
+  const preferred = window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+  applyTheme(savedTheme() || preferred);
+}
+
+function toggleTheme() {
+  const nextTheme = document.body.classList.contains("dark-theme")
+    ? "light"
+    : "dark";
+  applyTheme(nextTheme);
+  saveTheme(nextTheme);
 }
 
 function numberOrNull(value) {
@@ -385,14 +430,21 @@ els.runOnce.addEventListener("click", () => {
   postAction("/api/run-once");
 });
 
-els.symbol.addEventListener("input", () => {
-  els.symbol.value = els.symbol.value.toUpperCase();
-});
+if (els.symbol) {
+  els.symbol.addEventListener("input", () => {
+    els.symbol.value = els.symbol.value.toUpperCase();
+  });
+}
 
 els.dryRun.addEventListener("change", () => {
   renderMode(els.dryRun.checked);
 });
 
+if (els.themeToggle) {
+  els.themeToggle.addEventListener("click", toggleTheme);
+}
+
+setupTheme();
 setupTooltips();
 refresh();
 setInterval(refresh, 2000);

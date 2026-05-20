@@ -13,18 +13,25 @@
           <p class="eyebrow">Alpaca Paper Trading</p>
           <h1>EdgeWalker</h1>
         </div>
-        <div class="status-pill has-tooltip" id="statusPill" data-tooltip="Shows whether the repeating bot loop is running.">
-          <span class="status-dot"></span>
-          <span id="statusText">Offline</span>
+        <div class="top-actions">
+          <button id="themeToggle" type="button" class="theme-toggle has-tooltip" aria-label="Toggle dark mode" aria-pressed="false" data-tooltip="Switch between light and dark mode.">
+            <span class="theme-icon"></span>
+          </button>
+          <div class="status-pill has-tooltip" id="statusPill" data-tooltip="Shows whether the repeating bot loop is running.">
+            <span class="status-dot"></span>
+            <span id="statusText">Offline</span>
+          </div>
         </div>
       </header>
 
       <section class="panel controls">
         <div class="control-grid">
+          <!-- Signal is fixed to SOXL for the MVP. Bring this field back when we add broader ticker routing.
           <label class="field">
             <span class="has-tooltip" data-tooltip="SOXL is the regime source. EdgeWalker routes between SOXL, SOXS, or no trade.">Signal</span>
             <input id="symbolInput" type="text" value="SOXL" autocomplete="off" aria-label="Signal ticker">
           </label>
+          -->
 
           <label class="field">
             <span class="has-tooltip" data-tooltip="Dollar amount for each entry order. Alpaca uses this to buy fractional shares.">Position $</span>
