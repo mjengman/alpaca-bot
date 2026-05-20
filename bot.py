@@ -78,6 +78,7 @@ class BotConfig:
     fast_sma_minutes: int
     slow_sma_minutes: int
     poll_seconds: int
+    close_liquidate_minutes: int
     data_feed: str
     dry_run: bool
 
@@ -107,6 +108,10 @@ class BotConfig:
         if poll_seconds < 5:
             raise BotError("POLL_SECONDS must be at least 5")
 
+        close_liquidate_minutes = env_int("CLOSE_LIQUIDATE_MINUTES", 5)
+        if close_liquidate_minutes < 1:
+            raise BotError("CLOSE_LIQUIDATE_MINUTES must be at least 1")
+
         return cls(
             trading_base_url=os.environ.get(
                 "ALPACA_TRADING_BASE_URL", TRADING_BASE_URL_DEFAULT
@@ -122,6 +127,7 @@ class BotConfig:
             fast_sma_minutes=fast_sma,
             slow_sma_minutes=slow_sma,
             poll_seconds=poll_seconds,
+            close_liquidate_minutes=close_liquidate_minutes,
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", True),
         )
@@ -341,6 +347,31 @@ def latest_close_prices(bars: list[dict[str, Any]]) -> list[Decimal]:
     return prices
 
 
+def parse_clock_time(value: Any, field_name: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BotError(f"Could not parse Alpaca clock {field_name}: {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def closeout_status(
+    clock: dict[str, Any],
+    close_liquidate_minutes: int,
+) -> tuple[datetime | None, float | None, bool]:
+    next_close = parse_clock_time(clock.get("next_close"), "next_close")
+    if next_close is None:
+        return None, None, False
+
+    seconds_to_close = (next_close - datetime.now(timezone.utc)).total_seconds()
+    closeout_due = 0 <= seconds_to_close <= close_liquidate_minutes * 60
+    return next_close, seconds_to_close, closeout_due
+
+
 class BotStateStore:
     def __init__(self, path: Path = STATE_PATH_DEFAULT) -> None:
         self.path = path
@@ -411,9 +442,15 @@ class TrailingStopBot:
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
+        next_close, seconds_to_close, closeout_due = closeout_status(
+            clock,
+            self.config.close_liquidate_minutes,
+        )
+        next_close_text = next_close.isoformat(timespec="seconds") if next_close else "unknown"
         print(
             f"[{datetime.now().isoformat(timespec='seconds')}] "
             f"market_open={market_open} "
+            f"next_close={next_close_text} "
             f"buying_power={account.get('buying_power')} "
             f"portfolio_value={account.get('portfolio_value')}"
         )
@@ -424,10 +461,25 @@ class TrailingStopBot:
         position = self.client.get_position(symbol)
 
         if position:
+            if closeout_due:
+                self._liquidate_before_close(
+                    symbol,
+                    position,
+                    symbol_orders,
+                    seconds_to_close,
+                )
+                return
             self._manage_trailing_stop(symbol, position, symbol_orders)
             return
 
         self.state_store.clear_symbol(symbol)
+
+        if closeout_due:
+            print(
+                f"{symbol}: inside final {self.config.close_liquidate_minutes} "
+                "minutes before close; no new entry orders will be submitted."
+            )
+            return
 
         if not market_open:
             print(f"{symbol}: market is closed; no new entry orders will be submitted.")
@@ -438,6 +490,33 @@ class TrailingStopBot:
             return
 
         self._maybe_enter(symbol)
+
+    def _liquidate_before_close(
+        self,
+        symbol: str,
+        position: dict[str, Any],
+        symbol_orders: list[dict[str, Any]],
+        seconds_to_close: float | None,
+    ) -> None:
+        if any(order.get("side") == "sell" for order in symbol_orders):
+            print(f"{symbol}: closeout window active, sell order already open.")
+            return
+
+        qty = decimal_from_api(position.get("qty"), "position qty")
+        if qty <= 0:
+            print(f"{symbol}: closeout window active, no long position to sell.")
+            return
+
+        qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
+        minutes_text = "unknown"
+        if seconds_to_close is not None:
+            minutes_text = f"{max(seconds_to_close, 0) / 60:.1f}"
+        print(
+            f"{symbol}: market closes in {minutes_text} minutes; "
+            f"selling all shares qty={format_decimal(qty)}."
+        )
+        self.client.submit_market_sell_qty(symbol, qty)
+        self.state_store.clear_symbol(symbol)
 
     def _manage_trailing_stop(
         self,
@@ -547,6 +626,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", help="Override SYMBOL")
     parser.add_argument("--notional", type=Decimal, help="Override POSITION_NOTIONAL")
     parser.add_argument("--trail-percent", type=Decimal, help="Override TRAIL_PERCENT")
+    parser.add_argument(
+        "--close-liquidate-minutes",
+        type=int,
+        help="Override CLOSE_LIQUIDATE_MINUTES",
+    )
     parser.add_argument("--buy-qty", type=Decimal, help="Submit a manual market buy")
     parser.add_argument("--sell-qty", type=Decimal, help="Submit a manual market sell")
     run_mode = parser.add_mutually_exclusive_group()
@@ -563,6 +647,8 @@ def apply_arg_overrides(config: BotConfig, args: argparse.Namespace) -> BotConfi
         updates["position_notional"] = args.notional
     if args.trail_percent:
         updates["trail_percent"] = args.trail_percent
+    if args.close_liquidate_minutes:
+        updates["close_liquidate_minutes"] = args.close_liquidate_minutes
     if args.dry_run:
         updates["dry_run"] = True
     if args.live:

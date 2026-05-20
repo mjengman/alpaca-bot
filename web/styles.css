@@ -115,7 +115,7 @@ h2 {
 
 .control-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 14px;
 }
 
@@ -316,7 +316,8 @@ button:disabled {
 }
 
 #logOutput {
-  min-height: 220px;
+  height: min(46vh, 520px);
+  min-height: 260px;
   margin: 0;
   padding: 18px;
   overflow: auto;

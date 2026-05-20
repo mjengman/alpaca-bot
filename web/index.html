@@ -42,6 +42,11 @@
           </label>
 
           <label class="field">
+            <span class="has-tooltip" data-tooltip="Minutes before Alpaca's reported market close when the bot will sell the full open position.">Closeout min</span>
+            <input id="closeoutInput" type="number" min="1" step="1" value="5" aria-label="Closeout minutes">
+          </label>
+
+          <label class="field">
             <span class="has-tooltip" data-tooltip="Short moving-average window in one-minute bars. Used for entry timing.">Fast SMA</span>
             <input id="fastInput" type="number" min="2" step="1" value="5" aria-label="Fast SMA">
           </label>
@@ -87,7 +92,7 @@
 
       <section class="panel">
         <div class="section-head">
-          <h2 class="has-tooltip" data-tooltip="Latest account, signal, position, and order-management output from the bot.">Activity</h2>
+          <h2 class="has-tooltip" data-tooltip="Rolling 24-hour account, signal, position, and order-management output from the bot.">Activity</h2>
           <span id="errorText"></span>
         </div>
         <pre id="logOutput">Waiting for a run.</pre>

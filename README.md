@@ -35,6 +35,7 @@ The checked-in `.env.example` shows the settings. The local `.env` file is ignor
 - Position size: market buy by `POSITION_NOTIONAL`, which supports fractional shares through Alpaca notional orders
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
 - Poll interval: `POLL_SECONDS`, default 60 seconds
+- Closeout guard: sell the full open position inside `CLOSE_LIQUIDATE_MINUTES`, default 5, before Alpaca's reported market close
 - Market data feed: `DATA_FEED=iex`, suitable for free Alpaca market data plans
 - Market-hours guard: no fresh entry orders are submitted while Alpaca reports the market is closed
 

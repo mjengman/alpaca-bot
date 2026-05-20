@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = PROJECT_ROOT / "web"
 HOST = "127.0.0.1"
 PORT = 8765
+ACTIVITY_RETENTION = timedelta(days=1)
 
 
 @dataclass
@@ -28,6 +29,7 @@ class RunnerSnapshot:
     symbol: str
     dry_run: bool
     poll_seconds: int
+    close_liquidate_minutes: int
     position_notional: str
     trail_percent: str
     fast_sma_minutes: int
@@ -38,6 +40,7 @@ class RunnerSnapshot:
     last_run_at: str | None
     next_run_at: str | None
     last_output: list[str]
+    activity_log: list[str]
     last_error: str | None
 
 
@@ -54,6 +57,7 @@ class BotRunner:
         self._last_run_at: str | None = None
         self._next_run_at: str | None = None
         self._last_output: list[str] = []
+        self._activity_log: list[tuple[datetime, str]] = []
         self._last_error: str | None = None
 
     def snapshot(self) -> RunnerSnapshot:
@@ -71,6 +75,7 @@ class BotRunner:
             self._last_stopped_at = None
             self._last_error = None
             self._last_output = ["Bot started."]
+            self._append_activity_locked(self._last_output)
             stop_event = threading.Event()
             self._stop_event = stop_event
             self._thread = threading.Thread(
@@ -90,10 +95,12 @@ class BotRunner:
             self._next_run_at = None
             self._last_stopped_at = now_iso()
             self._last_output = ["Bot stopped.", *self._last_output[:39]]
+            self._append_activity_locked(["Bot stopped."])
             return self._snapshot_locked()
 
     def run_once(self, config: BotConfig) -> RunnerSnapshot:
-        self._config = config
+        with self._lock:
+            self._config = config
         self._run_cycle(config)
         return self.snapshot()
 
@@ -133,6 +140,18 @@ class BotRunner:
             self._last_run_at = now_iso()
             self._last_error = error
             self._last_output = lines[-40:] if lines else ["Cycle complete."]
+            self._append_activity_locked(self._last_output)
+
+    def _append_activity_locked(self, lines: list[str]) -> None:
+        now = datetime.now()
+        cutoff = now - ACTIVITY_RETENTION
+        for line in lines:
+            self._activity_log.append((now, line))
+        self._activity_log = [
+            (created_at, line)
+            for created_at, line in self._activity_log
+            if created_at >= cutoff
+        ]
 
     def _snapshot_locked(self) -> RunnerSnapshot:
         return RunnerSnapshot(
@@ -140,6 +159,7 @@ class BotRunner:
             symbol=self._config.symbol,
             dry_run=self._config.dry_run,
             poll_seconds=self._config.poll_seconds,
+            close_liquidate_minutes=self._config.close_liquidate_minutes,
             position_notional=str(self._config.position_notional),
             trail_percent=str(self._config.trail_percent),
             fast_sma_minutes=self._config.fast_sma_minutes,
@@ -150,6 +170,7 @@ class BotRunner:
             last_run_at=self._last_run_at,
             next_run_at=self._next_run_at,
             last_output=self._last_output,
+            activity_log=[line for _, line in self._activity_log],
             last_error=self._last_error,
         )
 
@@ -192,6 +213,12 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         raise BotError("slowSmaMinutes must be greater than fastSmaMinutes")
 
     poll_seconds = int_from_payload(payload, "pollSeconds", base.poll_seconds, 5)
+    close_liquidate_minutes = int_from_payload(
+        payload,
+        "closeLiquidateMinutes",
+        base.close_liquidate_minutes,
+        1,
+    )
     dry_run = bool(payload.get("dryRun", base.dry_run))
 
     return replace(
@@ -199,6 +226,7 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         symbol=symbol,
         dry_run=dry_run,
         poll_seconds=poll_seconds,
+        close_liquidate_minutes=close_liquidate_minutes,
         position_notional=decimal_from_payload(
             payload, "positionNotional", base.position_notional
         ),

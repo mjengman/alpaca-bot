@@ -14,6 +14,7 @@ const els = {
   notional: document.querySelector("#notionalInput"),
   trail: document.querySelector("#trailInput"),
   poll: document.querySelector("#pollInput"),
+  closeout: document.querySelector("#closeoutInput"),
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
@@ -32,6 +33,7 @@ const settingInputs = [
   els.notional,
   els.trail,
   els.poll,
+  els.closeout,
   els.fast,
   els.slow,
   els.dryRun,
@@ -49,6 +51,7 @@ function payloadFromForm() {
     positionNotional: els.notional.value,
     trailPercent: els.trail.value,
     pollSeconds: els.poll.value,
+    closeLiquidateMinutes: els.closeout.value,
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: els.dryRun.checked,
@@ -86,6 +89,7 @@ function hydrateForm(data) {
   els.notional.value = data.position_notional || "25";
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
+  els.closeout.value = data.close_liquidate_minutes || "5";
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
   els.dryRun.checked = Boolean(data.dry_run);
@@ -123,7 +127,9 @@ function render(data) {
   els.cycles.textContent = String(data.cycle_count || 0);
   els.error.textContent = data.last_error || "";
   els.log.textContent =
-    data.last_output && data.last_output.length
+    data.activity_log && data.activity_log.length
+      ? data.activity_log.join("\n")
+      : data.last_output && data.last_output.length
       ? data.last_output.join("\n")
       : "Waiting for a run.";
 }
