@@ -125,7 +125,8 @@ h2 {
 }
 
 .field span,
-.metric span {
+.metric span,
+.decision-panel span {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 800;
@@ -286,6 +287,74 @@ button:disabled {
   margin: 14px 0;
 }
 
+.decision-panel {
+  margin-top: 14px;
+  overflow: hidden;
+}
+
+.decision-lead,
+.decision-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.decision-lead {
+  border-bottom: 1px solid var(--line);
+}
+
+.decision-lead > div,
+.decision-grid > div {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px 18px;
+}
+
+.decision-lead > div:not(:last-child),
+.decision-grid > div:not(:last-child) {
+  border-right: 1px solid var(--line);
+}
+
+.decision-grid {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.decision-grid > div {
+  min-height: 86px;
+}
+
+.decision-panel strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.05rem;
+}
+
+.decision-lead strong {
+  font-size: clamp(1.2rem, 2vw, 1.8rem);
+  line-height: 1.05;
+}
+
+.regime-uptrend {
+  color: var(--green-deep);
+}
+
+.regime-downtrend,
+.is-negative {
+  color: var(--danger);
+}
+
+.regime-sideways {
+  color: var(--amber);
+}
+
+.is-positive {
+  color: var(--green-deep);
+}
+
+.is-neutral {
+  color: var(--ink);
+}
+
 .metric {
   display: grid;
   gap: 8px;
@@ -337,8 +406,16 @@ body.live-paper .metric:first-child {
 
 @media (max-width: 860px) {
   .control-grid,
+  .decision-lead,
+  .decision-grid,
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .decision-lead > div,
+  .decision-grid > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
 }
 
@@ -361,6 +438,8 @@ body.live-paper .metric:first-child {
   }
 
   .control-grid,
+  .decision-lead,
+  .decision-grid,
   .metrics {
     grid-template-columns: 1fr;
   }

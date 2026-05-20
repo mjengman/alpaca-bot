@@ -335,6 +335,12 @@ def decimal_from_api(value: Any, field_name: str) -> Decimal:
         raise BotError(f"Could not parse {field_name} value {value!r}") from exc
 
 
+def optional_decimal_from_api(value: Any, field_name: str) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    return decimal_from_api(value, field_name)
+
+
 def sma(values: list[Decimal]) -> Decimal:
     return sum(values) / Decimal(len(values))
 
@@ -403,6 +409,37 @@ class BotRoute:
     active_bot: str
     routed_symbol: str | None
     allows_entry: bool
+
+
+@dataclass(frozen=True)
+class EdgeWalkerStatus:
+    checked_at: str
+    market_open: bool
+    next_close: str | None
+    buying_power: str | None
+    portfolio_value: str | None
+    cash: str | None
+    day_pl: str | None
+    day_pl_percent: str | None
+    source_symbol: str
+    source_price: str | None
+    fast_sma: str | None
+    slow_sma: str | None
+    gap_percent: str | None
+    regime: str | None
+    active_bot: str | None
+    routed_symbol: str | None
+    entry_signal: bool | None
+    action_taken: str
+    position_symbol: str | None
+    position_qty: str | None
+    position_market_value: str | None
+    position_avg_entry_price: str | None
+    position_unrealized_pl: str | None
+    position_unrealized_pl_percent: str | None
+    position_current_price: str | None
+    high_water_mark: str | None
+    trailing_exit_price: str | None
 
 
 def parse_clock_time(value: Any, field_name: str) -> datetime | None:
@@ -744,7 +781,7 @@ class EdgeWalkerBot:
         self.client = client
         self.state_store = state_store or BotStateStore()
 
-    def run_once(self) -> None:
+    def run_once(self) -> EdgeWalkerStatus:
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
@@ -753,8 +790,9 @@ class EdgeWalkerBot:
             self.config.close_liquidate_minutes,
         )
         next_close_text = next_close.isoformat(timespec="seconds") if next_close else "unknown"
+        checked_at = datetime.now().isoformat(timespec="seconds")
         print(
-            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"[{checked_at}] "
             f"edgewalker=True market_open={market_open} "
             f"next_close={next_close_text} "
             f"buying_power={account.get('buying_power')} "
@@ -765,7 +803,17 @@ class EdgeWalkerBot:
         signal, soxl_snapshot = detector.detect()
         if signal is None or soxl_snapshot is None:
             print("EdgeWalker: no regime decision; entry_signal=False action_taken=wait_for_data")
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                None,
+                None,
+                {},
+                False,
+                "wait_for_data",
+            )
 
         route = RegimeRouter().route(signal.regime)
         routed_symbol = route.routed_symbol or "NONE"
@@ -783,21 +831,66 @@ class EdgeWalkerBot:
         positions = {symbol: self.client.get_position(symbol) for symbol in self.basket_symbols}
 
         if closeout_due:
-            self._liquidate_all_before_close(positions, orders, seconds_to_close)
-            return
+            action_taken = self._liquidate_all_before_close(positions, orders, seconds_to_close)
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                action_taken,
+            )
 
         stale_symbol = self._stale_symbol(signal.regime, positions)
         if stale_symbol:
-            self._close_stale_position(stale_symbol, positions[stale_symbol], orders, signal.regime)
-            return
+            action_taken = self._close_stale_position(
+                stale_symbol,
+                positions[stale_symbol],
+                orders,
+                signal.regime,
+            )
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                action_taken,
+            )
 
         if not market_open:
             print("EdgeWalker: market is closed; entry_signal=False action_taken=no_entry")
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "no_entry",
+            )
 
         if not route.allows_entry or route.routed_symbol is None:
             print("entry_signal=False action_taken=chop_no_trade_placeholder")
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "chop_no_trade_placeholder",
+            )
 
         routed_position = positions.get(route.routed_symbol)
         routed_orders = [
@@ -812,20 +905,50 @@ class EdgeWalkerBot:
         if routed_position:
             routed_bot._manage_trailing_stop(route.routed_symbol, routed_position, routed_orders)
             print("entry_signal=False action_taken=manage_open_position")
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "manage_open_position",
+            )
 
         if any(order.get("side") == "buy" for order in routed_orders):
             print(
                 f"{route.routed_symbol}: buy order already open; "
                 "entry_signal=False action_taken=wait_for_open_order"
             )
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "wait_for_open_order",
+            )
 
         entry_signal = self._entry_signal_for_route(route, soxl_snapshot)
         print(f"entry_signal={entry_signal}")
         if not entry_signal:
             print("action_taken=no_entry_signal")
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "no_entry_signal",
+            )
 
         asset = self.client.get_asset(route.routed_symbol)
         if not asset.get("fractionable"):
@@ -833,7 +956,17 @@ class EdgeWalkerBot:
                 f"{route.routed_symbol}: asset is not fractionable; "
                 "action_taken=no_entry"
             )
-            return
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                True,
+                "no_entry",
+            )
 
         print(
             f"{route.active_bot}: submitting ${self.config.position_notional} "
@@ -841,6 +974,114 @@ class EdgeWalkerBot:
         )
         self.client.submit_market_buy(route.routed_symbol, self.config.position_notional)
         print("action_taken=market_buy")
+        return self._build_status(
+            checked_at,
+            market_open,
+            next_close,
+            account,
+            signal,
+            route,
+            positions,
+            True,
+            "market_buy",
+        )
+
+    def _build_status(
+        self,
+        checked_at: str,
+        market_open: bool,
+        next_close: datetime | None,
+        account: dict[str, Any],
+        signal: RegimeSignal | None,
+        route: BotRoute | None,
+        positions: dict[str, dict[str, Any] | None],
+        entry_signal: bool | None,
+        action_taken: str,
+    ) -> EdgeWalkerStatus:
+        position_symbol, position = self._active_position(positions)
+        high_water_mark = None
+        trailing_exit_price = None
+
+        if position_symbol:
+            high_water_mark = self.state_store.get_high_water_mark(position_symbol)
+            if high_water_mark is not None:
+                trailing_exit_price = high_water_mark * (
+                    Decimal("1") - (self.config.trail_percent / Decimal("100"))
+                )
+
+        day_pl, day_pl_percent = self._account_day_pl(account)
+
+        return EdgeWalkerStatus(
+            checked_at=checked_at,
+            market_open=market_open,
+            next_close=next_close.isoformat(timespec="seconds") if next_close else None,
+            buying_power=self._raw_text(account.get("buying_power")),
+            portfolio_value=self._raw_text(account.get("portfolio_value") or account.get("equity")),
+            cash=self._raw_text(account.get("cash")),
+            day_pl=self._decimal_text(day_pl),
+            day_pl_percent=self._decimal_text(day_pl_percent),
+            source_symbol=SOXL,
+            source_price=self._decimal_text(signal.price if signal else None),
+            fast_sma=self._decimal_text(signal.fast_sma if signal else None),
+            slow_sma=self._decimal_text(signal.slow_sma if signal else None),
+            gap_percent=self._decimal_text(signal.gap_percent if signal else None),
+            regime=signal.regime if signal else None,
+            active_bot=route.active_bot if route else None,
+            routed_symbol=route.routed_symbol if route and route.routed_symbol else None,
+            entry_signal=entry_signal,
+            action_taken=action_taken,
+            position_symbol=position_symbol,
+            position_qty=self._raw_text(position.get("qty")) if position else None,
+            position_market_value=self._raw_text(position.get("market_value")) if position else None,
+            position_avg_entry_price=(
+                self._raw_text(position.get("avg_entry_price")) if position else None
+            ),
+            position_unrealized_pl=(
+                self._raw_text(position.get("unrealized_pl")) if position else None
+            ),
+            position_unrealized_pl_percent=(
+                self._raw_text(position.get("unrealized_plpc")) if position else None
+            ),
+            position_current_price=(
+                self._raw_text(position.get("current_price")) if position else None
+            ),
+            high_water_mark=self._decimal_text(high_water_mark),
+            trailing_exit_price=self._decimal_text(trailing_exit_price),
+        )
+
+    def _active_position(
+        self,
+        positions: dict[str, dict[str, Any] | None],
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        for symbol in self.basket_symbols:
+            position = positions.get(symbol)
+            if self._position_qty(position) > 0:
+                return str(position.get("symbol") or symbol), position
+        return None, None
+
+    def _account_day_pl(self, account: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
+        equity = optional_decimal_from_api(
+            account.get("equity") or account.get("portfolio_value"),
+            "account equity",
+        )
+        last_equity = optional_decimal_from_api(account.get("last_equity"), "last equity")
+        if equity is None or last_equity is None:
+            return None, None
+
+        day_pl = equity - last_equity
+        if last_equity == 0:
+            return day_pl, None
+        return day_pl, day_pl / last_equity * Decimal("100")
+
+    def _raw_text(self, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value)
+
+    def _decimal_text(self, value: Decimal | None) -> str | None:
+        if value is None:
+            return None
+        return format_decimal(value)
 
     def _entry_signal_for_route(self, route: BotRoute, soxl_snapshot: SmaSnapshot) -> bool:
         if route.active_bot == MOMENTUM_BOT:
@@ -897,14 +1138,14 @@ class EdgeWalkerBot:
         position: dict[str, Any] | None,
         orders: list[dict[str, Any]],
         regime: str,
-    ) -> None:
+    ) -> str:
         symbol_orders = [order for order in orders if order.get("symbol") == symbol]
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(
                 f"{symbol}: regime={regime} stale exposure, sell order already open; "
                 "entry_signal=False action_taken=wait_for_stale_close"
             )
-            return
+            return "wait_for_stale_close"
 
         qty = self._position_qty(position).quantize(
             FRACTIONAL_QTY_STEP,
@@ -912,7 +1153,7 @@ class EdgeWalkerBot:
         )
         if qty <= 0:
             print(f"{symbol}: stale exposure not found; entry_signal=False action_taken=noop")
-            return
+            return "noop"
 
         print(
             f"{symbol}: stale exposure under regime={regime}; "
@@ -921,13 +1162,14 @@ class EdgeWalkerBot:
         self.client.submit_market_sell_qty(symbol, qty)
         self.state_store.clear_symbol(symbol)
         print("entry_signal=False action_taken=close_stale_position_no_same_cycle_reversal")
+        return "close_stale_position_no_same_cycle_reversal"
 
     def _liquidate_all_before_close(
         self,
         positions: dict[str, dict[str, Any] | None],
         orders: list[dict[str, Any]],
         seconds_to_close: float | None,
-    ) -> None:
+    ) -> str:
         minutes_text = "unknown"
         if seconds_to_close is not None:
             minutes_text = f"{max(seconds_to_close, 0) / 60:.1f}"
@@ -957,10 +1199,13 @@ class EdgeWalkerBot:
 
         if sold_any:
             print("entry_signal=False action_taken=market_close_liquidation")
+            return "market_close_liquidation"
         elif sell_pending:
             print("entry_signal=False action_taken=wait_for_closeout_order")
+            return "wait_for_closeout_order"
         else:
             print("entry_signal=False action_taken=closeout_window_no_position")
+            return "closeout_window_no_position"
 
 
 def parse_args() -> argparse.Namespace:

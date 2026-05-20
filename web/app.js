@@ -26,6 +26,18 @@ const els = {
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   cycles: document.querySelector("#cycleValue"),
+  regime: document.querySelector("#regimeValue"),
+  activeBot: document.querySelector("#activeBotValue"),
+  routedSymbol: document.querySelector("#routedSymbolValue"),
+  action: document.querySelector("#actionValue"),
+  portfolio: document.querySelector("#portfolioValue"),
+  dayPl: document.querySelector("#dayPlValue"),
+  buyingPower: document.querySelector("#buyingPowerValue"),
+  sourcePrice: document.querySelector("#sourcePriceValue"),
+  gap: document.querySelector("#gapValue"),
+  position: document.querySelector("#positionValue"),
+  positionPl: document.querySelector("#positionPlValue"),
+  trailExit: document.querySelector("#trailExitValue"),
   error: document.querySelector("#errorText"),
   log: document.querySelector("#logOutput"),
 };
@@ -106,6 +118,141 @@ function renderMode(isDryRun) {
   els.mode.textContent = isDryRun ? "Dry run" : "Paper live";
 }
 
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatMoney(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "--";
+  }
+  return parsed.toLocaleString([], {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function formatPrice(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "--";
+  }
+  return `$${parsed.toLocaleString([], {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}`;
+}
+
+function formatPercent(value, { fraction = false } = {}) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "--";
+  }
+  const percent = fraction ? parsed * 100 : parsed;
+  return `${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`;
+}
+
+function formatQty(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return null;
+  }
+  return parsed.toLocaleString([], {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 6,
+  });
+}
+
+function formatLabel(value) {
+  if (!value) {
+    return "--";
+  }
+  const labels = {
+    chop_no_trade_placeholder: "Standing Aside",
+    no_entry_signal: "No Entry Signal",
+    close_stale_position_no_same_cycle_reversal: "Closed Stale Exposure",
+    wait_for_stale_close: "Waiting For Stale Close",
+    manage_open_position: "Managing Position",
+    market_buy: "Market Buy",
+    market_close_liquidation: "Closing Before Bell",
+    closeout_window_no_position: "Flat Into Close",
+    wait_for_closeout_order: "Waiting For Closeout",
+    wait_for_open_order: "Waiting For Buy Order",
+    wait_for_data: "Waiting For Data",
+    no_entry: "No Entry",
+    noop: "No Action",
+  };
+  if (labels[value]) {
+    return labels[value];
+  }
+  return String(value)
+    .replace(/Bot$/, " Bot")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function setTone(element, value) {
+  element.classList.remove("is-positive", "is-negative", "is-neutral");
+  const parsed = numberOrNull(value);
+  if (parsed === null || parsed === 0) {
+    element.classList.add("is-neutral");
+  } else {
+    element.classList.add(parsed > 0 ? "is-positive" : "is-negative");
+  }
+}
+
+function renderDecision(status) {
+  if (!status) {
+    els.regime.textContent = "Waiting";
+    els.activeBot.textContent = "Waiting";
+    els.routedSymbol.textContent = "None";
+    els.action.textContent = "Waiting";
+    return;
+  }
+
+  const regime = status.regime || "Waiting";
+  els.regime.textContent = regime;
+  els.regime.className = `regime-value regime-${regime.toLowerCase()}`;
+  els.activeBot.textContent = formatLabel(status.active_bot);
+  els.routedSymbol.textContent = status.routed_symbol || "None";
+  els.action.textContent = formatLabel(status.action_taken);
+  els.portfolio.textContent = formatMoney(status.portfolio_value);
+  els.buyingPower.textContent = formatMoney(status.buying_power);
+  els.sourcePrice.textContent = formatPrice(status.source_price);
+  els.gap.textContent = formatPercent(status.gap_percent);
+
+  const dayPlText = `${formatMoney(status.day_pl)} ${formatPercent(status.day_pl_percent)}`;
+  els.dayPl.textContent = status.day_pl === null ? "--" : dayPlText;
+  setTone(els.dayPl, status.day_pl);
+
+  if (status.position_symbol && status.position_qty) {
+    const qty = formatQty(status.position_qty) || status.position_qty;
+    const marketValue = formatMoney(status.position_market_value);
+    els.position.textContent = `${status.position_symbol} ${qty} (${marketValue})`;
+  } else {
+    els.position.textContent = "Flat";
+  }
+
+  const positionPlText = `${formatMoney(status.position_unrealized_pl)} ${formatPercent(
+    status.position_unrealized_pl_percent,
+    { fraction: true },
+  )}`;
+  els.positionPl.textContent =
+    status.position_unrealized_pl === null ? "--" : positionPlText;
+  setTone(els.positionPl, status.position_unrealized_pl);
+
+  els.trailExit.textContent = status.trailing_exit_price
+    ? formatPrice(status.trailing_exit_price)
+    : "--";
+}
+
 function renderLog(data) {
   const logText =
     data.activity_log && data.activity_log.length
@@ -159,6 +306,7 @@ function render(data) {
     : "Idle";
   els.cycles.textContent = String(data.cycle_count || 0);
   els.error.textContent = data.last_error || "";
+  renderDecision(data.edgewalker_status);
   renderLog(data);
 }
 

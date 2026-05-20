@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Alpaca Bot</title>
+    <title>EdgeWalker</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
@@ -11,7 +11,7 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">Alpaca Paper Trading</p>
-          <h1>Bot Control</h1>
+          <h1>EdgeWalker</h1>
         </div>
         <div class="status-pill has-tooltip" id="statusPill" data-tooltip="Shows whether the repeating bot loop is running.">
           <span class="status-dot"></span>
@@ -72,6 +72,62 @@
           <div class="button-row">
             <button id="runOnceButton" type="button" class="secondary has-tooltip" data-tooltip="Run one evaluation cycle without starting the repeating loop.">Check now</button>
             <button id="toggleButton" type="button" class="primary has-tooltip" data-tooltip="Start the repeating bot loop with the current settings.">Turn On</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel decision-panel">
+        <div class="decision-lead">
+          <div>
+            <span class="has-tooltip" data-tooltip="Current semiconductor regime detected from SOXL fast/slow SMA separation.">Regime</span>
+            <strong id="regimeValue">Waiting</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="The specialist bot currently allowed to evaluate entries. Only one bot is active per cycle.">Active bot</span>
+            <strong id="activeBotValue">Waiting</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="The symbol the active bot is allowed to trade this cycle. NONE means no entry orders are allowed.">Routed</span>
+            <strong id="routedSymbolValue">None</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Most recent decision or trade-management action from the strategy.">Action</span>
+            <strong id="actionValue">Waiting</strong>
+          </div>
+        </div>
+
+        <div class="decision-grid">
+          <div>
+            <span class="has-tooltip" data-tooltip="Current paper account portfolio value from Alpaca.">Account value</span>
+            <strong id="portfolioValue">--</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Today's account equity change, calculated from Alpaca equity minus last equity when available.">Day P/L</span>
+            <strong id="dayPlValue">--</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Current buying power reported by Alpaca.">Buying power</span>
+            <strong id="buyingPowerValue">--</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Latest SOXL one-minute close used as the regime source price.">SOXL price</span>
+            <strong id="sourcePriceValue">--</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Fast/slow SMA separation used to decide trend versus chop.">SMA gap</span>
+            <strong id="gapValue">--</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Current SOXL/SOXS basket exposure. EdgeWalker should hold at most one.">Position</span>
+            <strong id="positionValue">Flat</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Unrealized P/L on the open basket position when Alpaca reports one.">Position P/L</span>
+            <strong id="positionPlValue">--</strong>
+          </div>
+          <div>
+            <span class="has-tooltip" data-tooltip="Current bot-managed trailing exit price for the open position, if there is one.">Trail exit</span>
+            <strong id="trailExitValue">--</strong>
           </div>
         </div>
       </section>

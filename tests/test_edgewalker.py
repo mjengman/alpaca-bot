@@ -75,13 +75,13 @@ class FakeClient:
 
 
 class EdgeWalkerBotTest(unittest.TestCase):
-    def run_bot(self, client: FakeClient) -> str:
+    def run_bot(self, client: FakeClient) -> tuple[str, Any]:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_store = BotStateStore(Path(tmpdir) / "state.json")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                EdgeWalkerBot(config(), client, state_store).run_once()
-            return output.getvalue()
+                status = EdgeWalkerBot(config(), client, state_store).run_once()
+            return output.getvalue(), status
 
     def test_downtrend_closes_soxl_without_same_cycle_soxs_buy(self) -> None:
         client = FakeClient(
@@ -89,12 +89,17 @@ class EdgeWalkerBotTest(unittest.TestCase):
             {"SOXL": {"qty": "0.25", "avg_entry_price": "100"}},
         )
 
-        output = self.run_bot(client)
+        output, status = self.run_bot(client)
 
         self.assertEqual(client.sells, [("SOXL", Decimal("0.250000000"))])
         self.assertEqual(client.buys, [])
         self.assertIn("regime=DOWNTREND active_bot=InverseBot", output)
         self.assertIn("close_stale_position_no_same_cycle_reversal", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.routed_symbol, "SOXS")
+        self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+        self.assertEqual(status.position_symbol, "SOXL")
 
     def test_confirmed_downtrend_routes_next_cycle_to_soxs(self) -> None:
         client = FakeClient(
@@ -104,12 +109,17 @@ class EdgeWalkerBotTest(unittest.TestCase):
             }
         )
 
-        output = self.run_bot(client)
+        output, status = self.run_bot(client)
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [("SOXS", Decimal("25"))])
         self.assertIn("regime=DOWNTREND active_bot=InverseBot", output)
         self.assertIn("action_taken=market_buy", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.routed_symbol, "SOXS")
+        self.assertEqual(status.entry_signal, True)
+        self.assertEqual(status.action_taken, "market_buy")
 
 
 if __name__ == "__main__":

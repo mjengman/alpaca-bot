@@ -43,6 +43,7 @@ class RunnerSnapshot:
     next_run_at: str | None
     last_output: list[str]
     activity_log: list[str]
+    edgewalker_status: dict[str, Any] | None
     last_error: str | None
 
 
@@ -60,6 +61,7 @@ class BotRunner:
         self._next_run_at: str | None = None
         self._last_output: list[str] = []
         self._activity_log: list[tuple[datetime, str]] = self._load_activity_log()
+        self._edgewalker_status: dict[str, Any] | None = None
         self._last_error: str | None = None
 
     def snapshot(self) -> RunnerSnapshot:
@@ -124,9 +126,11 @@ class BotRunner:
     def _run_cycle(self, config: BotConfig) -> None:
         output = io.StringIO()
         error: str | None = None
+        edgewalker_status: dict[str, Any] | None = None
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                EdgeWalkerBot(config, AlpacaClient(config)).run_once()
+                status = EdgeWalkerBot(config, AlpacaClient(config)).run_once()
+                edgewalker_status = asdict(status)
         except BotError as exc:
             error = str(exc)
         except Exception as exc:  # Keep the local control server alive on surprises.
@@ -141,6 +145,8 @@ class BotRunner:
             self._cycle_count += 1
             self._last_run_at = now_iso()
             self._last_error = error
+            if edgewalker_status:
+                self._edgewalker_status = edgewalker_status
             self._last_output = lines[-40:] if lines else ["Cycle complete."]
             self._append_activity_locked(self._last_output)
 
@@ -214,6 +220,7 @@ class BotRunner:
             next_run_at=self._next_run_at,
             last_output=self._last_output,
             activity_log=[line for _, line in self._activity_log],
+            edgewalker_status=self._edgewalker_status,
             last_error=self._last_error,
         )
 
