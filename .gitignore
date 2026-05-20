@@ -1,5 +1,6 @@
 .env
 .bot_state.json
+.bot_activity.json
 __pycache__/
 *.pyc
 .DS_Store

@@ -27,6 +27,7 @@ python3 bot.py
 ```
 
 The checked-in `.env.example` shows the settings. The local `.env` file is ignored by git.
+The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
 
 ## Strategy
 

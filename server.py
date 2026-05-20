@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = PROJECT_ROOT / "web"
 HOST = "127.0.0.1"
 PORT = 8765
+ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 ACTIVITY_RETENTION = timedelta(days=1)
 
 
@@ -57,7 +58,7 @@ class BotRunner:
         self._last_run_at: str | None = None
         self._next_run_at: str | None = None
         self._last_output: list[str] = []
-        self._activity_log: list[tuple[datetime, str]] = []
+        self._activity_log: list[tuple[datetime, str]] = self._load_activity_log()
         self._last_error: str | None = None
 
     def snapshot(self) -> RunnerSnapshot:
@@ -152,6 +153,46 @@ class BotRunner:
             for created_at, line in self._activity_log
             if created_at >= cutoff
         ]
+        self._save_activity_log()
+
+    def _load_activity_log(self) -> list[tuple[datetime, str]]:
+        if not ACTIVITY_PATH.exists():
+            return []
+
+        try:
+            raw_entries = json.loads(ACTIVITY_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(raw_entries, list):
+            return []
+
+        cutoff = datetime.now() - ACTIVITY_RETENTION
+        entries: list[tuple[datetime, str]] = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            created_at_raw = entry.get("created_at")
+            line = entry.get("line")
+            if not isinstance(created_at_raw, str) or not isinstance(line, str):
+                continue
+            try:
+                created_at = datetime.fromisoformat(created_at_raw)
+            except ValueError:
+                continue
+            if created_at >= cutoff:
+                entries.append((created_at, line))
+        return entries
+
+    def _save_activity_log(self) -> None:
+        payload = [
+            {"created_at": created_at.isoformat(timespec="seconds"), "line": line}
+            for created_at, line in self._activity_log
+        ]
+        ACTIVITY_PATH.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
 
     def _snapshot_locked(self) -> RunnerSnapshot:
         return RunnerSnapshot(
