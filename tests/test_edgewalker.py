@@ -4,6 +4,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -35,6 +36,11 @@ def config() -> BotConfig:
         close_liquidate_minutes=5,
         regime_gap_threshold=Decimal("0.20"),
         chop_entry_discount_percent=Decimal("0.50"),
+        directional_mode="BALANCED",
+        directional_max_extension_percent=Decimal("0.50"),
+        directional_strong_chase_max_extension_percent=Decimal("1.00"),
+        directional_min_strength="MODERATE",
+        directional_cooldown_minutes=5,
         data_feed="iex",
         dry_run=True,
     )
@@ -300,6 +306,75 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
 
+    def test_balanced_inverse_buys_valid_soxs_continuation_without_fresh_cross(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("103", "102", "101"),
+                "SOXS": bars("8.00", "8.10", "8.14"),
+            }
+        )
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [("SOXS", Decimal("25"))])
+        self.assertIn("regime=DOWNTREND active_bot=InverseBot", output)
+        self.assertIn("source_strength=MODERATE", output)
+        self.assertIn("reason=trend_continuation_allowed", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.routed_symbol, "SOXS")
+        self.assertEqual(status.entry_signal, True)
+        self.assertEqual(status.action_taken, "market_buy")
+
+    def test_conservative_inverse_still_requires_fresh_cross(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("103", "102", "101"),
+                "SOXS": bars("8.00", "8.10", "8.14"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), directional_mode="CONSERVATIVE"),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=DOWNTREND active_bot=InverseBot", output)
+        self.assertIn("mode=CONSERVATIVE", output)
+        self.assertIn("reason=mode_requires_fresh_cross", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.routed_symbol, "SOXS")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_directional_min_strength_blocks_weak_downtrend_even_when_aggressive(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "99.5", "99.2"),
+                "SOXS": bars("8.00", "8.10", "8.14"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), directional_mode="AGGRESSIVE"),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=DOWNTREND active_bot=InverseBot", output)
+        self.assertIn("source_strength=WEAK", output)
+        self.assertIn("reason=directional_strength_below_minimum", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.routed_symbol, "SOXS")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
     def test_sideways_closes_momentum_owned_soxl_before_chop_entry(self) -> None:
         client = FakeClient(
             {"SOXL": bars("100", "100", "101", "99")},
@@ -338,6 +413,69 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.regime, "UPTREND")
         self.assertEqual(status.active_bot, "MomentumBot")
         self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+
+    def test_balanced_directional_buys_valid_soxl_continuation_without_fresh_cross(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
+        self.assertIn("regime=UPTREND active_bot=MomentumBot", output)
+        self.assertIn("mode=BALANCED", output)
+        self.assertIn("reason=trend_continuation_allowed", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, True)
+        self.assertEqual(status.action_taken, "market_buy")
+
+    def test_conservative_directional_soxl_still_requires_fresh_cross(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), directional_mode="CONSERVATIVE"),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("mode=CONSERVATIVE", output)
+        self.assertIn("reason=mode_requires_fresh_cross", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_balanced_directional_blocks_absurd_soxl_extension(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "102", "103.2")})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("reason=already_extended_above_fast_sma", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_aggressive_directional_allows_strong_soxl_trend_chase(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "102", "103.2")})
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), directional_mode="AGGRESSIVE"),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
+        self.assertIn("mode=AGGRESSIVE", output)
+        self.assertIn("strength=STRONG", output)
+        self.assertIn("reason=strong_trend_chase_allowed", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, True)
+        self.assertEqual(status.action_taken, "market_buy")
 
     def test_chop_entry_buys_soxl_when_discounted_below_slow_sma(self) -> None:
         client = FakeClient({"SOXL": bars("100", "100", "101", "99")})

@@ -19,6 +19,8 @@ from bot import (
     BotConfig,
     BotError,
     EdgeWalkerBot,
+    DIRECTIONAL_MODES,
+    REGIME_STRENGTHS,
     SOXL,
     SOXS,
     load_dotenv,
@@ -45,6 +47,11 @@ class RunnerSnapshot:
     close_liquidate_minutes: int
     regime_gap_threshold: str
     chop_entry_discount_percent: str
+    directional_mode: str
+    directional_max_extension_percent: str
+    directional_strong_chase_max_extension_percent: str
+    directional_min_strength: str
+    directional_cooldown_minutes: int
     position_notional: str
     trail_percent: str
     fast_sma_minutes: int
@@ -179,42 +186,37 @@ class BotRunner:
                 self._market_idle_logged_for = None
             return False
 
-        now_utc = datetime.now(timezone.utc)
-        next_open_text = None
-        wait_seconds = config.poll_seconds
-        reason = "poll"
-        has_next_open = False
-        if next_open and next_open > now_utc:
-            next_open_text = next_open.isoformat(timespec="seconds")
-            wait_seconds = max((next_open - now_utc).total_seconds(), 1)
-            reason = "market_open"
-            has_next_open = True
+        self._stop_after_market_close(stop_event, next_open)
+        return True
 
-        if not next_open_text:
-            next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
-            next_open_text = next_run.isoformat(timespec="seconds")
+    def _stop_after_market_close(
+        self,
+        stop_event: threading.Event,
+        next_open: datetime | None,
+    ) -> None:
+        next_open_text = (
+            next_open.isoformat(timespec="seconds") if next_open else None
+        )
+        if next_open_text:
+            line = (
+                "Market closed. EdgeWalker switched off; "
+                f"next market open at {next_open_text}."
+            )
+        else:
+            line = "Market closed. EdgeWalker switched off."
 
         with self._lock:
-            if self._stop_event is stop_event and self._running:
-                self._next_run_at = next_open_text
-                self._next_run_reason = reason
-                if self._market_idle_logged_for != next_open_text:
-                    if has_next_open:
-                        line = (
-                            "Market closed. EdgeWalker armed; "
-                            f"next market open at {next_open_text}."
-                        )
-                    else:
-                        line = (
-                            "Market closed. EdgeWalker armed; "
-                            f"next clock check at {next_open_text}."
-                        )
-                    self._last_output = [line]
-                    self._append_activity_locked(self._last_output)
-                    self._market_idle_logged_for = next_open_text
+            if self._stop_event is not stop_event or not self._running:
+                return
 
-        stop_event.wait(wait_seconds)
-        return True
+            stop_event.set()
+            self._running = False
+            self._next_run_at = None
+            self._next_run_reason = None
+            self._market_idle_logged_for = None
+            self._last_stopped_at = now_iso()
+            self._last_output = [line, *self._last_output[:39]]
+            self._append_activity_locked([line])
 
     def _record_scheduler_error(self, config: BotConfig, exc: BotError) -> None:
         next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
@@ -382,6 +384,15 @@ class BotRunner:
             close_liquidate_minutes=self._config.close_liquidate_minutes,
             regime_gap_threshold=str(self._config.regime_gap_threshold),
             chop_entry_discount_percent=str(self._config.chop_entry_discount_percent),
+            directional_mode=self._config.directional_mode,
+            directional_max_extension_percent=str(
+                self._config.directional_max_extension_percent
+            ),
+            directional_strong_chase_max_extension_percent=str(
+                self._config.directional_strong_chase_max_extension_percent
+            ),
+            directional_min_strength=self._config.directional_min_strength,
+            directional_cooldown_minutes=self._config.directional_cooldown_minutes,
             position_notional=str(self._config.position_notional),
             trail_percent=str(self._config.trail_percent),
             fast_sma_minutes=self._config.fast_sma_minutes,
@@ -444,6 +455,13 @@ def _config_log_payload(config: BotConfig) -> dict[str, Any]:
         "close_liquidate_minutes": config.close_liquidate_minutes,
         "regime_gap_threshold": str(config.regime_gap_threshold),
         "chop_entry_discount_percent": str(config.chop_entry_discount_percent),
+        "directional_mode": config.directional_mode,
+        "directional_max_extension_percent": str(config.directional_max_extension_percent),
+        "directional_strong_chase_max_extension_percent": str(
+            config.directional_strong_chase_max_extension_percent
+        ),
+        "directional_min_strength": config.directional_min_strength,
+        "directional_cooldown_minutes": config.directional_cooldown_minutes,
         "data_feed": config.data_feed,
     }
 
@@ -504,8 +522,9 @@ def decimal_from_payload(
     key: str,
     fallback: Decimal,
     allow_zero: bool = False,
+    aliases: tuple[str, ...] = (),
 ) -> Decimal:
-    raw = payload.get(key, str(fallback))
+    raw = payload_value(payload, key, str(fallback), aliases)
     try:
         value = Decimal(str(raw))
     except InvalidOperation as exc:
@@ -519,8 +538,14 @@ def decimal_from_payload(
     return value
 
 
-def int_from_payload(payload: dict[str, Any], key: str, fallback: int, minimum: int) -> int:
-    raw = payload.get(key, fallback)
+def int_from_payload(
+    payload: dict[str, Any],
+    key: str,
+    fallback: int,
+    minimum: int,
+    aliases: tuple[str, ...] = (),
+) -> int:
+    raw = payload_value(payload, key, fallback, aliases)
     try:
         value = int(raw)
     except (TypeError, ValueError) as exc:
@@ -528,6 +553,32 @@ def int_from_payload(payload: dict[str, Any], key: str, fallback: int, minimum: 
     if value < minimum:
         raise BotError(f"{key} must be at least {minimum}")
     return value
+
+
+def choice_from_payload(
+    payload: dict[str, Any],
+    key: str,
+    fallback: str,
+    allowed: set[str],
+    aliases: tuple[str, ...] = (),
+) -> str:
+    value = str(payload_value(payload, key, fallback, aliases)).strip().upper()
+    if value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise BotError(f"{key} must be one of: {choices}")
+    return value
+
+
+def payload_value(
+    payload: dict[str, Any],
+    key: str,
+    fallback: Any,
+    aliases: tuple[str, ...] = (),
+) -> Any:
+    for candidate in (key, *aliases):
+        if candidate in payload:
+            return payload[candidate]
+    return fallback
 
 
 def config_from_payload(payload: dict[str, Any]) -> BotConfig:
@@ -560,6 +611,41 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         base.chop_entry_discount_percent,
         allow_zero=True,
     )
+    directional_mode = choice_from_payload(
+        payload,
+        "directionalMode",
+        base.directional_mode,
+        DIRECTIONAL_MODES,
+        aliases=("momentumMode",),
+    )
+    directional_max_extension_percent = decimal_from_payload(
+        payload,
+        "directionalMaxExtensionPercent",
+        base.directional_max_extension_percent,
+        allow_zero=True,
+        aliases=("momentumMaxExtensionPercent",),
+    )
+    directional_strong_chase_max_extension_percent = decimal_from_payload(
+        payload,
+        "directionalStrongChaseMaxExtensionPercent",
+        base.directional_strong_chase_max_extension_percent,
+        allow_zero=True,
+        aliases=("momentumStrongChaseMaxExtensionPercent",),
+    )
+    directional_min_strength = choice_from_payload(
+        payload,
+        "directionalMinStrength",
+        base.directional_min_strength,
+        REGIME_STRENGTHS,
+        aliases=("momentumMinStrength",),
+    )
+    directional_cooldown_minutes = int_from_payload(
+        payload,
+        "directionalCooldownMinutes",
+        base.directional_cooldown_minutes,
+        0,
+        aliases=("momentumCooldownMinutes",),
+    )
     dry_run = bool(payload.get("dryRun", base.dry_run))
 
     return replace(
@@ -570,6 +656,13 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         close_liquidate_minutes=close_liquidate_minutes,
         regime_gap_threshold=regime_gap_threshold,
         chop_entry_discount_percent=chop_entry_discount_percent,
+        directional_mode=directional_mode,
+        directional_max_extension_percent=directional_max_extension_percent,
+        directional_strong_chase_max_extension_percent=(
+            directional_strong_chase_max_extension_percent
+        ),
+        directional_min_strength=directional_min_strength,
+        directional_cooldown_minutes=directional_cooldown_minutes,
         position_notional=decimal_from_payload(
             payload, "positionNotional", base.position_notional
         ),

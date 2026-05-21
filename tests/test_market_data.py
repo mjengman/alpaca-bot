@@ -25,6 +25,11 @@ def config() -> BotConfig:
         close_liquidate_minutes=5,
         regime_gap_threshold=Decimal("0.20"),
         chop_entry_discount_percent=Decimal("0.50"),
+        directional_mode="BALANCED",
+        directional_max_extension_percent=Decimal("0.50"),
+        directional_strong_chase_max_extension_percent=Decimal("1.00"),
+        directional_min_strength="MODERATE",
+        directional_cooldown_minutes=5,
         data_feed="iex",
         dry_run=True,
     )

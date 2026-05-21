@@ -44,6 +44,41 @@
           </label>
           -->
 
+          <div class="field mode-field">
+            <span
+              class="has-tooltip"
+              data-tooltip="Directional trend participation level for MomentumBot on SOXL and InverseBot on SOXS. Balanced is the default."
+              >Directional mode</span
+            >
+            <div class="segmented-control" role="radiogroup" aria-label="Directional mode">
+              <label>
+                <input
+                  type="radio"
+                  name="directionalMode"
+                  value="CONSERVATIVE"
+                />
+                <span>Conservative</span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="directionalMode"
+                  value="BALANCED"
+                  checked
+                />
+                <span>Balanced</span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="directionalMode"
+                  value="AGGRESSIVE"
+                />
+                <span>Aggressive</span>
+              </label>
+            </div>
+          </div>
+
           <label class="field">
             <span
               class="has-tooltip"
@@ -162,6 +197,77 @@
             />
           </label>
         </div>
+
+        <details class="advanced-settings">
+          <summary
+            class="has-tooltip"
+            data-tooltip="Fine-tune directional trend thresholds without crowding the main controls."
+          >
+            Advanced directional
+          </summary>
+          <div class="advanced-grid">
+            <label class="field">
+              <span
+                class="has-tooltip"
+                data-tooltip="Balanced-mode maximum percent above the traded symbol's fast SMA where a directional bot may enter."
+                >Max ext %</span
+              >
+              <input
+                id="directionalMaxExtensionInput"
+                type="number"
+                min="0"
+                step="0.01"
+                value="0.50"
+                aria-label="Directional max extension percent"
+              />
+            </label>
+            <label class="field">
+              <span
+                class="has-tooltip"
+                data-tooltip="Aggressive-mode maximum percent above the traded symbol's fast SMA for strong directional chase entries."
+                >Chase ext %</span
+              >
+              <input
+                id="directionalStrongChaseInput"
+                type="number"
+                min="0"
+                step="0.01"
+                value="1.00"
+                aria-label="Directional strong chase max extension percent"
+              />
+            </label>
+            <label class="field">
+              <span
+                class="has-tooltip"
+                data-tooltip="Minimum SOXL trend strength required before Balanced or Aggressive directional continuation entries."
+                >Min strength</span
+              >
+              <select
+                id="directionalMinStrengthInput"
+                aria-label="Directional minimum strength"
+              >
+                <option value="WEAK">Weak</option>
+                <option value="MODERATE" selected>Moderate</option>
+                <option value="STRONG">Strong</option>
+              </select>
+            </label>
+            <label class="field">
+              <span
+                class="has-tooltip"
+                data-tooltip="Minutes to wait after a directional entry before allowing that same bot and symbol to enter again."
+                >Cooldown min</span
+              >
+              <input
+                id="directionalCooldownInput"
+                type="number"
+                min="0"
+                step="1"
+                value="5"
+                aria-label="Directional cooldown minutes"
+              />
+            </label>
+          </div>
+        </details>
 
         <div class="switch-row">
           <label class="switch">

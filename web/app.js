@@ -25,6 +25,11 @@ const els = {
   closeout: document.querySelector("#closeoutInput"),
   regimeGap: document.querySelector("#regimeGapInput"),
   chopDiscount: document.querySelector("#chopDiscountInput"),
+  directionalModes: document.querySelectorAll('input[name="directionalMode"]'),
+  directionalMaxExtension: document.querySelector("#directionalMaxExtensionInput"),
+  directionalStrongChase: document.querySelector("#directionalStrongChaseInput"),
+  directionalMinStrength: document.querySelector("#directionalMinStrengthInput"),
+  directionalCooldown: document.querySelector("#directionalCooldownInput"),
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
@@ -61,6 +66,11 @@ const settingInputs = [
   els.closeout,
   els.regimeGap,
   els.chopDiscount,
+  ...els.directionalModes,
+  els.directionalMaxExtension,
+  els.directionalStrongChase,
+  els.directionalMinStrength,
+  els.directionalCooldown,
   els.fast,
   els.slow,
   els.dryRun,
@@ -73,6 +83,8 @@ tooltipBubble.setAttribute("aria-hidden", "true");
 document.body.appendChild(tooltipBubble);
 
 function payloadFromForm() {
+  const selectedDirectionalMode =
+    [...els.directionalModes].find((input) => input.checked)?.value || "BALANCED";
   return {
     symbol: els.symbol ? els.symbol.value.trim().toUpperCase() : "SOXL",
     positionNotional: els.notional.value,
@@ -81,6 +93,11 @@ function payloadFromForm() {
     closeLiquidateMinutes: els.closeout ? els.closeout.value : "5",
     regimeGapThreshold: els.regimeGap.value,
     chopEntryDiscountPercent: els.chopDiscount.value,
+    directionalMode: selectedDirectionalMode,
+    directionalMaxExtensionPercent: els.directionalMaxExtension.value,
+    directionalStrongChaseMaxExtensionPercent: els.directionalStrongChase.value,
+    directionalMinStrength: els.directionalMinStrength.value,
+    directionalCooldownMinutes: els.directionalCooldown.value,
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: els.dryRun.checked,
@@ -156,7 +173,10 @@ function formatNextCheck(data) {
 }
 
 function hydrateForm(data) {
-  if (state.hydrated || document.activeElement.tagName === "INPUT") {
+  if (
+    state.hydrated ||
+    ["INPUT", "SELECT"].includes(document.activeElement.tagName)
+  ) {
     return;
   }
   if (els.symbol) {
@@ -170,6 +190,16 @@ function hydrateForm(data) {
   }
   els.regimeGap.value = data.regime_gap_threshold || "0.20";
   els.chopDiscount.value = data.chop_entry_discount_percent || "0.50";
+  const directionalMode = data.directional_mode || "BALANCED";
+  els.directionalModes.forEach((input) => {
+    input.checked = input.value === directionalMode;
+  });
+  els.directionalMaxExtension.value =
+    data.directional_max_extension_percent || "0.50";
+  els.directionalStrongChase.value =
+    data.directional_strong_chase_max_extension_percent || "1.00";
+  els.directionalMinStrength.value = data.directional_min_strength || "MODERATE";
+  els.directionalCooldown.value = data.directional_cooldown_minutes || "5";
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
   els.dryRun.checked = Boolean(data.dry_run);
@@ -560,6 +590,10 @@ function logToneForLine(line) {
   if (
     lower.includes("regime=uptrend") ||
     lower.includes("[entry] confirmed") ||
+    lower.includes("[entry] approved") ||
+    lower.includes("fresh_cross_confirmed") ||
+    lower.includes("trend_continuation_allowed") ||
+    lower.includes("strong_trend_chase_allowed") ||
     lower.includes("market_buy") ||
     lower.includes("chop exit") ||
     lower.includes("chop_exit") ||
@@ -649,12 +683,12 @@ function render(data) {
   els.statusPill.dataset.tooltip = waitingForOpen
     ? "The bot is armed and will resume when the regular market opens."
     : state.running
-    ? "The repeating bot loop is running during market hours."
+    ? "The repeating bot loop is running. It will switch off after the regular market closes."
     : "The repeating bot loop is stopped.";
   els.toggle.textContent = state.running ? "Turn Off" : "Turn On";
   els.toggle.dataset.tooltip = state.running
     ? "Stop the repeating bot loop after the current cycle."
-    : "Arm the bot. It will run during regular market hours and wait when the market is closed.";
+    : "Start the repeating bot loop. It will switch itself off after the regular market closes.";
   els.toggle.classList.toggle("is-stop", state.running);
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import threading
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from bot import BotConfig
 from server import (
@@ -16,6 +18,7 @@ from server import (
     _cycle_log_record,
     _daily_log_path,
     _format_regime_transition,
+    config_from_payload,
 )
 
 
@@ -34,6 +37,11 @@ def config() -> BotConfig:
         close_liquidate_minutes=5,
         regime_gap_threshold=Decimal("0.20"),
         chop_entry_discount_percent=Decimal("0.50"),
+        directional_mode="BALANCED",
+        directional_max_extension_percent=Decimal("0.50"),
+        directional_strong_chase_max_extension_percent=Decimal("1.00"),
+        directional_min_strength="MODERATE",
+        directional_cooldown_minutes=5,
         data_feed="iex",
         dry_run=True,
     )
@@ -118,6 +126,97 @@ class ServerLoggingTest(unittest.TestCase):
             _format_regime_transition(transition),
             "[REGIME] REGIME CHANGE: SIDEWAYS -> DOWNTREND gap=0.28%",
         )
+
+    def test_runner_switches_off_when_market_is_closed(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        stop_event = threading.Event()
+        runner._lock = threading.Lock()
+        runner._stop_event = stop_event
+        runner._running = True
+        runner._next_run_at = "2026-05-21T20:01:00"
+        runner._next_run_reason = "poll"
+        runner._market_idle_logged_for = "old"
+        runner._last_stopped_at = None
+        runner._last_output = ["previous"]
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+
+        runner._stop_after_market_close(
+            stop_event,
+            datetime(2026, 5, 22, 13, 30, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(stop_event.is_set())
+        self.assertFalse(runner._running)
+        self.assertIsNone(runner._next_run_at)
+        self.assertIsNone(runner._next_run_reason)
+        self.assertIsNone(runner._market_idle_logged_for)
+        self.assertIsNotNone(runner._last_stopped_at)
+        self.assertEqual(
+            runner._last_output[0],
+            "Market closed. EdgeWalker switched off; "
+            "next market open at 2026-05-22T13:30:00+00:00.",
+        )
+        self.assertEqual(
+            [line for _, line in runner._activity_log],
+            [runner._last_output[0]],
+        )
+
+    def test_config_payload_accepts_directional_controls(self) -> None:
+        payload = {
+            "directionalMode": "aggressive",
+            "directionalMaxExtensionPercent": "0.75",
+            "directionalStrongChaseMaxExtensionPercent": "1.25",
+            "directionalMinStrength": "strong",
+            "directionalCooldownMinutes": "3",
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.directional_mode, "AGGRESSIVE")
+        self.assertEqual(parsed.directional_max_extension_percent, Decimal("0.75"))
+        self.assertEqual(
+            parsed.directional_strong_chase_max_extension_percent,
+            Decimal("1.25"),
+        )
+        self.assertEqual(parsed.directional_min_strength, "STRONG")
+        self.assertEqual(parsed.directional_cooldown_minutes, 3)
+
+    def test_config_payload_keeps_legacy_momentum_aliases(self) -> None:
+        payload = {
+            "momentumMode": "balanced",
+            "momentumMaxExtensionPercent": "0.65",
+            "momentumStrongChaseMaxExtensionPercent": "1.10",
+            "momentumMinStrength": "weak",
+            "momentumCooldownMinutes": "2",
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.directional_mode, "BALANCED")
+        self.assertEqual(parsed.directional_max_extension_percent, Decimal("0.65"))
+        self.assertEqual(
+            parsed.directional_strong_chase_max_extension_percent,
+            Decimal("1.10"),
+        )
+        self.assertEqual(parsed.directional_min_strength, "WEAK")
+        self.assertEqual(parsed.directional_cooldown_minutes, 2)
 
 
 if __name__ == "__main__":

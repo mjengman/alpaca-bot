@@ -27,6 +27,28 @@ WARMUP = "WARMUP"
 UPTREND = "UPTREND"
 SIDEWAYS = "SIDEWAYS"
 DOWNTREND = "DOWNTREND"
+DIRECTIONAL_MODE_CONSERVATIVE = "CONSERVATIVE"
+DIRECTIONAL_MODE_BALANCED = "BALANCED"
+DIRECTIONAL_MODE_AGGRESSIVE = "AGGRESSIVE"
+DIRECTIONAL_MODES = {
+    DIRECTIONAL_MODE_CONSERVATIVE,
+    DIRECTIONAL_MODE_BALANCED,
+    DIRECTIONAL_MODE_AGGRESSIVE,
+}
+REGIME_STRENGTH_RANGE = "RANGE"
+REGIME_STRENGTH_WEAK = "WEAK"
+REGIME_STRENGTH_MODERATE = "MODERATE"
+REGIME_STRENGTH_STRONG = "STRONG"
+REGIME_STRENGTHS = {
+    REGIME_STRENGTH_WEAK,
+    REGIME_STRENGTH_MODERATE,
+    REGIME_STRENGTH_STRONG,
+}
+REGIME_STRENGTH_ORDER = {
+    REGIME_STRENGTH_WEAK: 1,
+    REGIME_STRENGTH_MODERATE: 2,
+    REGIME_STRENGTH_STRONG: 3,
+}
 MOMENTUM_BOT = "MomentumBot"
 CHOP_BOT = "ChopBot"
 INVERSE_BOT = "InverseBot"
@@ -99,6 +121,11 @@ class BotConfig:
     close_liquidate_minutes: int
     regime_gap_threshold: Decimal
     chop_entry_discount_percent: Decimal
+    directional_mode: str
+    directional_max_extension_percent: Decimal
+    directional_strong_chase_max_extension_percent: Decimal
+    directional_min_strength: str
+    directional_cooldown_minutes: int
     data_feed: str
     dry_run: bool
 
@@ -140,6 +167,45 @@ class BotConfig:
         if chop_entry_discount_percent < 0:
             raise BotError("CHOP_ENTRY_DISCOUNT_PERCENT must be at least 0")
 
+        directional_mode = os.environ.get(
+            "DIRECTIONAL_MODE",
+            os.environ.get("MOMENTUM_MODE", DIRECTIONAL_MODE_BALANCED),
+        ).strip().upper()
+        if directional_mode not in DIRECTIONAL_MODES:
+            raise BotError(
+                "DIRECTIONAL_MODE must be CONSERVATIVE, BALANCED, or AGGRESSIVE"
+            )
+
+        directional_max_extension_percent = env_decimal(
+            "DIRECTIONAL_MAX_EXTENSION_PERCENT",
+            os.environ.get("MOMENTUM_MAX_EXTENSION_PERCENT", "0.50"),
+        )
+        if directional_max_extension_percent < 0:
+            raise BotError("DIRECTIONAL_MAX_EXTENSION_PERCENT must be at least 0")
+
+        directional_strong_chase_max_extension_percent = env_decimal(
+            "DIRECTIONAL_STRONG_CHASE_MAX_EXTENSION_PERCENT",
+            os.environ.get("MOMENTUM_STRONG_CHASE_MAX_EXTENSION_PERCENT", "1.00"),
+        )
+        if directional_strong_chase_max_extension_percent < 0:
+            raise BotError(
+                "DIRECTIONAL_STRONG_CHASE_MAX_EXTENSION_PERCENT must be at least 0"
+            )
+
+        directional_min_strength = os.environ.get(
+            "DIRECTIONAL_MIN_STRENGTH",
+            os.environ.get("MOMENTUM_MIN_STRENGTH", REGIME_STRENGTH_MODERATE),
+        ).strip().upper()
+        if directional_min_strength not in REGIME_STRENGTHS:
+            raise BotError("DIRECTIONAL_MIN_STRENGTH must be WEAK, MODERATE, or STRONG")
+
+        directional_cooldown_minutes = env_int(
+            "DIRECTIONAL_COOLDOWN_MINUTES",
+            env_int("MOMENTUM_COOLDOWN_MINUTES", 5),
+        )
+        if directional_cooldown_minutes < 0:
+            raise BotError("DIRECTIONAL_COOLDOWN_MINUTES must be at least 0")
+
         return cls(
             trading_base_url=os.environ.get(
                 "ALPACA_TRADING_BASE_URL", TRADING_BASE_URL_DEFAULT
@@ -158,6 +224,13 @@ class BotConfig:
             close_liquidate_minutes=close_liquidate_minutes,
             regime_gap_threshold=regime_gap_threshold,
             chop_entry_discount_percent=chop_entry_discount_percent,
+            directional_mode=directional_mode,
+            directional_max_extension_percent=directional_max_extension_percent,
+            directional_strong_chase_max_extension_percent=(
+                directional_strong_chase_max_extension_percent
+            ),
+            directional_min_strength=directional_min_strength,
+            directional_cooldown_minutes=directional_cooldown_minutes,
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", True),
         )
@@ -669,9 +742,27 @@ class BotStateStore:
             del trailing[symbol]
             self._write(data)
 
+    def get_last_entry_at(self, bot_name: str, symbol: str) -> datetime | None:
+        data = self._read()
+        raw = data.get("entries", {}).get(bot_name, {}).get(symbol)
+        return parse_market_timestamp(raw)
+
+    def set_last_entry_at(
+        self,
+        bot_name: str,
+        symbol: str,
+        value: datetime | None = None,
+    ) -> None:
+        data = self._read()
+        entries = data.setdefault("entries", {})
+        bot_entries = entries.setdefault(bot_name, {})
+        timestamp = value or datetime.now(timezone.utc)
+        bot_entries[symbol] = timestamp.astimezone(timezone.utc).isoformat()
+        self._write(data)
+
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"trailing": {}}
+            return {"trailing": {}, "entries": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -679,6 +770,7 @@ class BotStateStore:
         if not isinstance(data, dict):
             raise BotError(f"Invalid bot state file {self.path}")
         data.setdefault("trailing", {})
+        data.setdefault("entries", {})
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -1269,13 +1361,15 @@ class EdgeWalkerBot:
         entry_signal = entry_decision.signal
         print(
             f"[ENTRY] {route.active_bot} check: "
-            f"entry_signal={entry_signal} reason={entry_decision.reason}"
+            f"entry_signal={entry_signal} reason={entry_decision.reason} "
+            f"mode={self._directional_mode_for_route(route)}"
         )
         print(f"entry_signal={entry_signal}")
         if not entry_signal:
             print(
                 f"[ENTRY] BLOCKED bot={route.active_bot} "
-                f"symbol={route.routed_symbol} reason={entry_decision.reason}"
+                f"symbol={route.routed_symbol} reason={entry_decision.reason} "
+                f"mode={self._directional_mode_for_route(route)}"
             )
             print("action_taken=no_entry_signal")
             return self._build_status(
@@ -1311,8 +1405,9 @@ class EdgeWalkerBot:
             )
 
         print(
-            f"[ENTRY] CONFIRMED bot={route.active_bot} "
-            f"symbol={route.routed_symbol} reason={entry_decision.reason}"
+            f"[ENTRY] APPROVED bot={route.active_bot} "
+            f"symbol={route.routed_symbol} reason={entry_decision.reason} "
+            f"mode={self._directional_mode_for_route(route)}"
         )
         print(
             f"[TRADE] {route.active_bot}: submitting ${self.config.position_notional} "
@@ -1321,6 +1416,7 @@ class EdgeWalkerBot:
         self.client.submit_market_buy(route.routed_symbol, self.config.position_notional)
         if not self.config.dry_run:
             self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
+            self.state_store.set_last_entry_at(route.active_bot, route.routed_symbol)
         print("action_taken=market_buy")
         return self._build_status(
             checked_at,
@@ -1480,14 +1576,23 @@ class EdgeWalkerBot:
         return format_decimal(value)
 
     def _regime_strength(self, signal: RegimeSignal) -> str:
+        return self._strength_for_gap(signal.regime, signal.gap_percent)
+
+    def _strength_for_gap(self, regime: str, gap_percent: Decimal) -> str:
         threshold = self.config.regime_gap_threshold
-        if signal.regime == SIDEWAYS or threshold <= 0:
-            return "RANGE"
-        if signal.gap_percent < threshold * Decimal("1.5"):
-            return "WEAK"
-        if signal.gap_percent < threshold * Decimal("3"):
-            return "MODERATE"
-        return "STRONG"
+        if regime == SIDEWAYS or threshold <= 0:
+            return REGIME_STRENGTH_RANGE
+        if gap_percent < threshold * Decimal("1.5"):
+            return REGIME_STRENGTH_WEAK
+        if gap_percent < threshold * Decimal("3"):
+            return REGIME_STRENGTH_MODERATE
+        return REGIME_STRENGTH_STRONG
+
+    def _strength_meets_minimum(self, strength: str) -> bool:
+        return REGIME_STRENGTH_ORDER.get(strength, 0) >= REGIME_STRENGTH_ORDER.get(
+            self.config.directional_min_strength,
+            REGIME_STRENGTH_ORDER[REGIME_STRENGTH_MODERATE],
+        )
 
     def _market_data_status(self, symbol: str) -> dict[str, Any]:
         if self.market_data is None:
@@ -1668,19 +1773,24 @@ class EdgeWalkerBot:
             return "<1s"
         return f"{round(seconds)}s"
 
+    def _directional_mode_for_route(self, route: BotRoute) -> str:
+        if route.active_bot in {MOMENTUM_BOT, INVERSE_BOT}:
+            return self.config.directional_mode
+        return "NA"
+
     def _entry_decision_for_route(
         self,
         route: BotRoute,
         soxl_snapshot: SmaSnapshot,
     ) -> EntryDecision:
         if route.active_bot == MOMENTUM_BOT:
-            if soxl_snapshot.crossed_above:
-                return EntryDecision(True, "fresh_cross_confirmed")
-            if soxl_snapshot.price > soxl_snapshot.fast_sma * Decimal("1.005"):
-                return EntryDecision(False, "already_extended_above_fast_sma")
-            if soxl_snapshot.price < soxl_snapshot.fast_sma:
-                return EntryDecision(False, "trend_strength_weakening")
-            return EntryDecision(False, "no_fresh_cross")
+            snapshot = self._directional_entry_snapshot(SOXL, soxl_snapshot)
+            return self._directional_entry_decision(
+                bot_name=MOMENTUM_BOT,
+                symbol=SOXL,
+                snapshot=snapshot,
+                source_strength=self._strength_for_gap(UPTREND, soxl_snapshot.gap_percent),
+            )
 
         if route.active_bot == CHOP_BOT:
             if soxl_snapshot.slow_sma == 0:
@@ -1714,26 +1824,120 @@ class EdgeWalkerBot:
             return EntryDecision(entry_signal, reason)
 
         if route.active_bot == INVERSE_BOT and route.routed_symbol:
-            inverse_bot = TrailingStopBot(
-                config_for_symbol(self.config, route.routed_symbol),
-                self.client,
-                self.state_store,
-                self.market_data,
-            )
-            snapshot = inverse_bot._sma_snapshot(route.routed_symbol)
+            snapshot = self._directional_entry_snapshot(route.routed_symbol)
             if snapshot is None:
                 return EntryDecision(False, "inverse_confirmation_missing")
-            print(
-                f"[ENTRY] {route.routed_symbol} entry check: price={snapshot.price:.4f} "
-                f"fast_sma={snapshot.fast_sma:.4f} slow_sma={snapshot.slow_sma:.4f}"
+            return self._directional_entry_decision(
+                bot_name=INVERSE_BOT,
+                symbol=route.routed_symbol,
+                snapshot=snapshot,
+                source_strength=self._strength_for_gap(
+                    DOWNTREND,
+                    soxl_snapshot.gap_percent,
+                ),
             )
-            if snapshot.crossed_above:
-                return EntryDecision(True, "inverse_momentum_confirmed")
-            if snapshot.fast_sma <= snapshot.slow_sma or snapshot.price < snapshot.fast_sma:
-                return EntryDecision(False, "soxs_momentum_weak")
-            return EntryDecision(False, "inverse_confirmation_missing")
 
         return EntryDecision(False, "route_not_supported")
+
+    def _directional_entry_decision(
+        self,
+        bot_name: str,
+        symbol: str,
+        snapshot: SmaSnapshot,
+        source_strength: str,
+    ) -> EntryDecision:
+        cooldown_active, cooldown_remaining = self._directional_cooldown_status(
+            bot_name,
+            symbol,
+        )
+        extension_percent = self._extension_above_fast_sma(snapshot)
+        symbol_strength = self._strength_for_gap(UPTREND, snapshot.gap_percent)
+        print(
+            f"[ENTRY] {bot_name} entry check: symbol={symbol} "
+            f"price={snapshot.price:.4f} fast_sma={snapshot.fast_sma:.4f} "
+            f"slow_sma={snapshot.slow_sma:.4f} "
+            f"source_strength={source_strength} symbol_strength={symbol_strength} "
+            f"extension={extension_percent:.2f}% "
+            f"max_extension={self.config.directional_max_extension_percent}% "
+            f"chase_max={self.config.directional_strong_chase_max_extension_percent}% "
+            f"min_strength={self.config.directional_min_strength} "
+            f"mode={self.config.directional_mode} "
+            f"crossed_above={snapshot.crossed_above}"
+        )
+
+        if cooldown_active:
+            return EntryDecision(
+                False,
+                f"directional_cooldown_active_{cooldown_remaining}m",
+            )
+        if snapshot.crossed_above:
+            return EntryDecision(True, "fresh_cross_confirmed")
+        if self.config.directional_mode == DIRECTIONAL_MODE_CONSERVATIVE:
+            return EntryDecision(False, "mode_requires_fresh_cross")
+        if not self._strength_meets_minimum(source_strength):
+            return EntryDecision(False, "directional_strength_below_minimum")
+        if snapshot.fast_sma <= snapshot.slow_sma:
+            return EntryDecision(False, self._directional_weak_reason(bot_name))
+        if snapshot.price < snapshot.slow_sma:
+            return EntryDecision(False, self._directional_weak_reason(bot_name))
+        if extension_percent <= self.config.directional_max_extension_percent:
+            return EntryDecision(True, "trend_continuation_allowed")
+        if (
+            self.config.directional_mode == DIRECTIONAL_MODE_AGGRESSIVE
+            and source_strength == REGIME_STRENGTH_STRONG
+            and extension_percent
+            <= self.config.directional_strong_chase_max_extension_percent
+        ):
+            return EntryDecision(True, "strong_trend_chase_allowed")
+        return EntryDecision(False, "already_extended_above_fast_sma")
+
+    def _directional_weak_reason(self, bot_name: str) -> str:
+        if bot_name == INVERSE_BOT:
+            return "soxs_momentum_weak"
+        return "trend_strength_weakening"
+
+    def _directional_entry_snapshot(
+        self,
+        symbol: str,
+        fallback: SmaSnapshot | None = None,
+    ) -> SmaSnapshot | None:
+        probe = TrailingStopBot(
+            config_for_symbol(self.config, symbol),
+            self.client,
+            self.state_store,
+            self.market_data,
+        )
+        snapshot = probe._sma_snapshot(symbol, require_cross_context=True)
+        if snapshot is not None:
+            return snapshot
+        if fallback is not None:
+            return fallback
+        return probe._sma_snapshot(symbol, require_cross_context=False)
+
+    def _extension_above_fast_sma(self, snapshot: SmaSnapshot) -> Decimal:
+        if snapshot.fast_sma == 0:
+            return Decimal("0")
+        return (snapshot.price - snapshot.fast_sma) / snapshot.fast_sma * Decimal("100")
+
+    def _directional_cooldown_status(self, bot_name: str, symbol: str) -> tuple[bool, int]:
+        cooldown_minutes = self.config.directional_cooldown_minutes
+        if cooldown_minutes <= 0:
+            return False, 0
+
+        last_entry_at = self.state_store.get_last_entry_at(bot_name, symbol)
+        if last_entry_at is None:
+            return False, 0
+
+        elapsed_seconds = age_seconds(last_entry_at)
+        if elapsed_seconds is None:
+            return False, 0
+
+        cooldown_seconds = cooldown_minutes * 60
+        if elapsed_seconds >= cooldown_seconds:
+            return False, 0
+
+        remaining = int((cooldown_seconds - elapsed_seconds + 59) // 60)
+        return True, max(remaining, 1)
 
     def _stale_symbol(
         self,

@@ -71,7 +71,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -255,7 +256,105 @@ body.dark-theme .theme-icon {
   transform: translateY(0);
 }
 
-.field input {
+.mode-field {
+  grid-column: 1 / -1;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: min(100%, 520px);
+  min-height: 42px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input);
+}
+
+.segmented-control label {
+  position: relative;
+  cursor: pointer;
+}
+
+.segmented-control label:not(:last-child) {
+  border-right: 1px solid var(--line);
+}
+
+.segmented-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented-control span {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: none;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.segmented-control input:checked + span {
+  background: var(--green);
+  color: #ffffff;
+}
+
+.segmented-control input:focus-visible + span {
+  box-shadow: inset 0 0 0 3px rgba(31, 122, 77, 0.2);
+}
+
+.segmented-control input:disabled + span {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.advanced-settings {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.advanced-settings summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 900;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.advanced-settings summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-settings summary::after {
+  content: "v";
+  font-size: 0.72rem;
+  transform: translateY(-1px);
+}
+
+.advanced-settings[open] summary::after {
+  content: "^";
+}
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.field input,
+.field select {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line);
@@ -266,12 +365,18 @@ body.dark-theme .theme-icon {
   outline: none;
 }
 
-.field input:focus {
+.field select {
+  appearance: none;
+}
+
+.field input:focus,
+.field select:focus {
   border-color: var(--green);
   box-shadow: 0 0 0 3px rgba(31, 122, 77, 0.16);
 }
 
-.field input:disabled {
+.field input:disabled,
+.field select:disabled {
   color: var(--muted);
   background: var(--input-disabled);
 }
