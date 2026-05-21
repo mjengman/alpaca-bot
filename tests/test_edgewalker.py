@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from bot import BotConfig, BotStateStore, EdgeWalkerBot
+from bot import AlpacaClient, BotConfig, BotStateStore, EdgeWalkerBot
 
 
 def config() -> BotConfig:
@@ -26,6 +26,7 @@ def config() -> BotConfig:
         poll_seconds=60,
         close_liquidate_minutes=5,
         regime_gap_threshold=Decimal("0.20"),
+        chop_entry_discount_percent=Decimal("0.50"),
         data_feed="iex",
         dry_run=True,
     )
@@ -75,12 +76,23 @@ class FakeClient:
 
 
 class EdgeWalkerBotTest(unittest.TestCase):
-    def run_bot(self, client: FakeClient) -> tuple[str, Any]:
+    def run_bot(
+        self,
+        client: FakeClient,
+        setup_state: Any | None = None,
+        bot_config: BotConfig | None = None,
+    ) -> tuple[str, Any]:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_store = BotStateStore(Path(tmpdir) / "state.json")
+            if setup_state:
+                setup_state(state_store)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                status = EdgeWalkerBot(config(), client, state_store).run_once()
+                status = EdgeWalkerBot(
+                    bot_config or config(),
+                    client,
+                    state_store,
+                ).run_once()
             return output.getvalue(), status
 
     def test_downtrend_closes_soxl_without_same_cycle_soxs_buy(self) -> None:
@@ -120,6 +132,93 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.routed_symbol, "SOXS")
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_sideways_closes_momentum_owned_soxl_before_chop_entry(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "101", "99")},
+            {"SOXL": {"qty": "0.25", "avg_entry_price": "100"}},
+        )
+
+        output, status = self.run_bot(
+            client,
+            lambda state: state.set_position_owner("SOXL", "MomentumBot"),
+        )
+
+        self.assertEqual(client.sells, [("SOXL", Decimal("0.250000000"))])
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
+        self.assertIn("owner=MomentumBot active_bot=ChopBot", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, "ChopBot")
+        self.assertEqual(status.routed_symbol, "SOXL")
+        self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+
+    def test_uptrend_closes_chop_owned_soxl_before_momentum_entry(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "102", "103")},
+            {"SOXL": {"qty": "0.25", "avg_entry_price": "100"}},
+        )
+
+        output, status = self.run_bot(
+            client,
+            lambda state: state.set_position_owner("SOXL", "ChopBot"),
+        )
+
+        self.assertEqual(client.sells, [("SOXL", Decimal("0.250000000"))])
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=UPTREND active_bot=MomentumBot", output)
+        self.assertIn("owner=ChopBot active_bot=MomentumBot", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+
+    def test_chop_entry_buys_soxl_when_discounted_below_slow_sma(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "100", "101", "99")})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
+        self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
+        self.assertIn("ChopBot entry check:", output)
+        self.assertIn("entry_signal=True", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, "ChopBot")
+        self.assertEqual(status.routed_symbol, "SOXL")
+        self.assertEqual(status.entry_signal, True)
+        self.assertEqual(status.action_taken, "market_buy")
+
+    def test_chop_exit_sells_when_price_reclaims_slow_sma(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "99", "101")},
+            {"SOXL": {"qty": "0.25", "avg_entry_price": "100"}},
+        )
+
+        output, status = self.run_bot(
+            client,
+            lambda state: state.set_position_owner("SOXL", "ChopBot"),
+        )
+
+        self.assertEqual(client.sells, [("SOXL", Decimal("0.250000000"))])
+        self.assertEqual(client.buys, [])
+        self.assertIn("ChopBot exit check:", output)
+        self.assertIn("reclaim=True", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, "ChopBot")
+        self.assertEqual(status.routed_symbol, "SOXL")
+        self.assertEqual(status.action_taken, "chop_exit_reclaim_slow_sma")
+
+
+class AlpacaClientTest(unittest.TestCase):
+    def test_recent_bars_handles_null_after_hours_response(self) -> None:
+        client = AlpacaClient(config())
+        client._data_request = lambda *_args, **_kwargs: {
+            "bars": None,
+            "next_page_token": None,
+            "symbol": "SOXL",
+        }
+
+        self.assertEqual(client.get_recent_bars("SOXL", 3), [])
 
 
 if __name__ == "__main__":

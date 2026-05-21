@@ -2,10 +2,13 @@ const state = {
   running: false,
   hydrated: false,
   logHydrated: false,
+  logCollapsed: false,
+  logText: "",
   busy: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
+const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
@@ -19,6 +22,7 @@ const els = {
   poll: document.querySelector("#pollInput"),
   closeout: document.querySelector("#closeoutInput"),
   regimeGap: document.querySelector("#regimeGapInput"),
+  chopDiscount: document.querySelector("#chopDiscountInput"),
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
@@ -41,6 +45,8 @@ const els = {
   positionPl: document.querySelector("#positionPlValue"),
   trailExit: document.querySelector("#trailExitValue"),
   error: document.querySelector("#errorText"),
+  activityPanel: document.querySelector("#activityPanel"),
+  activityToggle: document.querySelector("#activityToggle"),
   log: document.querySelector("#logOutput"),
 };
 
@@ -50,6 +56,7 @@ const settingInputs = [
   els.poll,
   els.closeout,
   els.regimeGap,
+  els.chopDiscount,
   els.fast,
   els.slow,
   els.dryRun,
@@ -67,8 +74,9 @@ function payloadFromForm() {
     positionNotional: els.notional.value,
     trailPercent: els.trail.value,
     pollSeconds: els.poll.value,
-    closeLiquidateMinutes: els.closeout.value,
+    closeLiquidateMinutes: els.closeout ? els.closeout.value : "5",
     regimeGapThreshold: els.regimeGap.value,
+    chopEntryDiscountPercent: els.chopDiscount.value,
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: els.dryRun.checked,
@@ -98,6 +106,51 @@ function formatTime(value, fallback) {
   });
 }
 
+function formatCountdown(value) {
+  if (!value) {
+    return "soon";
+  }
+  const target = new Date(value).getTime();
+  if (!Number.isFinite(target)) {
+    return "soon";
+  }
+
+  const totalSeconds = Math.max(0, Math.ceil((target - Date.now()) / 1000));
+  if (totalSeconds <= 0) {
+    return "now";
+  }
+
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h ${minutes}m`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function formatNextCheck(data) {
+  if (!state.running) {
+    return "Idle";
+  }
+  if (!data.next_run_at) {
+    return "Queued";
+  }
+  if (data.next_run_reason === "market_open") {
+    const countdown = formatCountdown(data.next_run_at);
+    return countdown === "now" ? "Opens now" : `Opens in ${countdown}`;
+  }
+  return formatTime(data.next_run_at, "Queued");
+}
+
 function hydrateForm(data) {
   if (state.hydrated || document.activeElement.tagName === "INPUT") {
     return;
@@ -108,8 +161,11 @@ function hydrateForm(data) {
   els.notional.value = data.position_notional || "25";
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
-  els.closeout.value = data.close_liquidate_minutes || "5";
+  if (els.closeout) {
+    els.closeout.value = data.close_liquidate_minutes || "5";
+  }
   els.regimeGap.value = data.regime_gap_threshold || "0.20";
+  els.chopDiscount.value = data.chop_entry_discount_percent || "0.50";
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
   els.dryRun.checked = Boolean(data.dry_run);
@@ -161,6 +217,45 @@ function toggleTheme() {
     : "dark";
   applyTheme(nextTheme);
   saveTheme(nextTheme);
+}
+
+function saveLogCollapsed(collapsed) {
+  try {
+    localStorage.setItem(LOG_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    return;
+  }
+}
+
+function loadLogCollapsed() {
+  try {
+    return localStorage.getItem(LOG_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setLogCollapsed(collapsed) {
+  state.logCollapsed = collapsed;
+  if (!els.activityPanel || !els.activityToggle) {
+    return;
+  }
+  els.activityPanel.classList.toggle("is-collapsed", collapsed);
+  els.activityToggle.textContent = collapsed ? "Show" : "Hide";
+  els.activityToggle.setAttribute("aria-expanded", String(!collapsed));
+  els.activityToggle.dataset.tooltip = collapsed
+    ? "Show the rolling activity log."
+    : "Hide the rolling activity log.";
+  saveLogCollapsed(collapsed);
+}
+
+function setupActivityLog() {
+  setLogCollapsed(loadLogCollapsed());
+  if (els.activityToggle) {
+    els.activityToggle.addEventListener("click", () => {
+      setLogCollapsed(!state.logCollapsed);
+    });
+  }
 }
 
 function numberOrNull(value) {
@@ -225,6 +320,8 @@ function formatLabel(value) {
     close_stale_position_no_same_cycle_reversal: "Closed Stale Exposure",
     wait_for_stale_close: "Waiting For Stale Close",
     manage_open_position: "Managing Position",
+    chop_exit_reclaim_slow_sma: "Chop Exit Reclaim",
+    wait_for_chop_exit_order: "Waiting For Chop Exit",
     market_buy: "Market Buy",
     market_close_liquidation: "Closing Before Bell",
     closeout_window_no_position: "Flat Into Close",
@@ -280,7 +377,10 @@ function renderDecision(status) {
   if (status.position_symbol && status.position_qty) {
     const qty = formatQty(status.position_qty) || status.position_qty;
     const marketValue = formatMoney(status.position_market_value);
-    els.position.textContent = `${status.position_symbol} ${qty} (${marketValue})`;
+    const owner = status.position_owner
+      ? `${formatLabel(status.position_owner)}, `
+      : "";
+    els.position.textContent = `${status.position_symbol} ${qty} (${owner}${marketValue})`;
   } else {
     els.position.textContent = "Flat";
   }
@@ -298,6 +398,63 @@ function renderDecision(status) {
     : "--";
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function logToneForLine(line) {
+  const lower = line.toLowerCase();
+  if (
+    lower.includes("[error]") ||
+    lower.includes("[fatal]") ||
+    lower.includes("downtrend") ||
+    lower.includes("stale exposure") ||
+    lower.includes("selling") ||
+    lower.includes("sell order") ||
+    lower.includes("trailing stop breached") ||
+    lower.includes("market_close_liquidation") ||
+    lower.includes("closing before bell")
+  ) {
+    return "log-red";
+  }
+  if (
+    lower.includes("uptrend") ||
+    lower.includes("momentumbot") ||
+    lower.includes("market_buy") ||
+    lower.includes("chop exit") ||
+    lower.includes("chop_exit") ||
+    lower.includes("entry signal detected") ||
+    lower.includes("trailing stop holding") ||
+    lower.includes("manage_open_position")
+  ) {
+    return "log-green";
+  }
+  if (
+    lower.includes("sideways") ||
+    lower.includes("chop") ||
+    lower.includes("waiting") ||
+    lower.includes("market closed") ||
+    lower.includes("no_entry") ||
+    lower.includes("no entry") ||
+    lower.includes("armed") ||
+    lower.includes("closeout_window_no_position") ||
+    lower.includes("flat into close")
+  ) {
+    return "log-yellow";
+  }
+  return "log-white";
+}
+
+function renderLogLine(line) {
+  const tone = logToneForLine(line);
+  return `<span class="log-line ${tone}">${escapeHtml(line) || "&nbsp;"}</span>`;
+}
+
 function renderLog(data) {
   const logText =
     data.activity_log && data.activity_log.length
@@ -306,7 +463,7 @@ function renderLog(data) {
       ? data.last_output.join("\n")
       : "Waiting for a run.";
 
-  if (els.log.textContent === logText) {
+  if (state.logText === logText) {
     return;
   }
 
@@ -315,7 +472,8 @@ function renderLog(data) {
   const wasNearBottom =
     previousHeight - previousTop - els.log.clientHeight < 48;
 
-  els.log.textContent = logText;
+  els.log.innerHTML = logText.split("\n").map(renderLogLine).join("");
+  state.logText = logText;
 
   if (!state.logHydrated || wasNearBottom) {
     els.log.scrollTop = els.log.scrollHeight;
@@ -330,12 +488,24 @@ function render(data) {
   state.running = Boolean(data.running);
   hydrateForm(data);
 
-  els.statusPill.classList.toggle("is-running", state.running);
-  els.statusText.textContent = state.running ? "Online" : "Offline";
+  const waitingForOpen =
+    state.running && data.next_run_reason === "market_open";
+  els.statusPill.classList.toggle("is-running", state.running && !waitingForOpen);
+  els.statusPill.classList.toggle("is-armed", waitingForOpen);
+  els.statusText.textContent = waitingForOpen
+    ? "Armed"
+    : state.running
+    ? "Online"
+    : "Offline";
+  els.statusPill.dataset.tooltip = waitingForOpen
+    ? "The bot is armed and will resume when the regular market opens."
+    : state.running
+    ? "The repeating bot loop is running during market hours."
+    : "The repeating bot loop is stopped.";
   els.toggle.textContent = state.running ? "Turn Off" : "Turn On";
   els.toggle.dataset.tooltip = state.running
     ? "Stop the repeating bot loop after the current cycle."
-    : "Start the repeating bot loop with the current settings.";
+    : "Arm the bot. It will run during regular market hours and wait when the market is closed.";
   els.toggle.classList.toggle("is-stop", state.running);
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
@@ -346,9 +516,7 @@ function render(data) {
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
   renderMode(isDryRun);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
-  els.nextRun.textContent = state.running
-    ? formatTime(data.next_run_at, "Queued")
-    : "Idle";
+  els.nextRun.textContent = formatNextCheck(data);
   els.cycles.textContent = String(data.cycle_count || 0);
   els.error.textContent = data.last_error || "";
   renderDecision(data.edgewalker_status);
@@ -445,6 +613,7 @@ if (els.themeToggle) {
 }
 
 setupTheme();
+setupActivityLog();
 setupTooltips();
 refresh();
 setInterval(refresh, 2000);

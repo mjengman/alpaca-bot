@@ -7,13 +7,20 @@ import json
 import mimetypes
 import threading
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from bot import AlpacaClient, BotConfig, BotError, EdgeWalkerBot, load_dotenv
+from bot import (
+    AlpacaClient,
+    BotConfig,
+    BotError,
+    EdgeWalkerBot,
+    load_dotenv,
+    parse_clock_time,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -32,6 +39,7 @@ class RunnerSnapshot:
     poll_seconds: int
     close_liquidate_minutes: int
     regime_gap_threshold: str
+    chop_entry_discount_percent: str
     position_notional: str
     trail_percent: str
     fast_sma_minutes: int
@@ -41,6 +49,7 @@ class RunnerSnapshot:
     last_stopped_at: str | None
     last_run_at: str | None
     next_run_at: str | None
+    next_run_reason: str | None
     last_output: list[str]
     activity_log: list[str]
     edgewalker_status: dict[str, Any] | None
@@ -59,10 +68,12 @@ class BotRunner:
         self._last_stopped_at: str | None = None
         self._last_run_at: str | None = None
         self._next_run_at: str | None = None
+        self._next_run_reason: str | None = None
         self._last_output: list[str] = []
         self._activity_log: list[tuple[datetime, str]] = self._load_activity_log()
         self._edgewalker_status: dict[str, Any] | None = None
         self._last_error: str | None = None
+        self._market_idle_logged_for: str | None = None
 
     def snapshot(self) -> RunnerSnapshot:
         with self._lock:
@@ -78,6 +89,9 @@ class BotRunner:
             self._last_started_at = now_iso()
             self._last_stopped_at = None
             self._last_error = None
+            self._next_run_at = None
+            self._next_run_reason = None
+            self._market_idle_logged_for = None
             self._last_output = ["Bot started."]
             self._append_activity_locked(self._last_output)
             stop_event = threading.Event()
@@ -97,6 +111,8 @@ class BotRunner:
                 self._stop_event.set()
             self._running = False
             self._next_run_at = None
+            self._next_run_reason = None
+            self._market_idle_logged_for = None
             self._last_stopped_at = now_iso()
             self._last_output = ["Bot stopped.", *self._last_output[:39]]
             self._append_activity_locked(["Bot stopped."])
@@ -110,18 +126,89 @@ class BotRunner:
 
     def _loop(self, config: BotConfig, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
+            if self._idle_if_market_closed(config, stop_event):
+                continue
+
             self._run_cycle(config)
             next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
             with self._lock:
                 if self._stop_event is stop_event and self._running:
                     self._next_run_at = next_run.isoformat(timespec="seconds")
+                    self._next_run_reason = "poll"
             stop_event.wait(config.poll_seconds)
 
         with self._lock:
             if self._stop_event is stop_event:
                 self._running = False
                 self._next_run_at = None
+                self._next_run_reason = None
                 self._last_stopped_at = self._last_stopped_at or now_iso()
+
+    def _idle_if_market_closed(
+        self,
+        config: BotConfig,
+        stop_event: threading.Event,
+    ) -> bool:
+        try:
+            clock = AlpacaClient(config).get_clock()
+            market_open = bool(clock.get("is_open"))
+            next_open = parse_clock_time(clock.get("next_open"), "next_open")
+        except BotError as exc:
+            self._record_scheduler_error(config, exc)
+            stop_event.wait(config.poll_seconds)
+            return True
+
+        if market_open:
+            with self._lock:
+                self._market_idle_logged_for = None
+            return False
+
+        now_utc = datetime.now(timezone.utc)
+        next_open_text = None
+        wait_seconds = config.poll_seconds
+        reason = "poll"
+        has_next_open = False
+        if next_open and next_open > now_utc:
+            next_open_text = next_open.isoformat(timespec="seconds")
+            wait_seconds = max((next_open - now_utc).total_seconds(), 1)
+            reason = "market_open"
+            has_next_open = True
+
+        if not next_open_text:
+            next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
+            next_open_text = next_run.isoformat(timespec="seconds")
+
+        with self._lock:
+            if self._stop_event is stop_event and self._running:
+                self._next_run_at = next_open_text
+                self._next_run_reason = reason
+                if self._market_idle_logged_for != next_open_text:
+                    if has_next_open:
+                        line = (
+                            "Market closed. EdgeWalker armed; "
+                            f"next market open at {next_open_text}."
+                        )
+                    else:
+                        line = (
+                            "Market closed. EdgeWalker armed; "
+                            f"next clock check at {next_open_text}."
+                        )
+                    self._last_output = [line]
+                    self._append_activity_locked(self._last_output)
+                    self._market_idle_logged_for = next_open_text
+
+        stop_event.wait(wait_seconds)
+        return True
+
+    def _record_scheduler_error(self, config: BotConfig, exc: BotError) -> None:
+        next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
+        lines = [f"[error] Could not check market clock: {exc}"]
+        with self._lock:
+            self._last_error = str(exc)
+            self._last_output = lines
+            self._next_run_at = next_run.isoformat(timespec="seconds")
+            self._next_run_reason = "poll"
+            self._append_activity_locked(lines)
 
     def _run_cycle(self, config: BotConfig) -> None:
         output = io.StringIO()
@@ -209,6 +296,7 @@ class BotRunner:
             poll_seconds=self._config.poll_seconds,
             close_liquidate_minutes=self._config.close_liquidate_minutes,
             regime_gap_threshold=str(self._config.regime_gap_threshold),
+            chop_entry_discount_percent=str(self._config.chop_entry_discount_percent),
             position_notional=str(self._config.position_notional),
             trail_percent=str(self._config.trail_percent),
             fast_sma_minutes=self._config.fast_sma_minutes,
@@ -218,6 +306,7 @@ class BotRunner:
             last_stopped_at=self._last_stopped_at,
             last_run_at=self._last_run_at,
             next_run_at=self._next_run_at,
+            next_run_reason=self._next_run_reason,
             last_output=self._last_output,
             activity_log=[line for _, line in self._activity_log],
             edgewalker_status=self._edgewalker_status,
@@ -284,6 +373,12 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         base.regime_gap_threshold,
         allow_zero=True,
     )
+    chop_entry_discount_percent = decimal_from_payload(
+        payload,
+        "chopEntryDiscountPercent",
+        base.chop_entry_discount_percent,
+        allow_zero=True,
+    )
     dry_run = bool(payload.get("dryRun", base.dry_run))
 
     return replace(
@@ -293,6 +388,7 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         poll_seconds=poll_seconds,
         close_liquidate_minutes=close_liquidate_minutes,
         regime_gap_threshold=regime_gap_threshold,
+        chop_entry_discount_percent=chop_entry_discount_percent,
         position_notional=decimal_from_payload(
             payload, "positionNotional", base.position_notional
         ),

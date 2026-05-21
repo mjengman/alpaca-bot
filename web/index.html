@@ -1,10 +1,10 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>EdgeWalker</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
@@ -14,10 +14,21 @@
           <h1>EdgeWalker</h1>
         </div>
         <div class="top-actions">
-          <button id="themeToggle" type="button" class="theme-toggle has-tooltip" aria-label="Toggle dark mode" aria-pressed="false" data-tooltip="Switch between light and dark mode.">
+          <button
+            id="themeToggle"
+            type="button"
+            class="theme-toggle has-tooltip"
+            aria-label="Toggle dark mode"
+            aria-pressed="false"
+            data-tooltip="Switch between light and dark mode."
+          >
             <span class="theme-icon"></span>
           </button>
-          <div class="status-pill has-tooltip" id="statusPill" data-tooltip="Shows whether the repeating bot loop is running.">
+          <div
+            class="status-pill has-tooltip"
+            id="statusPill"
+            data-tooltip="Shows whether the repeating bot loop is running."
+          >
             <span class="status-dot"></span>
             <span id="statusText">Offline</span>
           </div>
@@ -34,51 +45,157 @@
           -->
 
           <label class="field">
-            <span class="has-tooltip" data-tooltip="Dollar amount for each entry order. Alpaca uses this to buy fractional shares.">Position $</span>
-            <input id="notionalInput" type="number" min="1" step="1" value="25" aria-label="Position dollars">
+            <span
+              class="has-tooltip"
+              data-tooltip="Dollar amount for each entry order. Alpaca uses this to buy fractional shares."
+              >Position $</span
+            >
+            <input
+              id="notionalInput"
+              type="number"
+              min="1"
+              step="1"
+              value="25"
+              aria-label="Position dollars"
+            />
           </label>
 
           <label class="field">
-            <span class="has-tooltip" data-tooltip="Percent below the highest observed price where the bot will sell the open position.">Trail %</span>
-            <input id="trailInput" type="number" min="0.1" step="0.1" value="1.5" aria-label="Trail percent">
+            <span
+              class="has-tooltip"
+              data-tooltip="Percent below the highest observed price where the bot will sell the open position."
+              >Trail %</span
+            >
+            <input
+              id="trailInput"
+              type="number"
+              min="0.1"
+              step="0.1"
+              value="1.5"
+              aria-label="Trail percent"
+            />
           </label>
 
           <label class="field">
-            <span class="has-tooltip" data-tooltip="How often the bot wakes up to fetch data, evaluate the signal, and manage stops.">Poll sec</span>
-            <input id="pollInput" type="number" min="5" step="5" value="60" aria-label="Poll seconds">
+            <span
+              class="has-tooltip"
+              data-tooltip="How often the bot wakes up to fetch data, evaluate the signal, and manage stops."
+              >Poll sec</span
+            >
+            <input
+              id="pollInput"
+              type="number"
+              min="5"
+              step="5"
+              value="60"
+              aria-label="Poll seconds"
+            />
           </label>
 
+          <!-- Closout can be commented out for now since we don't want to change this value.
           <label class="field">
             <span class="has-tooltip" data-tooltip="Minutes before Alpaca's reported market close when the bot will sell the full open position.">Closeout min</span>
             <input id="closeoutInput" type="number" min="1" step="1" value="5" aria-label="Closeout minutes">
+          </label> -->
+
+          <label class="field">
+            <span
+              class="has-tooltip"
+              data-tooltip="Minimum fast/slow SMA separation percent required to call the regime a trend instead of chop."
+              >Regime gap %</span
+            >
+            <input
+              id="regimeGapInput"
+              type="number"
+              min="0"
+              step="0.01"
+              value="0.20"
+              aria-label="Regime gap percent"
+            />
           </label>
 
           <label class="field">
-            <span class="has-tooltip" data-tooltip="Minimum fast/slow SMA separation percent required to call the regime a trend instead of chop.">Regime gap %</span>
-            <input id="regimeGapInput" type="number" min="0" step="0.01" value="0.20" aria-label="Regime gap percent">
+            <span
+              class="has-tooltip"
+              data-tooltip="SIDEWAYS discount below the slow SMA required before ChopBot can buy SOXL."
+              >Chop disc %</span
+            >
+            <input
+              id="chopDiscountInput"
+              type="number"
+              min="0"
+              step="0.01"
+              value="0.50"
+              aria-label="Chop discount percent"
+            />
           </label>
 
           <label class="field">
-            <span class="has-tooltip" data-tooltip="Short moving-average window in one-minute bars. Used for entry timing.">Fast SMA</span>
-            <input id="fastInput" type="number" min="2" step="1" value="5" aria-label="Fast SMA">
+            <span
+              class="has-tooltip"
+              data-tooltip="Short moving-average window in one-minute bars. Used for entry timing."
+              >Fast SMA</span
+            >
+            <input
+              id="fastInput"
+              type="number"
+              min="2"
+              step="1"
+              value="5"
+              aria-label="Fast SMA"
+            />
           </label>
 
           <label class="field">
-            <span class="has-tooltip" data-tooltip="Long moving-average window in one-minute bars. Must be greater than Fast SMA.">Slow SMA</span>
-            <input id="slowInput" type="number" min="3" step="1" value="20" aria-label="Slow SMA">
+            <span
+              class="has-tooltip"
+              data-tooltip="Long moving-average window in one-minute bars. Must be greater than Fast SMA."
+              >Slow SMA</span
+            >
+            <input
+              id="slowInput"
+              type="number"
+              min="3"
+              step="1"
+              value="20"
+              aria-label="Slow SMA"
+            />
           </label>
         </div>
 
         <div class="switch-row">
           <label class="switch">
-            <input id="dryRunInput" type="checkbox" checked aria-label="Dry run">
+            <input
+              id="dryRunInput"
+              type="checkbox"
+              checked
+              aria-label="Dry run"
+            />
             <span class="track"></span>
-            <span class="switch-label has-tooltip" data-tooltip="When enabled, the bot prints intended orders without sending them to Alpaca.">Dry run</span>
+            <span
+              class="switch-label has-tooltip"
+              data-tooltip="When enabled, the bot prints intended orders without sending them to Alpaca."
+              >Dry run</span
+            >
           </label>
 
           <div class="button-row">
-            <button id="runOnceButton" type="button" class="secondary has-tooltip" data-tooltip="Run one evaluation cycle without starting the repeating loop.">Check now</button>
-            <button id="toggleButton" type="button" class="primary has-tooltip" data-tooltip="Start the repeating bot loop with the current settings.">Turn On</button>
+            <button
+              id="runOnceButton"
+              type="button"
+              class="secondary has-tooltip"
+              data-tooltip="Run one evaluation cycle without starting the repeating loop."
+            >
+              Check now
+            </button>
+            <button
+              id="toggleButton"
+              type="button"
+              class="primary has-tooltip"
+              data-tooltip="Start the repeating bot loop with the current settings."
+            >
+              Turn On
+            </button>
           </div>
         </div>
       </section>
@@ -86,54 +203,102 @@
       <section class="panel decision-panel">
         <div class="decision-lead">
           <div>
-            <span class="has-tooltip" data-tooltip="Current semiconductor regime detected from SOXL fast/slow SMA separation.">Regime</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Current semiconductor regime detected from SOXL fast/slow SMA separation."
+              >Regime</span
+            >
             <strong id="regimeValue">Waiting</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="The specialist bot currently allowed to evaluate entries. Only one bot is active per cycle.">Active bot</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="The specialist bot currently allowed to evaluate entries. Only one bot is active per cycle."
+              >Active bot</span
+            >
             <strong id="activeBotValue">Waiting</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="The symbol the active bot is allowed to trade this cycle. NONE means no entry orders are allowed.">Routed</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="The symbol the active bot is allowed to trade this cycle. NONE means no entry orders are allowed."
+              >Routed</span
+            >
             <strong id="routedSymbolValue">None</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Most recent decision or trade-management action from the strategy.">Action</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Most recent decision or trade-management action from the strategy."
+              >Action</span
+            >
             <strong id="actionValue">Waiting</strong>
           </div>
         </div>
 
         <div class="decision-grid">
           <div>
-            <span class="has-tooltip" data-tooltip="Current paper account portfolio value from Alpaca.">Account value</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Current paper account portfolio value from Alpaca."
+              >Account value</span
+            >
             <strong id="portfolioValue">--</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Today's account equity change, calculated from Alpaca equity minus last equity when available.">Day P/L</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Today's account equity change, calculated from Alpaca equity minus last equity when available."
+              >Day P/L</span
+            >
             <strong id="dayPlValue">--</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Current buying power reported by Alpaca.">Buying power</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Current buying power reported by Alpaca."
+              >Buying power</span
+            >
             <strong id="buyingPowerValue">--</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Latest SOXL one-minute close used as the regime source price.">SOXL price</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Latest SOXL one-minute close used as the regime source price."
+              >SOXL price</span
+            >
             <strong id="sourcePriceValue">--</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Fast/slow SMA separation used to decide trend versus chop.">SMA gap</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Fast/slow SMA separation used to decide trend versus chop."
+              >SMA gap</span
+            >
             <strong id="gapValue">--</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Current SOXL/SOXS basket exposure. EdgeWalker should hold at most one.">Position</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Current SOXL/SOXS basket exposure. EdgeWalker should hold at most one."
+              >Position</span
+            >
             <strong id="positionValue">Flat</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Unrealized P/L on the open basket position when Alpaca reports one.">Position P/L</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Unrealized P/L on the open basket position when Alpaca reports one."
+              >Position P/L</span
+            >
             <strong id="positionPlValue">--</strong>
           </div>
           <div>
-            <span class="has-tooltip" data-tooltip="Current bot-managed trailing exit price for the open position, if there is one.">Trail exit</span>
+            <span
+              class="has-tooltip"
+              data-tooltip="Current bot-managed trailing exit price for the open position, if there is one."
+              >Trail exit</span
+            >
             <strong id="trailExitValue">--</strong>
           </div>
         </div>
@@ -141,29 +306,63 @@
 
       <section class="metrics">
         <div class="metric">
-          <span class="has-tooltip" data-tooltip="Shows whether the bot is simulating orders or sending paper orders to Alpaca.">Mode</span>
+          <span
+            class="has-tooltip"
+            data-tooltip="Shows whether the bot is simulating orders or sending paper orders to Alpaca."
+            >Mode</span
+          >
           <strong id="modeValue">Dry run</strong>
         </div>
         <div class="metric">
-          <span class="has-tooltip" data-tooltip="Most recent completed strategy evaluation.">Last check</span>
+          <span
+            class="has-tooltip"
+            data-tooltip="Most recent completed strategy evaluation."
+            >Last check</span
+          >
           <strong id="lastRunValue">Never</strong>
         </div>
         <div class="metric">
-          <span class="has-tooltip" data-tooltip="Next scheduled wake-up while the bot is online.">Next check</span>
+          <span
+            class="has-tooltip"
+            data-tooltip="Next scheduled wake-up while the bot is online."
+            >Next check</span
+          >
           <strong id="nextRunValue">Idle</strong>
         </div>
         <div class="metric">
-          <span class="has-tooltip" data-tooltip="Number of completed evaluations since the local server started.">Cycles</span>
+          <span
+            class="has-tooltip"
+            data-tooltip="Number of completed evaluations since the local server started."
+            >Cycles</span
+          >
           <strong id="cycleValue">0</strong>
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel activity-panel" id="activityPanel">
         <div class="section-head">
-          <h2 class="has-tooltip" data-tooltip="Rolling 24-hour account, signal, position, and order-management output from the bot.">Activity</h2>
-          <span id="errorText"></span>
+          <h2
+            class="has-tooltip"
+            data-tooltip="Rolling 24-hour account, signal, position, and order-management output from the bot."
+          >
+            Activity
+          </h2>
+          <div class="section-actions">
+            <span id="errorText"></span>
+            <button
+              id="activityToggle"
+              type="button"
+              class="log-toggle has-tooltip"
+              aria-expanded="true"
+              data-tooltip="Hide or show the rolling activity log."
+            >
+              Hide
+            </button>
+          </div>
         </div>
-        <pre id="logOutput">Waiting for a run.</pre>
+        <div id="logOutput" class="log-output" role="log" aria-live="polite">
+          Waiting for a run.
+        </div>
       </section>
     </main>
 

@@ -88,6 +88,7 @@ class BotConfig:
     poll_seconds: int
     close_liquidate_minutes: int
     regime_gap_threshold: Decimal
+    chop_entry_discount_percent: Decimal
     data_feed: str
     dry_run: bool
 
@@ -125,6 +126,10 @@ class BotConfig:
         if regime_gap_threshold < 0:
             raise BotError("REGIME_GAP_THRESHOLD must be at least 0")
 
+        chop_entry_discount_percent = env_decimal("CHOP_ENTRY_DISCOUNT_PERCENT", "0.50")
+        if chop_entry_discount_percent < 0:
+            raise BotError("CHOP_ENTRY_DISCOUNT_PERCENT must be at least 0")
+
         return cls(
             trading_base_url=os.environ.get(
                 "ALPACA_TRADING_BASE_URL", TRADING_BASE_URL_DEFAULT
@@ -142,6 +147,7 @@ class BotConfig:
             poll_seconds=poll_seconds,
             close_liquidate_minutes=close_liquidate_minutes,
             regime_gap_threshold=regime_gap_threshold,
+            chop_entry_discount_percent=chop_entry_discount_percent,
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", True),
         )
@@ -192,10 +198,10 @@ class AlpacaClient:
         }
 
         data = self._data_request("GET", f"/stocks/{symbol}/bars", params)
-        bars = data.get("bars", [])
+        bars = data.get("bars") or []
 
         if isinstance(bars, dict):
-            bars = bars.get(symbol, [])
+            bars = bars.get(symbol) or []
         if not isinstance(bars, list):
             raise BotError(f"Unexpected bars response: {data!r}")
 
@@ -415,6 +421,7 @@ class BotRoute:
 class EdgeWalkerStatus:
     checked_at: str
     market_open: bool
+    next_open: str | None
     next_close: str | None
     buying_power: str | None
     portfolio_value: str | None
@@ -438,6 +445,7 @@ class EdgeWalkerStatus:
     position_unrealized_pl: str | None
     position_unrealized_pl_percent: str | None
     position_current_price: str | None
+    position_owner: str | None
     high_water_mark: str | None
     trailing_exit_price: str | None
 
@@ -485,10 +493,24 @@ class BotStateStore:
     def set_high_water_mark(self, symbol: str, value: Decimal) -> None:
         data = self._read()
         trailing = data.setdefault("trailing", {})
-        trailing[symbol] = {
-            "high_water_mark": format_decimal(value),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        symbol_state = trailing.setdefault(symbol, {})
+        symbol_state["high_water_mark"] = format_decimal(value)
+        symbol_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._write(data)
+
+    def get_position_owner(self, symbol: str) -> str | None:
+        data = self._read()
+        owner = data.get("trailing", {}).get(symbol, {}).get("owner")
+        if not owner:
+            return None
+        return str(owner)
+
+    def set_position_owner(self, symbol: str, owner: str) -> None:
+        data = self._read()
+        trailing = data.setdefault("trailing", {})
+        symbol_state = trailing.setdefault(symbol, {})
+        symbol_state["owner"] = owner
+        symbol_state["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._write(data)
 
     def clear_symbol(self, symbol: str) -> None:
@@ -765,7 +787,7 @@ class RegimeRouter:
             return BotRoute(MOMENTUM_BOT, SOXL, True)
         if regime == DOWNTREND:
             return BotRoute(INVERSE_BOT, SOXS, True)
-        return BotRoute(CHOP_BOT, None, False)
+        return BotRoute(CHOP_BOT, SOXL, True)
 
 
 class EdgeWalkerBot:
@@ -785,6 +807,7 @@ class EdgeWalkerBot:
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
+        next_open = parse_clock_time(clock.get("next_open"), "next_open")
         next_close, seconds_to_close, closeout_due = closeout_status(
             clock,
             self.config.close_liquidate_minutes,
@@ -806,6 +829,7 @@ class EdgeWalkerBot:
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 None,
@@ -835,26 +859,7 @@ class EdgeWalkerBot:
             return self._build_status(
                 checked_at,
                 market_open,
-                next_close,
-                account,
-                signal,
-                route,
-                positions,
-                False,
-                action_taken,
-            )
-
-        stale_symbol = self._stale_symbol(signal.regime, positions)
-        if stale_symbol:
-            action_taken = self._close_stale_position(
-                stale_symbol,
-                positions[stale_symbol],
-                orders,
-                signal.regime,
-            )
-            return self._build_status(
-                checked_at,
-                market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -869,6 +874,7 @@ class EdgeWalkerBot:
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -878,11 +884,35 @@ class EdgeWalkerBot:
                 "no_entry",
             )
 
+        stale_symbol = self._stale_symbol(route, positions)
+        if stale_symbol:
+            action_taken = self._close_stale_position(
+                stale_symbol,
+                positions[stale_symbol],
+                orders,
+                signal.regime,
+                route.active_bot,
+                self.state_store.get_position_owner(stale_symbol),
+            )
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                action_taken,
+            )
+
         if not route.allows_entry or route.routed_symbol is None:
             print("entry_signal=False action_taken=chop_no_trade_placeholder")
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -903,11 +933,33 @@ class EdgeWalkerBot:
         )
 
         if routed_position:
+            if route.active_bot == CHOP_BOT:
+                action_taken = self._maybe_exit_chop_position(
+                    route.routed_symbol,
+                    routed_position,
+                    routed_orders,
+                    soxl_snapshot,
+                )
+                if action_taken:
+                    return self._build_status(
+                        checked_at,
+                        market_open,
+                        next_open,
+                        next_close,
+                        account,
+                        signal,
+                        route,
+                        positions,
+                        False,
+                        action_taken,
+                    )
+
             routed_bot._manage_trailing_stop(route.routed_symbol, routed_position, routed_orders)
             print("entry_signal=False action_taken=manage_open_position")
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -925,6 +977,7 @@ class EdgeWalkerBot:
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -941,6 +994,7 @@ class EdgeWalkerBot:
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -959,6 +1013,7 @@ class EdgeWalkerBot:
             return self._build_status(
                 checked_at,
                 market_open,
+                next_open,
                 next_close,
                 account,
                 signal,
@@ -973,10 +1028,13 @@ class EdgeWalkerBot:
             f"market buy for {route.routed_symbol}."
         )
         self.client.submit_market_buy(route.routed_symbol, self.config.position_notional)
+        if not self.config.dry_run:
+            self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
         print("action_taken=market_buy")
         return self._build_status(
             checked_at,
             market_open,
+            next_open,
             next_close,
             account,
             signal,
@@ -990,6 +1048,7 @@ class EdgeWalkerBot:
         self,
         checked_at: str,
         market_open: bool,
+        next_open: datetime | None,
         next_close: datetime | None,
         account: dict[str, Any],
         signal: RegimeSignal | None,
@@ -999,10 +1058,12 @@ class EdgeWalkerBot:
         action_taken: str,
     ) -> EdgeWalkerStatus:
         position_symbol, position = self._active_position(positions)
+        position_owner = None
         high_water_mark = None
         trailing_exit_price = None
 
         if position_symbol:
+            position_owner = self.state_store.get_position_owner(position_symbol)
             high_water_mark = self.state_store.get_high_water_mark(position_symbol)
             if high_water_mark is not None:
                 trailing_exit_price = high_water_mark * (
@@ -1014,6 +1075,7 @@ class EdgeWalkerBot:
         return EdgeWalkerStatus(
             checked_at=checked_at,
             market_open=market_open,
+            next_open=next_open.isoformat(timespec="seconds") if next_open else None,
             next_close=next_close.isoformat(timespec="seconds") if next_close else None,
             buying_power=self._raw_text(account.get("buying_power")),
             portfolio_value=self._raw_text(account.get("portfolio_value") or account.get("equity")),
@@ -1045,6 +1107,7 @@ class EdgeWalkerBot:
             position_current_price=(
                 self._raw_text(position.get("current_price")) if position else None
             ),
+            position_owner=position_owner,
             high_water_mark=self._decimal_text(high_water_mark),
             trailing_exit_price=self._decimal_text(trailing_exit_price),
         )
@@ -1087,6 +1150,30 @@ class EdgeWalkerBot:
         if route.active_bot == MOMENTUM_BOT:
             return soxl_snapshot.crossed_above
 
+        if route.active_bot == CHOP_BOT:
+            if soxl_snapshot.slow_sma == 0:
+                print(
+                    "ChopBot entry check: slow_sma=0.0000 "
+                    "entry_signal=False"
+                )
+                return False
+            discount_percent = (
+                (soxl_snapshot.slow_sma - soxl_snapshot.price)
+                / soxl_snapshot.slow_sma
+                * Decimal("100")
+            )
+            entry_signal = soxl_snapshot.price <= soxl_snapshot.slow_sma * (
+                Decimal("1")
+                - (self.config.chop_entry_discount_percent / Decimal("100"))
+            )
+            print(
+                f"ChopBot entry check: price={soxl_snapshot.price:.4f} "
+                f"slow_sma={soxl_snapshot.slow_sma:.4f} "
+                f"discount={discount_percent:.2f}% "
+                f"threshold={self.config.chop_entry_discount_percent}%"
+            )
+            return entry_signal
+
         if route.active_bot == INVERSE_BOT and route.routed_symbol:
             inverse_bot = TrailingStopBot(
                 config_for_symbol(self.config, route.routed_symbol),
@@ -1106,25 +1193,16 @@ class EdgeWalkerBot:
 
     def _stale_symbol(
         self,
-        regime: str,
+        route: BotRoute,
         positions: dict[str, dict[str, Any] | None],
     ) -> str | None:
-        held_symbols = [
-            symbol
-            for symbol, position in positions.items()
-            if self._position_qty(position) > 0
-        ]
-        if not held_symbols:
-            return None
-
-        if regime == UPTREND:
-            return SOXS if SOXS in held_symbols else None
-        if regime == DOWNTREND:
-            return SOXL if SOXL in held_symbols else None
-        if SOXL in held_symbols:
-            return SOXL
-        if SOXS in held_symbols:
-            return SOXS
+        for symbol in self.basket_symbols:
+            position = positions.get(symbol)
+            if self._position_qty(position) <= 0:
+                continue
+            owner = self.state_store.get_position_owner(symbol)
+            if symbol != route.routed_symbol or owner != route.active_bot:
+                return symbol
         return None
 
     def _position_qty(self, position: dict[str, Any] | None) -> Decimal:
@@ -1138,11 +1216,15 @@ class EdgeWalkerBot:
         position: dict[str, Any] | None,
         orders: list[dict[str, Any]],
         regime: str,
+        active_bot: str,
+        owner: str | None,
     ) -> str:
+        owner_text = owner or "UNKNOWN"
         symbol_orders = [order for order in orders if order.get("symbol") == symbol]
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(
-                f"{symbol}: regime={regime} stale exposure, sell order already open; "
+                f"{symbol}: regime={regime} owner={owner_text} "
+                f"active_bot={active_bot} stale exposure, sell order already open; "
                 "entry_signal=False action_taken=wait_for_stale_close"
             )
             return "wait_for_stale_close"
@@ -1157,12 +1239,52 @@ class EdgeWalkerBot:
 
         print(
             f"{symbol}: stale exposure under regime={regime}; "
+            f"owner={owner_text} active_bot={active_bot}; "
             f"selling qty={format_decimal(qty)}."
         )
         self.client.submit_market_sell_qty(symbol, qty)
         self.state_store.clear_symbol(symbol)
         print("entry_signal=False action_taken=close_stale_position_no_same_cycle_reversal")
         return "close_stale_position_no_same_cycle_reversal"
+
+    def _maybe_exit_chop_position(
+        self,
+        symbol: str,
+        position: dict[str, Any],
+        symbol_orders: list[dict[str, Any]],
+        soxl_snapshot: SmaSnapshot,
+    ) -> str | None:
+        reclaim = soxl_snapshot.price >= soxl_snapshot.slow_sma
+        print(
+            f"ChopBot exit check: price={soxl_snapshot.price:.4f} "
+            f"slow_sma={soxl_snapshot.slow_sma:.4f} reclaim={reclaim}"
+        )
+        if not reclaim:
+            return None
+
+        if any(order.get("side") == "sell" for order in symbol_orders):
+            print(
+                f"{symbol}: ChopBot slow SMA reclaim, sell order already open; "
+                "entry_signal=False action_taken=wait_for_chop_exit_order"
+            )
+            return "wait_for_chop_exit_order"
+
+        qty = self._position_qty(position).quantize(
+            FRACTIONAL_QTY_STEP,
+            rounding=ROUND_DOWN,
+        )
+        if qty <= 0:
+            print(f"{symbol}: ChopBot exit found no long position; action_taken=noop")
+            return "noop"
+
+        print(
+            f"{symbol}: ChopBot slow SMA reclaim; "
+            f"selling qty={format_decimal(qty)}."
+        )
+        self.client.submit_market_sell_qty(symbol, qty)
+        self.state_store.clear_symbol(symbol)
+        print("entry_signal=False action_taken=chop_exit_reclaim_slow_sma")
+        return "chop_exit_reclaim_slow_sma"
 
     def _liquidate_all_before_close(
         self,
