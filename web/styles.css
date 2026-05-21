@@ -439,6 +439,10 @@ button:disabled {
   color: var(--amber);
 }
 
+.regime-warmup {
+  color: var(--amber);
+}
+
 .is-positive {
   color: var(--green-deep);
 }

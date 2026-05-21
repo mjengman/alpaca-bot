@@ -22,6 +22,7 @@ STATE_PATH_DEFAULT = Path(__file__).resolve().with_name(".bot_state.json")
 FRACTIONAL_QTY_STEP = Decimal("0.000000001")
 SOXL = "SOXL"
 SOXS = "SOXS"
+WARMUP = "WARMUP"
 UPTREND = "UPTREND"
 SIDEWAYS = "SIDEWAYS"
 DOWNTREND = "DOWNTREND"
@@ -32,6 +33,14 @@ INVERSE_BOT = "InverseBot"
 
 class BotError(Exception):
     pass
+
+
+def _last_completed_bar_end(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    return current.replace(second=0, microsecond=0) - timedelta(microseconds=1)
 
 
 def load_dotenv(path: Path) -> None:
@@ -185,7 +194,7 @@ class AlpacaClient:
         return orders
 
     def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
-        end = datetime.now(timezone.utc)
+        end = _last_completed_bar_end()
         start = end - timedelta(minutes=max(minutes * 3, minutes + 15))
         params = {
             "timeframe": "1Min",
@@ -391,7 +400,16 @@ class SmaSnapshot:
         return abs(self.fast_sma - self.slow_sma) / self.slow_sma * Decimal("100")
 
     @property
+    def has_cross_context(self) -> bool:
+        return (
+            len(self.fast_now_values) == len(self.fast_prev_values)
+            and len(self.slow_now_values) == len(self.slow_prev_values)
+        )
+
+    @property
     def crossed_above(self) -> bool:
+        if not self.has_cross_context:
+            return False
         return crossed_above(
             self.fast_now_values,
             self.fast_prev_values,
@@ -693,14 +711,19 @@ class TrailingStopBot:
             return None
         return prices[-1]
 
-    def _sma_snapshot(self, symbol: str) -> SmaSnapshot | None:
-        bars_needed = self.config.slow_sma_minutes + 1
+    def _sma_snapshot(
+        self,
+        symbol: str,
+        require_cross_context: bool = True,
+    ) -> SmaSnapshot | None:
+        bars_needed = self.config.slow_sma_minutes + (1 if require_cross_context else 0)
         bars = self.client.get_recent_bars(symbol, bars_needed)
         prices = latest_close_prices(bars)
         if len(prices) < bars_needed:
+            reason = "warming up." if not require_cross_context else "waiting for more data."
             print(
                 f"{symbol}: need {bars_needed} one-minute bars, got {len(prices)}; "
-                "waiting for more data."
+                f"{reason}"
             )
             return None
 
@@ -756,7 +779,7 @@ class RegimeDetector:
 
     def detect(self) -> tuple[RegimeSignal | None, SmaSnapshot | None]:
         probe = TrailingStopBot(config_for_symbol(self.config, SOXL), self.client)
-        snapshot = probe._sma_snapshot(SOXL)
+        snapshot = probe._sma_snapshot(SOXL, require_cross_context=False)
         if snapshot is None:
             return None, None
 
@@ -825,7 +848,35 @@ class EdgeWalkerBot:
         detector = RegimeDetector(self.config, self.client)
         signal, soxl_snapshot = detector.detect()
         if signal is None or soxl_snapshot is None:
-            print("EdgeWalker: no regime decision; entry_signal=False action_taken=wait_for_data")
+            print(
+                "regime=WARMUP active_bot=NONE routed_symbol=NONE "
+                "entry_signal=False action_taken=collecting_data"
+            )
+            positions = {
+                symbol: self.client.get_position(symbol)
+                for symbol in self.basket_symbols
+            }
+            if closeout_due:
+                orders = self.client.list_open_orders()
+                action_taken = self._liquidate_all_before_close(
+                    positions,
+                    orders,
+                    seconds_to_close,
+                )
+                return self._build_status(
+                    checked_at,
+                    market_open,
+                    next_open,
+                    next_close,
+                    account,
+                    None,
+                    None,
+                    positions,
+                    False,
+                    action_taken,
+                    regime_override=WARMUP,
+                )
+
             return self._build_status(
                 checked_at,
                 market_open,
@@ -834,9 +885,10 @@ class EdgeWalkerBot:
                 account,
                 None,
                 None,
-                {},
+                positions,
                 False,
-                "wait_for_data",
+                "collecting_data",
+                regime_override=WARMUP,
             )
 
         route = RegimeRouter().route(signal.regime)
@@ -1056,6 +1108,7 @@ class EdgeWalkerBot:
         positions: dict[str, dict[str, Any] | None],
         entry_signal: bool | None,
         action_taken: str,
+        regime_override: str | None = None,
     ) -> EdgeWalkerStatus:
         position_symbol, position = self._active_position(positions)
         position_owner = None
@@ -1087,7 +1140,7 @@ class EdgeWalkerBot:
             fast_sma=self._decimal_text(signal.fast_sma if signal else None),
             slow_sma=self._decimal_text(signal.slow_sma if signal else None),
             gap_percent=self._decimal_text(signal.gap_percent if signal else None),
-            regime=signal.regime if signal else None,
+            regime=regime_override or (signal.regime if signal else None),
             active_bot=route.active_bot if route else None,
             routed_symbol=route.routed_symbol if route and route.routed_symbol else None,
             entry_signal=entry_signal,

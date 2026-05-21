@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from bot import (
     AlpacaClient,
@@ -28,7 +29,8 @@ WEB_ROOT = PROJECT_ROOT / "web"
 HOST = "127.0.0.1"
 PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
-ACTIVITY_RETENTION = timedelta(days=1)
+LOGS_ROOT = PROJECT_ROOT / "logs"
+NY_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -61,6 +63,7 @@ class BotRunner:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
+        LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         self._config = BotConfig.from_env()
         self._running = False
         self._cycle_count = 0
@@ -74,6 +77,7 @@ class BotRunner:
         self._edgewalker_status: dict[str, Any] | None = None
         self._last_error: str | None = None
         self._market_idle_logged_for: str | None = None
+        self._last_regime: str | None = None
 
     def snapshot(self) -> RunnerSnapshot:
         with self._lock:
@@ -214,6 +218,7 @@ class BotRunner:
         output = io.StringIO()
         error: str | None = None
         edgewalker_status: dict[str, Any] | None = None
+        run_timestamp = datetime.now(timezone.utc)
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 status = EdgeWalkerBot(config, AlpacaClient(config)).run_once()
@@ -230,23 +235,31 @@ class BotRunner:
         with self._lock:
             self._config = config
             self._cycle_count += 1
+            cycle_id = self._cycle_count
             self._last_run_at = now_iso()
             self._last_error = error
+            transition = self._regime_transition_locked(edgewalker_status)
+            if transition:
+                lines.append(_format_regime_transition(transition))
             if edgewalker_status:
                 self._edgewalker_status = edgewalker_status
             self._last_output = lines[-40:] if lines else ["Cycle complete."]
             self._append_activity_locked(self._last_output)
+            self._append_cycle_log_locked(
+                config=config,
+                cycle_id=cycle_id,
+                timestamp=run_timestamp,
+                console_lines=lines,
+                error=error,
+                edgewalker_status=edgewalker_status,
+                regime_transition=transition,
+            )
 
     def _append_activity_locked(self, lines: list[str]) -> None:
-        now = datetime.now()
-        cutoff = now - ACTIVITY_RETENTION
+        now = datetime.now(NY_TZ)
         for line in lines:
             self._activity_log.append((now, line))
-        self._activity_log = [
-            (created_at, line)
-            for created_at, line in self._activity_log
-            if created_at >= cutoff
-        ]
+        self._activity_log = _current_ny_activity(self._activity_log, now)
         self._save_activity_log()
 
     def _load_activity_log(self) -> list[tuple[datetime, str]]:
@@ -261,7 +274,7 @@ class BotRunner:
         if not isinstance(raw_entries, list):
             return []
 
-        cutoff = datetime.now() - ACTIVITY_RETENTION
+        now = datetime.now(NY_TZ)
         entries: list[tuple[datetime, str]] = []
         for entry in raw_entries:
             if not isinstance(entry, dict):
@@ -274,9 +287,59 @@ class BotRunner:
                 created_at = datetime.fromisoformat(created_at_raw)
             except ValueError:
                 continue
-            if created_at >= cutoff:
-                entries.append((created_at, line))
-        return entries
+            entries.append((created_at, line))
+        return _current_ny_activity(entries, now)
+
+    def _regime_transition_locked(
+        self,
+        edgewalker_status: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not edgewalker_status:
+            return None
+
+        regime = edgewalker_status.get("regime")
+        if not isinstance(regime, str) or not regime:
+            return None
+
+        previous = self._last_regime
+        self._last_regime = regime
+        if previous is None or previous == regime:
+            return None
+
+        return {
+            "from": previous,
+            "to": regime,
+            "gap_percent": edgewalker_status.get("gap_percent"),
+        }
+
+    def _append_cycle_log_locked(
+        self,
+        config: BotConfig,
+        cycle_id: int,
+        timestamp: datetime,
+        console_lines: list[str],
+        error: str | None,
+        edgewalker_status: dict[str, Any] | None,
+        regime_transition: dict[str, Any] | None,
+    ) -> None:
+        record = _cycle_log_record(
+            config=config,
+            cycle_id=cycle_id,
+            timestamp=timestamp,
+            console_lines=console_lines,
+            error=error,
+            edgewalker_status=edgewalker_status,
+            regime_transition=regime_transition,
+        )
+        try:
+            _append_daily_jsonl(record, timestamp)
+        except OSError as exc:
+            line = f"[error] Could not write daily log: {exc}"
+            self._last_error = line
+            self._last_output = [*self._last_output, line][-40:]
+            self._activity_log.append((datetime.now(NY_TZ), line))
+            self._activity_log = _current_ny_activity(self._activity_log)
+            self._save_activity_log()
 
     def _save_activity_log(self) -> None:
         payload = [
@@ -289,6 +352,7 @@ class BotRunner:
         )
 
     def _snapshot_locked(self) -> RunnerSnapshot:
+        self._activity_log = _current_ny_activity(self._activity_log)
         return RunnerSnapshot(
             running=self._running,
             symbol=self._config.symbol,
@@ -316,6 +380,101 @@ class BotRunner:
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _utc_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00",
+        "Z",
+    )
+
+
+def _ny_date_text(value: datetime | None = None) -> str:
+    current = value or datetime.now(NY_TZ)
+    if current.tzinfo is None:
+        return current.date().isoformat()
+    return current.astimezone(NY_TZ).date().isoformat()
+
+
+def _current_ny_activity(
+    entries: list[tuple[datetime, str]],
+    now: datetime | None = None,
+) -> list[tuple[datetime, str]]:
+    current_date = _ny_date_text(now)
+    return [
+        (created_at, line)
+        for created_at, line in entries
+        if _ny_date_text(created_at) == current_date
+    ]
+
+
+def _config_log_payload(config: BotConfig) -> dict[str, Any]:
+    return {
+        "symbol": config.symbol,
+        "dry_run": config.dry_run,
+        "poll_seconds": config.poll_seconds,
+        "position_notional": str(config.position_notional),
+        "trail_percent": str(config.trail_percent),
+        "fast_sma_minutes": config.fast_sma_minutes,
+        "slow_sma_minutes": config.slow_sma_minutes,
+        "close_liquidate_minutes": config.close_liquidate_minutes,
+        "regime_gap_threshold": str(config.regime_gap_threshold),
+        "chop_entry_discount_percent": str(config.chop_entry_discount_percent),
+        "data_feed": config.data_feed,
+    }
+
+
+def _cycle_log_record(
+    config: BotConfig,
+    cycle_id: int,
+    timestamp: datetime,
+    console_lines: list[str],
+    error: str | None,
+    edgewalker_status: dict[str, Any] | None,
+    regime_transition: dict[str, Any] | None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "timestamp": _utc_timestamp(timestamp),
+        "trading_date": _ny_date_text(timestamp),
+        "cycle_id": cycle_id,
+        "config": _config_log_payload(config),
+        "console_lines": console_lines,
+    }
+    if edgewalker_status:
+        record.update(edgewalker_status)
+        record["price"] = edgewalker_status.get("source_price")
+        record["account_value"] = edgewalker_status.get("portfolio_value")
+    if error:
+        record["error"] = error
+    if regime_transition:
+        record["regime_transition"] = regime_transition
+    return record
+
+
+def _daily_log_path(
+    timestamp: datetime,
+    logs_root: Path = LOGS_ROOT,
+) -> Path:
+    return logs_root / f"edgewalker-{_ny_date_text(timestamp)}.jsonl"
+
+
+def _append_daily_jsonl(
+    record: dict[str, Any],
+    timestamp: datetime,
+    logs_root: Path = LOGS_ROOT,
+) -> None:
+    logs_root.mkdir(parents=True, exist_ok=True)
+    path = _daily_log_path(timestamp, logs_root)
+    with path.open("a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps(record) + "\n")
+
+
+def _format_regime_transition(transition: dict[str, Any]) -> str:
+    gap = transition.get("gap_percent")
+    gap_text = f" gap={gap}%" if gap is not None else ""
+    return f"REGIME CHANGE: {transition['from']} -> {transition['to']}{gap_text}"
 
 
 def decimal_from_payload(

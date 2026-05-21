@@ -316,6 +316,7 @@ function formatLabel(value) {
   }
   const labels = {
     chop_no_trade_placeholder: "Standing Aside",
+    collecting_data: "Collecting Data",
     no_entry_signal: "No Entry Signal",
     close_stale_position_no_same_cycle_reversal: "Closed Stale Exposure",
     wait_for_stale_close: "Waiting For Stale Close",
@@ -362,7 +363,9 @@ function renderDecision(status) {
   const regime = status.regime || "Waiting";
   els.regime.textContent = regime;
   els.regime.className = `regime-value regime-${regime.toLowerCase()}`;
-  els.activeBot.textContent = formatLabel(status.active_bot);
+  els.activeBot.textContent = status.active_bot
+    ? formatLabel(status.active_bot)
+    : "None";
   els.routedSymbol.textContent = status.routed_symbol || "None";
   els.action.textContent = formatLabel(status.action_taken);
   els.portfolio.textContent = formatMoney(status.portfolio_value);
@@ -438,6 +441,9 @@ function logToneForLine(line) {
     lower.includes("sideways") ||
     lower.includes("chop") ||
     lower.includes("waiting") ||
+    lower.includes("warmup") ||
+    lower.includes("collecting_data") ||
+    lower.includes("collecting data") ||
     lower.includes("market closed") ||
     lower.includes("no_entry") ||
     lower.includes("no entry") ||

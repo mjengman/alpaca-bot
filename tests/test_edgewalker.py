@@ -9,7 +9,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from bot import AlpacaClient, BotConfig, BotStateStore, EdgeWalkerBot
+from bot import (
+    AlpacaClient,
+    BotConfig,
+    BotStateStore,
+    EdgeWalkerBot,
+    _last_completed_bar_end,
+)
 
 
 def config() -> BotConfig:
@@ -94,6 +100,33 @@ class EdgeWalkerBotTest(unittest.TestCase):
                     state_store,
                 ).run_once()
             return output.getvalue(), status
+
+    def test_warmup_blocks_regime_routing_until_slow_sma_history_exists(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "99")})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=WARMUP active_bot=NONE routed_symbol=NONE", output)
+        self.assertEqual(status.regime, "WARMUP")
+        self.assertIsNone(status.active_bot)
+        self.assertIsNone(status.routed_symbol)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "collecting_data")
+
+    def test_exact_slow_sma_history_allows_chop_routing(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "99")})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
+        self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, "ChopBot")
+        self.assertEqual(status.routed_symbol, "SOXL")
+        self.assertEqual(status.action_taken, "market_buy")
 
     def test_downtrend_closes_soxl_without_same_cycle_soxs_buy(self) -> None:
         client = FakeClient(
@@ -210,6 +243,14 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
 
 class AlpacaClientTest(unittest.TestCase):
+    def test_last_completed_bar_end_excludes_in_progress_minute(self) -> None:
+        now = datetime(2026, 5, 21, 13, 50, 12, 345678, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            _last_completed_bar_end(now),
+            datetime(2026, 5, 21, 13, 49, 59, 999999, tzinfo=timezone.utc),
+        )
+
     def test_recent_bars_handles_null_after_hours_response(self) -> None:
         client = AlpacaClient(config())
         client._data_request = lambda *_args, **_kwargs: {
