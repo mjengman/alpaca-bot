@@ -20,6 +20,7 @@ TRADING_BASE_URL_DEFAULT = "https://paper-api.alpaca.markets/v2"
 DATA_BASE_URL_DEFAULT = "https://data.alpaca.markets/v2"
 STATE_PATH_DEFAULT = Path(__file__).resolve().with_name(".bot_state.json")
 FRACTIONAL_QTY_STEP = Decimal("0.000000001")
+MARKET_DATA_MAX_AGE_SECONDS = 90
 SOXL = "SOXL"
 SOXS = "SOXS"
 WARMUP = "WARMUP"
@@ -216,6 +217,32 @@ class AlpacaClient:
 
         return bars
 
+    def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
+        data = self._data_request(
+            "GET",
+            f"/stocks/{symbol}/trades/latest",
+            {"feed": self.config.data_feed},
+        )
+        trade = data.get("trade")
+        if trade is None:
+            return None
+        if not isinstance(trade, dict):
+            raise BotError(f"Unexpected latest trade response: {data!r}")
+        return trade
+
+    def get_latest_quote(self, symbol: str) -> dict[str, Any] | None:
+        data = self._data_request(
+            "GET",
+            f"/stocks/{symbol}/quotes/latest",
+            {"feed": self.config.data_feed},
+        )
+        quote = data.get("quote")
+        if quote is None:
+            return None
+        if not isinstance(quote, dict):
+            raise BotError(f"Unexpected latest quote response: {data!r}")
+        return quote
+
     def submit_market_buy(self, symbol: str, notional: Decimal) -> dict[str, Any] | None:
         payload = {
             "symbol": symbol,
@@ -382,6 +409,64 @@ def latest_close_prices(bars: list[dict[str, Any]]) -> list[Decimal]:
     return prices
 
 
+def latest_complete_bar(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for bar in reversed(bars):
+        if "c" in bar:
+            return bar
+    return None
+
+
+def parse_market_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = trim_timestamp_fraction(value).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def trim_timestamp_fraction(value: str) -> str:
+    dot_index = value.find(".")
+    if dot_index == -1:
+        return value
+
+    suffix_index = len(value)
+    for index in range(dot_index + 1, len(value)):
+        if not value[index].isdigit():
+            suffix_index = index
+            break
+
+    fraction = value[dot_index + 1 : suffix_index]
+    if len(fraction) <= 6:
+        return value
+    return f"{value[: dot_index + 1]}{fraction[:6]}{value[suffix_index:]}"
+
+
+def age_seconds(
+    timestamp: datetime | None,
+    now: datetime | None = None,
+) -> float | None:
+    if timestamp is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return max((current.astimezone(timezone.utc) - timestamp).total_seconds(), 0.0)
+
+
+def bar_end_age_seconds(
+    bar_start: datetime | None,
+    now: datetime | None = None,
+) -> float | None:
+    if bar_start is None:
+        return None
+    return age_seconds(bar_start + timedelta(minutes=1), now)
+
+
 @dataclass(frozen=True)
 class SmaSnapshot:
     symbol: str
@@ -392,6 +477,7 @@ class SmaSnapshot:
     fast_prev_values: list[Decimal]
     slow_now_values: list[Decimal]
     slow_prev_values: list[Decimal]
+    latest_bar_time: datetime | None
 
     @property
     def gap_percent(self) -> Decimal:
@@ -419,6 +505,30 @@ class SmaSnapshot:
 
 
 @dataclass(frozen=True)
+class MarketDataFreshness:
+    symbol: str
+    latest_bar_time: datetime | None
+    latest_bar_close: Decimal | None
+    latest_trade_time: datetime | None
+    latest_trade_price: Decimal | None
+    latest_quote_time: datetime | None
+    latest_quote_bid: Decimal | None
+    latest_quote_ask: Decimal | None
+    bar_age_seconds: float | None
+    trade_age_seconds: float | None
+    quote_age_seconds: float | None
+    trade_error: str | None = None
+    quote_error: str | None = None
+
+    @property
+    def is_stale(self) -> bool:
+        return (
+            self.bar_age_seconds is None
+            or self.bar_age_seconds > MARKET_DATA_MAX_AGE_SECONDS
+        )
+
+
+@dataclass(frozen=True)
 class RegimeSignal:
     source_symbol: str
     price: Decimal
@@ -433,6 +543,12 @@ class BotRoute:
     active_bot: str
     routed_symbol: str | None
     allows_entry: bool
+
+
+@dataclass(frozen=True)
+class EntryDecision:
+    signal: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -466,6 +582,21 @@ class EdgeWalkerStatus:
     position_owner: str | None
     high_water_mark: str | None
     trailing_exit_price: str | None
+    data_source: str | None
+    data_feed: str | None
+    data_status: str | None
+    stream_connected: bool | None
+    stream_authenticated: bool | None
+    stream_subscribed: bool | None
+    stream_error: str | None
+    stream_bar_count: int | None
+    stream_last_message_at: str | None
+    latest_bar_time: str | None
+    bar_age_seconds: float | None
+    latest_trade_time: str | None
+    trade_age_seconds: float | None
+    latest_quote_time: str | None
+    quote_age_seconds: float | None
 
 
 def parse_clock_time(value: Any, field_name: str) -> datetime | None:
@@ -560,10 +691,12 @@ class TrailingStopBot:
         config: BotConfig,
         client: AlpacaClient,
         state_store: BotStateStore | None = None,
+        market_data: Any | None = None,
     ) -> None:
         self.config = config
         self.client = client
         self.state_store = state_store or BotStateStore()
+        self.market_data = market_data
 
     def run_forever(self) -> None:
         print(
@@ -693,19 +826,23 @@ class TrailingStopBot:
         qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
 
         print(
-            f"{symbol}: position qty={format_decimal(qty)} current={current_price:.4f} "
+            f"[RISK] {symbol}: position qty={format_decimal(qty)} current={current_price:.4f} "
             f"hwm={high_water_mark:.4f} bot_stop={stop_price:.4f}"
         )
 
         if current_price <= stop_price:
-            print(f"{symbol}: trailing stop breached; submitting fractional market sell.")
+            print(f"[RISK] {symbol}: trailing stop breached; submitting fractional market sell.")
             self.client.submit_market_sell_qty(symbol, qty)
             self.state_store.clear_symbol(symbol)
         else:
-            print(f"{symbol}: trailing stop holding.")
+            print(f"[RISK] {symbol}: trailing stop holding.")
 
     def _latest_price(self, symbol: str) -> Decimal | None:
-        bars = self.client.get_recent_bars(symbol, 1)
+        current_mark = self._latest_market_mark(symbol)
+        if current_mark is not None:
+            return current_mark
+
+        bars = self._recent_bars(symbol, 1)
         prices = latest_close_prices(bars)
         if not prices:
             return None
@@ -717,8 +854,12 @@ class TrailingStopBot:
         require_cross_context: bool = True,
     ) -> SmaSnapshot | None:
         bars_needed = self.config.slow_sma_minutes + (1 if require_cross_context else 0)
-        bars = self.client.get_recent_bars(symbol, bars_needed)
+        bars = self._recent_bars(symbol, bars_needed)
         prices = latest_close_prices(bars)
+        latest_bar = latest_complete_bar(bars)
+        latest_bar_time = (
+            parse_market_timestamp(latest_bar.get("t")) if latest_bar else None
+        )
         if len(prices) < bars_needed:
             reason = "warming up." if not require_cross_context else "waiting for more data."
             print(
@@ -741,7 +882,30 @@ class TrailingStopBot:
             fast_prev_values=fast_prev_values,
             slow_now_values=slow_now_values,
             slow_prev_values=slow_prev_values,
+            latest_bar_time=latest_bar_time,
         )
+
+    def _recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
+        if self.market_data is not None:
+            return self.market_data.get_recent_bars(symbol, minutes)
+        return self.client.get_recent_bars(symbol, minutes)
+
+    def _latest_market_mark(self, symbol: str) -> Decimal | None:
+        if self.market_data is None:
+            return None
+
+        quote = self.market_data.get_latest_quote(symbol)
+        if quote:
+            bid = optional_decimal_from_api(quote.get("bp"), "latest quote bid")
+            ask = optional_decimal_from_api(quote.get("ap"), "latest quote ask")
+            if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
+                return (bid + ask) / Decimal("2")
+
+        trade = self.market_data.get_latest_trade(symbol)
+        if trade:
+            return optional_decimal_from_api(trade.get("p"), "latest trade price")
+
+        return None
 
     def _maybe_enter(self, symbol: str) -> None:
         asset = self.client.get_asset(symbol)
@@ -773,12 +937,22 @@ class TrailingStopBot:
 
 
 class RegimeDetector:
-    def __init__(self, config: BotConfig, client: AlpacaClient) -> None:
+    def __init__(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+        market_data: Any | None = None,
+    ) -> None:
         self.config = config
         self.client = client
+        self.market_data = market_data
 
     def detect(self) -> tuple[RegimeSignal | None, SmaSnapshot | None]:
-        probe = TrailingStopBot(config_for_symbol(self.config, SOXL), self.client)
+        probe = TrailingStopBot(
+            config_for_symbol(self.config, SOXL),
+            self.client,
+            market_data=self.market_data,
+        )
         snapshot = probe._sma_snapshot(SOXL, require_cross_context=False)
         if snapshot is None:
             return None, None
@@ -821,12 +995,16 @@ class EdgeWalkerBot:
         config: BotConfig,
         client: AlpacaClient,
         state_store: BotStateStore | None = None,
+        market_data: Any | None = None,
     ) -> None:
         self.config = config
         self.client = client
         self.state_store = state_store or BotStateStore()
+        self.market_data = market_data
+        self._latest_freshness: MarketDataFreshness | None = None
 
     def run_once(self) -> EdgeWalkerStatus:
+        self._latest_freshness = None
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
@@ -838,18 +1016,19 @@ class EdgeWalkerBot:
         next_close_text = next_close.isoformat(timespec="seconds") if next_close else "unknown"
         checked_at = datetime.now().isoformat(timespec="seconds")
         print(
-            f"[{checked_at}] "
+            f"[SYSTEM] [{checked_at}] "
             f"edgewalker=True market_open={market_open} "
             f"next_close={next_close_text} "
             f"buying_power={account.get('buying_power')} "
             f"portfolio_value={account.get('portfolio_value')}"
         )
 
-        detector = RegimeDetector(self.config, self.client)
+        detector = RegimeDetector(self.config, self.client, self.market_data)
         signal, soxl_snapshot = detector.detect()
         if signal is None or soxl_snapshot is None:
+            self._print_market_data_status(SOXL)
             print(
-                "regime=WARMUP active_bot=NONE routed_symbol=NONE "
+                "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
                 "entry_signal=False action_taken=collecting_data"
             )
             positions = {
@@ -893,18 +1072,22 @@ class EdgeWalkerBot:
 
         route = RegimeRouter().route(signal.regime)
         routed_symbol = route.routed_symbol or "NONE"
+        strength = self._regime_strength(signal)
         print(
-            f"{SOXL} regime check: price={signal.price:.4f} "
+            f"[REGIME] {SOXL} regime check: price={signal.price:.4f} "
             f"fast_sma={signal.fast_sma:.4f} slow_sma={signal.slow_sma:.4f} "
-            f"gap={signal.gap_percent:.2f}% threshold={self.config.regime_gap_threshold}%"
+            f"gap={signal.gap_percent:.2f}% threshold={self.config.regime_gap_threshold}% "
+            f"strength={strength}"
         )
         print(
-            f"regime={signal.regime} active_bot={route.active_bot} "
+            f"[ROUTER] regime={signal.regime} active_bot={route.active_bot} "
             f"routed_symbol={routed_symbol}"
         )
 
         orders = self.client.list_open_orders()
         positions = {symbol: self.client.get_position(symbol) for symbol in self.basket_symbols}
+        freshness = self._market_data_freshness(SOXL, soxl_snapshot)
+        self._latest_freshness = freshness
 
         if closeout_due:
             action_taken = self._liquidate_all_before_close(positions, orders, seconds_to_close)
@@ -922,7 +1105,10 @@ class EdgeWalkerBot:
             )
 
         if not market_open:
-            print("EdgeWalker: market is closed; entry_signal=False action_taken=no_entry")
+            print(
+                "[SYSTEM] market is closed; "
+                "entry_signal=False action_taken=no_entry"
+            )
             return self._build_status(
                 checked_at,
                 market_open,
@@ -934,6 +1120,44 @@ class EdgeWalkerBot:
                 positions,
                 False,
                 "no_entry",
+            )
+
+        if freshness.is_stale:
+            print(
+                "[DATA] stale market data; "
+                "entry_signal=False action_taken=wait_stale_market_data"
+            )
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "wait_stale_market_data",
+            )
+
+        if self._market_data_blocks_trading(SOXL):
+            status = self._market_data_status(SOXL)
+            print(
+                "[DATA] stream market data is not live; "
+                f"data_status={status.get('data_status')} "
+                "entry_signal=False action_taken=wait_stream_market_data"
+            )
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "wait_stream_market_data",
             )
 
         stale_symbol = self._stale_symbol(route, positions)
@@ -960,6 +1184,7 @@ class EdgeWalkerBot:
             )
 
         if not route.allows_entry or route.routed_symbol is None:
+            print("[ENTRY] BLOCKED reason=route_disallows_entry")
             print("entry_signal=False action_taken=chop_no_trade_placeholder")
             return self._build_status(
                 checked_at,
@@ -982,6 +1207,7 @@ class EdgeWalkerBot:
             config_for_symbol(self.config, route.routed_symbol),
             self.client,
             self.state_store,
+            self.market_data,
         )
 
         if routed_position:
@@ -1023,7 +1249,7 @@ class EdgeWalkerBot:
 
         if any(order.get("side") == "buy" for order in routed_orders):
             print(
-                f"{route.routed_symbol}: buy order already open; "
+                f"[ENTRY] {route.routed_symbol}: buy order already open; "
                 "entry_signal=False action_taken=wait_for_open_order"
             )
             return self._build_status(
@@ -1039,9 +1265,18 @@ class EdgeWalkerBot:
                 "wait_for_open_order",
             )
 
-        entry_signal = self._entry_signal_for_route(route, soxl_snapshot)
+        entry_decision = self._entry_decision_for_route(route, soxl_snapshot)
+        entry_signal = entry_decision.signal
+        print(
+            f"[ENTRY] {route.active_bot} check: "
+            f"entry_signal={entry_signal} reason={entry_decision.reason}"
+        )
         print(f"entry_signal={entry_signal}")
         if not entry_signal:
+            print(
+                f"[ENTRY] BLOCKED bot={route.active_bot} "
+                f"symbol={route.routed_symbol} reason={entry_decision.reason}"
+            )
             print("action_taken=no_entry_signal")
             return self._build_status(
                 checked_at,
@@ -1059,7 +1294,7 @@ class EdgeWalkerBot:
         asset = self.client.get_asset(route.routed_symbol)
         if not asset.get("fractionable"):
             print(
-                f"{route.routed_symbol}: asset is not fractionable; "
+                f"[ENTRY] {route.routed_symbol}: asset is not fractionable; "
                 "action_taken=no_entry"
             )
             return self._build_status(
@@ -1076,7 +1311,11 @@ class EdgeWalkerBot:
             )
 
         print(
-            f"{route.active_bot}: submitting ${self.config.position_notional} "
+            f"[ENTRY] CONFIRMED bot={route.active_bot} "
+            f"symbol={route.routed_symbol} reason={entry_decision.reason}"
+        )
+        print(
+            f"[TRADE] {route.active_bot}: submitting ${self.config.position_notional} "
             f"market buy for {route.routed_symbol}."
         )
         self.client.submit_market_buy(route.routed_symbol, self.config.position_notional)
@@ -1124,6 +1363,8 @@ class EdgeWalkerBot:
                 )
 
         day_pl, day_pl_percent = self._account_day_pl(account)
+        data_status = self._market_data_status(SOXL)
+        freshness = self._latest_freshness
 
         return EdgeWalkerStatus(
             checked_at=checked_at,
@@ -1163,6 +1404,45 @@ class EdgeWalkerBot:
             position_owner=position_owner,
             high_water_mark=self._decimal_text(high_water_mark),
             trailing_exit_price=self._decimal_text(trailing_exit_price),
+            data_source=data_status.get("data_source"),
+            data_feed=data_status.get("data_feed"),
+            data_status=data_status.get("data_status"),
+            stream_connected=data_status.get("stream_connected"),
+            stream_authenticated=data_status.get("stream_authenticated"),
+            stream_subscribed=data_status.get("stream_subscribed"),
+            stream_error=data_status.get("stream_error"),
+            stream_bar_count=data_status.get("stream_bar_count"),
+            stream_last_message_at=data_status.get("stream_last_message_at"),
+            latest_bar_time=(
+                self._time_text(freshness.latest_bar_time)
+                if freshness
+                else data_status.get("latest_bar_time")
+            ),
+            bar_age_seconds=(
+                self._rounded_seconds(freshness.bar_age_seconds)
+                if freshness
+                else data_status.get("bar_age_seconds")
+            ),
+            latest_trade_time=(
+                self._time_text(freshness.latest_trade_time)
+                if freshness
+                else data_status.get("latest_trade_time")
+            ),
+            trade_age_seconds=(
+                self._rounded_seconds(freshness.trade_age_seconds)
+                if freshness
+                else data_status.get("trade_age_seconds")
+            ),
+            latest_quote_time=(
+                self._time_text(freshness.latest_quote_time)
+                if freshness
+                else data_status.get("latest_quote_time")
+            ),
+            quote_age_seconds=(
+                self._rounded_seconds(freshness.quote_age_seconds)
+                if freshness
+                else data_status.get("quote_age_seconds")
+            ),
         )
 
     def _active_position(
@@ -1199,17 +1479,216 @@ class EdgeWalkerBot:
             return None
         return format_decimal(value)
 
-    def _entry_signal_for_route(self, route: BotRoute, soxl_snapshot: SmaSnapshot) -> bool:
+    def _regime_strength(self, signal: RegimeSignal) -> str:
+        threshold = self.config.regime_gap_threshold
+        if signal.regime == SIDEWAYS or threshold <= 0:
+            return "RANGE"
+        if signal.gap_percent < threshold * Decimal("1.5"):
+            return "WEAK"
+        if signal.gap_percent < threshold * Decimal("3"):
+            return "MODERATE"
+        return "STRONG"
+
+    def _market_data_status(self, symbol: str) -> dict[str, Any]:
+        if self.market_data is None:
+            status = "LIVE" if self._latest_freshness and not self._latest_freshness.is_stale else "REST"
+            return {
+                "data_source": "rest",
+                "data_feed": self.config.data_feed,
+                "data_status": status,
+                "stream_connected": None,
+                "stream_authenticated": None,
+                "stream_subscribed": None,
+                "stream_error": None,
+                "stream_bar_count": None,
+                "stream_last_message_at": None,
+                "latest_bar_time": None,
+                "bar_age_seconds": None,
+                "latest_trade_time": None,
+                "trade_age_seconds": None,
+                "latest_quote_time": None,
+                "quote_age_seconds": None,
+            }
+
+        return self.market_data.status(
+            symbol,
+            required_bars=self.config.slow_sma_minutes,
+        )
+
+    def _print_market_data_status(self, symbol: str) -> None:
+        status = self._market_data_status(symbol)
+        print(f"[DATA] HEALTH {self._status_summary(status)}")
+        if status.get("stream_error"):
+            print(f"[DATA] ERROR stream_error={status.get('stream_error')}")
+
+    def _market_data_blocks_trading(self, symbol: str) -> bool:
+        if self.market_data is None:
+            return False
+        return self._market_data_status(symbol).get("data_status") != "LIVE"
+
+    def _market_data_freshness(
+        self,
+        symbol: str,
+        snapshot: SmaSnapshot,
+    ) -> MarketDataFreshness:
+        now = datetime.now(timezone.utc)
+        trade = None
+        quote = None
+        trade_error = None
+        quote_error = None
+
+        data_source = self.market_data or self.client
+
+        try:
+            trade = data_source.get_latest_trade(symbol)
+        except BotError as exc:
+            trade_error = str(exc)
+
+        try:
+            quote = data_source.get_latest_quote(symbol)
+        except BotError as exc:
+            quote_error = str(exc)
+
+        latest_trade_time = parse_market_timestamp(trade.get("t")) if trade else None
+        latest_quote_time = parse_market_timestamp(quote.get("t")) if quote else None
+        freshness = MarketDataFreshness(
+            symbol=symbol,
+            latest_bar_time=snapshot.latest_bar_time,
+            latest_bar_close=snapshot.price,
+            latest_trade_time=latest_trade_time,
+            latest_trade_price=(
+                optional_decimal_from_api(trade.get("p"), "latest trade price")
+                if trade
+                else None
+            ),
+            latest_quote_time=latest_quote_time,
+            latest_quote_bid=(
+                optional_decimal_from_api(quote.get("bp"), "latest quote bid")
+                if quote
+                else None
+            ),
+            latest_quote_ask=(
+                optional_decimal_from_api(quote.get("ap"), "latest quote ask")
+                if quote
+                else None
+            ),
+            bar_age_seconds=bar_end_age_seconds(snapshot.latest_bar_time, now),
+            trade_age_seconds=age_seconds(latest_trade_time, now),
+            quote_age_seconds=age_seconds(latest_quote_time, now),
+            trade_error=trade_error,
+            quote_error=quote_error,
+        )
+        print(f"[DATA] HEALTH {self._freshness_summary(freshness)}")
+        if freshness.is_stale or freshness.trade_error or freshness.quote_error:
+            print(f"[DATA] DETAILS market_data_freshness={self._freshness_payload(freshness)}")
+        return freshness
+
+    def _freshness_payload(self, freshness: MarketDataFreshness) -> str:
+        payload = {
+            "symbol": freshness.symbol,
+            "now": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "latestBarTime": self._time_text(freshness.latest_bar_time),
+            "latestBarClose": self._float_value(freshness.latest_bar_close),
+            "latestTradeTime": self._time_text(freshness.latest_trade_time),
+            "latestTradePrice": self._float_value(freshness.latest_trade_price),
+            "latestQuoteTime": self._time_text(freshness.latest_quote_time),
+            "latestQuoteBid": self._float_value(freshness.latest_quote_bid),
+            "latestQuoteAsk": self._float_value(freshness.latest_quote_ask),
+            "barAgeSeconds": self._rounded_seconds(freshness.bar_age_seconds),
+            "tradeAgeSeconds": self._rounded_seconds(freshness.trade_age_seconds),
+            "quoteAgeSeconds": self._rounded_seconds(freshness.quote_age_seconds),
+            "maxAgeSeconds": MARKET_DATA_MAX_AGE_SECONDS,
+            "isStale": freshness.is_stale,
+        }
+        if freshness.trade_error:
+            payload["latestTradeError"] = freshness.trade_error
+        if freshness.quote_error:
+            payload["latestQuoteError"] = freshness.quote_error
+        return json.dumps(payload, sort_keys=True)
+
+    def _time_text(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00",
+            "Z",
+        )
+
+    def _float_value(self, value: Decimal | None) -> float | None:
+        if value is None:
+            return None
+        return float(value)
+
+    def _rounded_seconds(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        return round(value, 3)
+
+    def _freshness_summary(self, freshness: MarketDataFreshness) -> str:
+        status = self._market_data_status(freshness.symbol)
+        stream_state = "CONNECTED" if status.get("stream_connected") else "DISCONNECTED"
+        if status.get("data_status") and status.get("data_status") not in {"LIVE", "REST"}:
+            stream_state = str(status.get("data_status"))
+        return (
+            f"bars={self._health_piece(freshness.bar_age_seconds)} "
+            f"quotes={self._health_piece(freshness.quote_age_seconds)} "
+            f"trades={self._health_piece(freshness.trade_age_seconds)} "
+            f"stream={stream_state}"
+        )
+
+    def _status_summary(self, status: dict[str, Any]) -> str:
+        stream_state = "CONNECTED" if status.get("stream_connected") else "DISCONNECTED"
+        if status.get("data_status") and status.get("data_status") not in {"LIVE", "REST"}:
+            stream_state = str(status.get("data_status"))
+        bar_count = status.get("stream_bar_count")
+        bars = status.get("data_status") or "UNKNOWN"
+        if bar_count is not None:
+            bars = f"{bars} bars={bar_count}/{self.config.slow_sma_minutes}"
+        return (
+            f"bars={bars} ({self._age_label(status.get('bar_age_seconds'))}) "
+            f"quotes={self._health_piece(status.get('quote_age_seconds'))} "
+            f"trades={self._health_piece(status.get('trade_age_seconds'))} "
+            f"stream={stream_state}"
+        )
+
+    def _health_piece(self, age: float | None) -> str:
+        if age is None:
+            return "WAITING"
+        if age > MARKET_DATA_MAX_AGE_SECONDS:
+            return f"STALE ({self._age_label(age)})"
+        return f"LIVE ({self._age_label(age)})"
+
+    def _age_label(self, value: Any) -> str:
+        if value is None:
+            return "--"
+        seconds = float(value)
+        if seconds < 1:
+            return "<1s"
+        return f"{round(seconds)}s"
+
+    def _entry_decision_for_route(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision:
         if route.active_bot == MOMENTUM_BOT:
-            return soxl_snapshot.crossed_above
+            if soxl_snapshot.crossed_above:
+                return EntryDecision(True, "fresh_cross_confirmed")
+            if soxl_snapshot.price > soxl_snapshot.fast_sma * Decimal("1.005"):
+                return EntryDecision(False, "already_extended_above_fast_sma")
+            if soxl_snapshot.price < soxl_snapshot.fast_sma:
+                return EntryDecision(False, "trend_strength_weakening")
+            return EntryDecision(False, "no_fresh_cross")
 
         if route.active_bot == CHOP_BOT:
             if soxl_snapshot.slow_sma == 0:
                 print(
-                    "ChopBot entry check: slow_sma=0.0000 "
+                    "[ENTRY] ChopBot entry check: slow_sma=0.0000 "
                     "entry_signal=False"
                 )
-                return False
+                return EntryDecision(False, "invalid_mean")
             discount_percent = (
                 (soxl_snapshot.slow_sma - soxl_snapshot.price)
                 / soxl_snapshot.slow_sma
@@ -1219,30 +1698,42 @@ class EdgeWalkerBot:
                 Decimal("1")
                 - (self.config.chop_entry_discount_percent / Decimal("100"))
             )
+            if entry_signal:
+                reason = "discount_confirmed"
+            elif discount_percent <= 0:
+                reason = "price_above_mean"
+            else:
+                reason = "discount_insufficient"
             print(
-                f"ChopBot entry check: price={soxl_snapshot.price:.4f} "
+                f"[ENTRY] ChopBot entry check: price={soxl_snapshot.price:.4f} "
                 f"slow_sma={soxl_snapshot.slow_sma:.4f} "
                 f"discount={discount_percent:.2f}% "
-                f"threshold={self.config.chop_entry_discount_percent}%"
+                f"threshold={self.config.chop_entry_discount_percent}% "
+                f"reason={reason}"
             )
-            return entry_signal
+            return EntryDecision(entry_signal, reason)
 
         if route.active_bot == INVERSE_BOT and route.routed_symbol:
             inverse_bot = TrailingStopBot(
                 config_for_symbol(self.config, route.routed_symbol),
                 self.client,
                 self.state_store,
+                self.market_data,
             )
             snapshot = inverse_bot._sma_snapshot(route.routed_symbol)
             if snapshot is None:
-                return False
+                return EntryDecision(False, "inverse_confirmation_missing")
             print(
-                f"{route.routed_symbol} entry check: price={snapshot.price:.4f} "
+                f"[ENTRY] {route.routed_symbol} entry check: price={snapshot.price:.4f} "
                 f"fast_sma={snapshot.fast_sma:.4f} slow_sma={snapshot.slow_sma:.4f}"
             )
-            return snapshot.crossed_above
+            if snapshot.crossed_above:
+                return EntryDecision(True, "inverse_momentum_confirmed")
+            if snapshot.fast_sma <= snapshot.slow_sma or snapshot.price < snapshot.fast_sma:
+                return EntryDecision(False, "soxs_momentum_weak")
+            return EntryDecision(False, "inverse_confirmation_missing")
 
-        return False
+        return EntryDecision(False, "route_not_supported")
 
     def _stale_symbol(
         self,
@@ -1276,7 +1767,7 @@ class EdgeWalkerBot:
         symbol_orders = [order for order in orders if order.get("symbol") == symbol]
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(
-                f"{symbol}: regime={regime} owner={owner_text} "
+                f"[RISK] {symbol}: regime={regime} owner={owner_text} "
                 f"active_bot={active_bot} stale exposure, sell order already open; "
                 "entry_signal=False action_taken=wait_for_stale_close"
             )
@@ -1287,11 +1778,11 @@ class EdgeWalkerBot:
             rounding=ROUND_DOWN,
         )
         if qty <= 0:
-            print(f"{symbol}: stale exposure not found; entry_signal=False action_taken=noop")
+            print(f"[RISK] {symbol}: stale exposure not found; entry_signal=False action_taken=noop")
             return "noop"
 
         print(
-            f"{symbol}: stale exposure under regime={regime}; "
+            f"[RISK] {symbol}: stale exposure under regime={regime}; "
             f"owner={owner_text} active_bot={active_bot}; "
             f"selling qty={format_decimal(qty)}."
         )
@@ -1309,7 +1800,7 @@ class EdgeWalkerBot:
     ) -> str | None:
         reclaim = soxl_snapshot.price >= soxl_snapshot.slow_sma
         print(
-            f"ChopBot exit check: price={soxl_snapshot.price:.4f} "
+            f"[RISK] ChopBot exit check: price={soxl_snapshot.price:.4f} "
             f"slow_sma={soxl_snapshot.slow_sma:.4f} reclaim={reclaim}"
         )
         if not reclaim:
@@ -1317,7 +1808,7 @@ class EdgeWalkerBot:
 
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(
-                f"{symbol}: ChopBot slow SMA reclaim, sell order already open; "
+                f"[RISK] {symbol}: ChopBot slow SMA reclaim, sell order already open; "
                 "entry_signal=False action_taken=wait_for_chop_exit_order"
             )
             return "wait_for_chop_exit_order"
@@ -1327,11 +1818,11 @@ class EdgeWalkerBot:
             rounding=ROUND_DOWN,
         )
         if qty <= 0:
-            print(f"{symbol}: ChopBot exit found no long position; action_taken=noop")
+            print(f"[RISK] {symbol}: ChopBot exit found no long position; action_taken=noop")
             return "noop"
 
         print(
-            f"{symbol}: ChopBot slow SMA reclaim; "
+            f"[TRADE] {symbol}: ChopBot slow SMA reclaim; "
             f"selling qty={format_decimal(qty)}."
         )
         self.client.submit_market_sell_qty(symbol, qty)
@@ -1359,13 +1850,13 @@ class EdgeWalkerBot:
 
             symbol_orders = [order for order in orders if order.get("symbol") == symbol]
             if any(order.get("side") == "sell" for order in symbol_orders):
-                print(f"{symbol}: closeout window active, sell order already open.")
+                print(f"[RISK] {symbol}: closeout window active, sell order already open.")
                 sell_pending = True
                 continue
 
             qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
             print(
-                f"{symbol}: market closes in {minutes_text} minutes; "
+                f"[TRADE] {symbol}: market closes in {minutes_text} minutes; "
                 f"selling all shares qty={format_decimal(qty)}."
             )
             self.client.submit_market_sell_qty(symbol, qty)

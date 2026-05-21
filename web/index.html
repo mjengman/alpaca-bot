@@ -10,7 +10,7 @@
     <main class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Alpaca Paper Trading</p>
+          <p class="eyebrow">AUTONOMOUS STRATEGY ENGINE</p>
           <h1>EdgeWalker</h1>
         </div>
         <div class="top-actions">
@@ -316,6 +316,14 @@
         <div class="metric">
           <span
             class="has-tooltip"
+            data-tooltip="Live Alpaca stream health. EdgeWalker will not trade unless the stream is live and the latest completed one-minute bar is fresh."
+            >Data</span
+          >
+          <strong id="dataStatusValue">Waiting</strong>
+        </div>
+        <div class="metric">
+          <span
+            class="has-tooltip"
             data-tooltip="Most recent completed strategy evaluation."
             >Last check</span
           >
@@ -343,12 +351,21 @@
         <div class="section-head">
           <h2
             class="has-tooltip"
-            data-tooltip="Rolling 24-hour account, signal, position, and order-management output from the bot."
+            data-tooltip="Current trading-day account, signal, position, and order-management output from the bot."
           >
             Activity
           </h2>
           <div class="section-actions">
             <span id="errorText"></span>
+            <button
+              id="activityExpand"
+              type="button"
+              class="log-toggle log-expand has-tooltip"
+              aria-pressed="false"
+              data-tooltip="Expand the activity log vertically for review."
+            >
+              ^
+            </button>
             <button
               id="activityToggle"
               type="button"

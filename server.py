@@ -19,9 +19,12 @@ from bot import (
     BotConfig,
     BotError,
     EdgeWalkerBot,
+    SOXL,
+    SOXS,
     load_dotenv,
     parse_clock_time,
 )
+from market_data import StreamingMarketDataService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -55,6 +58,7 @@ class RunnerSnapshot:
     last_output: list[str]
     activity_log: list[str]
     edgewalker_status: dict[str, Any] | None
+    market_data_status: dict[str, Any] | None
     last_error: str | None
 
 
@@ -65,6 +69,8 @@ class BotRunner:
         self._stop_event: threading.Event | None = None
         LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         self._config = BotConfig.from_env()
+        self._market_data = StreamingMarketDataService(self._config, symbols=(SOXL, SOXS))
+        self._market_data.ensure_running(self._config)
         self._running = False
         self._cycle_count = 0
         self._last_started_at: str | None = None
@@ -89,6 +95,7 @@ class BotRunner:
                 return self._snapshot_locked()
 
             self._config = config
+            self._market_data.ensure_running(config)
             self._running = True
             self._last_started_at = now_iso()
             self._last_stopped_at = None
@@ -122,9 +129,14 @@ class BotRunner:
             self._append_activity_locked(["Bot stopped."])
             return self._snapshot_locked()
 
+    def shutdown(self) -> None:
+        self.stop()
+        self._market_data.stop()
+
     def run_once(self, config: BotConfig) -> RunnerSnapshot:
         with self._lock:
             self._config = config
+            self._market_data.ensure_running(config)
         self._run_cycle(config)
         return self.snapshot()
 
@@ -221,7 +233,12 @@ class BotRunner:
         run_timestamp = datetime.now(timezone.utc)
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                status = EdgeWalkerBot(config, AlpacaClient(config)).run_once()
+                self._market_data.ensure_running(config)
+                status = EdgeWalkerBot(
+                    config,
+                    AlpacaClient(config),
+                    market_data=self._market_data,
+                ).run_once()
                 edgewalker_status = asdict(status)
         except BotError as exc:
             error = str(exc)
@@ -353,6 +370,10 @@ class BotRunner:
 
     def _snapshot_locked(self) -> RunnerSnapshot:
         self._activity_log = _current_ny_activity(self._activity_log)
+        market_data_status = self._market_data.status(
+            SOXL,
+            required_bars=self._config.slow_sma_minutes,
+        )
         return RunnerSnapshot(
             running=self._running,
             symbol=self._config.symbol,
@@ -374,6 +395,7 @@ class BotRunner:
             last_output=self._last_output,
             activity_log=[line for _, line in self._activity_log],
             edgewalker_status=self._edgewalker_status,
+            market_data_status=market_data_status,
             last_error=self._last_error,
         )
 
@@ -474,7 +496,7 @@ def _append_daily_jsonl(
 def _format_regime_transition(transition: dict[str, Any]) -> str:
     gap = transition.get("gap_percent")
     gap_text = f" gap={gap}%" if gap is not None else ""
-    return f"REGIME CHANGE: {transition['from']} -> {transition['to']}{gap_text}"
+    return f"[REGIME] REGIME CHANGE: {transition['from']} -> {transition['to']}{gap_text}"
 
 
 def decimal_from_payload(
@@ -648,7 +670,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        AppHandler.runner.stop()
+        AppHandler.runner.shutdown()
         server.server_close()
     return 0
 

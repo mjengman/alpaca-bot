@@ -3,12 +3,14 @@ const state = {
   hydrated: false,
   logHydrated: false,
   logCollapsed: false,
+  logExpanded: false,
   logText: "",
   busy: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
 const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
+const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
@@ -29,6 +31,7 @@ const els = {
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
   mode: document.querySelector("#modeValue"),
+  dataStatus: document.querySelector("#dataStatusValue"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   cycles: document.querySelector("#cycleValue"),
@@ -46,6 +49,7 @@ const els = {
   trailExit: document.querySelector("#trailExitValue"),
   error: document.querySelector("#errorText"),
   activityPanel: document.querySelector("#activityPanel"),
+  activityExpand: document.querySelector("#activityExpand"),
   activityToggle: document.querySelector("#activityToggle"),
   log: document.querySelector("#logOutput"),
 };
@@ -177,6 +181,66 @@ function renderMode(isDryRun) {
   els.mode.textContent = isDryRun ? "Dry run" : "Paper live";
 }
 
+function formatAgeSeconds(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return null;
+  }
+  if (parsed < 1) {
+    return "<1s";
+  }
+  return `${Math.round(parsed)}s`;
+}
+
+function renderDataHealth(status) {
+  if (!els.dataStatus) {
+    return;
+  }
+
+  els.dataStatus.classList.remove("data-live", "data-warn", "data-danger");
+
+  if (!status) {
+    els.dataStatus.textContent = "Waiting";
+    els.dataStatus.classList.add("data-warn");
+    return;
+  }
+
+  const labels = {
+    LIVE: "Live",
+    WARMING_UP: "Warming",
+    CONNECTING: "Connecting",
+    DISCONNECTED: "Disconnected",
+    STALE: "Stale",
+    MISSING_DEPENDENCY: "Missing WebSocket",
+    ERROR: "Error",
+    REST: "REST",
+  };
+  const rawStatus = status.data_status || "Waiting";
+  const label = labels[rawStatus] || formatLabel(rawStatus);
+  const feed = status.data_feed ? status.data_feed.toUpperCase() : null;
+  const age = formatAgeSeconds(status.bar_age_seconds);
+  const pieces = [label];
+  if (feed) {
+    pieces.push(feed);
+  }
+  if (age) {
+    pieces.push(age);
+  }
+  els.dataStatus.textContent = pieces.join(" · ");
+
+  if (rawStatus === "LIVE") {
+    els.dataStatus.classList.add("data-live");
+  } else if (
+    rawStatus === "STALE" ||
+    rawStatus === "ERROR" ||
+    rawStatus === "MISSING_DEPENDENCY"
+  ) {
+    els.dataStatus.classList.add("data-danger");
+  } else {
+    els.dataStatus.classList.add("data-warn");
+  }
+}
+
 function savedTheme() {
   try {
     return localStorage.getItem(THEME_KEY);
@@ -227,9 +291,25 @@ function saveLogCollapsed(collapsed) {
   }
 }
 
+function saveLogExpanded(expanded) {
+  try {
+    localStorage.setItem(LOG_EXPANDED_KEY, expanded ? "1" : "0");
+  } catch {
+    return;
+  }
+}
+
 function loadLogCollapsed() {
   try {
     return localStorage.getItem(LOG_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function loadLogExpanded() {
+  try {
+    return localStorage.getItem(LOG_EXPANDED_KEY) === "1";
   } catch {
     return false;
   }
@@ -246,14 +326,37 @@ function setLogCollapsed(collapsed) {
   els.activityToggle.dataset.tooltip = collapsed
     ? "Show the rolling activity log."
     : "Hide the rolling activity log.";
+  if (els.activityExpand) {
+    els.activityExpand.disabled = collapsed;
+  }
   saveLogCollapsed(collapsed);
 }
 
+function setLogExpanded(expanded) {
+  state.logExpanded = expanded;
+  if (!els.activityPanel || !els.activityExpand) {
+    return;
+  }
+  els.activityPanel.classList.toggle("is-expanded", expanded);
+  els.activityExpand.textContent = expanded ? "v" : "^";
+  els.activityExpand.setAttribute("aria-pressed", String(expanded));
+  els.activityExpand.dataset.tooltip = expanded
+    ? "Return the activity log to compact height."
+    : "Expand the activity log vertically for review.";
+  saveLogExpanded(expanded);
+}
+
 function setupActivityLog() {
+  setLogExpanded(loadLogExpanded());
   setLogCollapsed(loadLogCollapsed());
   if (els.activityToggle) {
     els.activityToggle.addEventListener("click", () => {
       setLogCollapsed(!state.logCollapsed);
+    });
+  }
+  if (els.activityExpand) {
+    els.activityExpand.addEventListener("click", () => {
+      setLogExpanded(!state.logExpanded);
     });
   }
 }
@@ -329,6 +432,8 @@ function formatLabel(value) {
     wait_for_closeout_order: "Waiting For Closeout",
     wait_for_open_order: "Waiting For Buy Order",
     wait_for_data: "Waiting For Data",
+    wait_stale_market_data: "Stale Market Data",
+    wait_stream_market_data: "Waiting For Stream",
     no_entry: "No Entry",
     noop: "No Action",
   };
@@ -412,9 +517,36 @@ function escapeHtml(value) {
 
 function logToneForLine(line) {
   const lower = line.toLowerCase();
+  if (lower.includes("regime change")) {
+    if (lower.includes("-> uptrend")) {
+      return "log-green";
+    }
+    if (lower.includes("-> downtrend")) {
+      return "log-red";
+    }
+    return "log-yellow";
+  }
+  if (lower.includes("[data] health")) {
+    if (
+      lower.includes("stale") ||
+      lower.includes("disconnected") ||
+      lower.includes("error")
+    ) {
+      return "log-red";
+    }
+    if (lower.includes("warming") || lower.includes("waiting")) {
+      return "log-yellow";
+    }
+    return "log-green";
+  }
   if (
     lower.includes("[error]") ||
     lower.includes("[fatal]") ||
+    lower.includes("wait_stale_market_data") ||
+    lower.includes("wait_stream_market_data") ||
+    lower.includes("stale market data") ||
+    lower.includes("stream market data is not live") ||
+    lower.includes('"isstale": true') ||
     lower.includes("downtrend") ||
     lower.includes("stale exposure") ||
     lower.includes("selling") ||
@@ -426,8 +558,8 @@ function logToneForLine(line) {
     return "log-red";
   }
   if (
-    lower.includes("uptrend") ||
-    lower.includes("momentumbot") ||
+    lower.includes("regime=uptrend") ||
+    lower.includes("[entry] confirmed") ||
     lower.includes("market_buy") ||
     lower.includes("chop exit") ||
     lower.includes("chop_exit") ||
@@ -438,8 +570,8 @@ function logToneForLine(line) {
     return "log-green";
   }
   if (
-    lower.includes("sideways") ||
-    lower.includes("chop") ||
+    lower.includes("regime=sideways") ||
+    lower.includes("[entry] blocked") ||
     lower.includes("waiting") ||
     lower.includes("warmup") ||
     lower.includes("collecting_data") ||
@@ -456,9 +588,20 @@ function logToneForLine(line) {
   return "log-white";
 }
 
+function logClassesForLine(line) {
+  const classes = ["log-line", logToneForLine(line)];
+  const lower = line.toLowerCase();
+  if (lower.includes("regime change")) {
+    classes.push("log-transition");
+  }
+  if (line.startsWith("[")) {
+    classes.push("log-tagged");
+  }
+  return classes.join(" ");
+}
+
 function renderLogLine(line) {
-  const tone = logToneForLine(line);
-  return `<span class="log-line ${tone}">${escapeHtml(line) || "&nbsp;"}</span>`;
+  return `<span class="${logClassesForLine(line)}">${escapeHtml(line) || "&nbsp;"}</span>`;
 }
 
 function renderLog(data) {
@@ -521,6 +664,7 @@ function render(data) {
 
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
   renderMode(isDryRun);
+  renderDataHealth(data.edgewalker_status || data.market_data_status);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.cycles.textContent = String(data.cycle_count || 0);

@@ -15,6 +15,8 @@ from bot import (
     BotStateStore,
     EdgeWalkerBot,
     _last_completed_bar_end,
+    bar_end_age_seconds,
+    parse_market_timestamp,
 )
 
 
@@ -38,8 +40,21 @@ def config() -> BotConfig:
     )
 
 
-def bars(*closes: str) -> list[dict[str, Any]]:
-    return [{"c": close} for close in closes]
+def bars(
+    *closes: str,
+    latest_at: datetime | None = None,
+) -> list[dict[str, Any]]:
+    latest = latest_at or datetime.now(timezone.utc)
+    start = latest - timedelta(minutes=max(len(closes) - 1, 0))
+    return [
+        {
+            "c": close,
+            "t": (start + timedelta(minutes=index))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        for index, close in enumerate(closes)
+    ]
 
 
 class FakeClient:
@@ -47,9 +62,13 @@ class FakeClient:
         self,
         bar_map: dict[str, list[dict[str, Any]]],
         positions: dict[str, dict[str, Any] | None] | None = None,
+        latest_trades: dict[str, dict[str, Any] | None] | None = None,
+        latest_quotes: dict[str, dict[str, Any] | None] | None = None,
     ) -> None:
         self.bar_map = bar_map
         self.positions = positions or {}
+        self.latest_trades = latest_trades or {}
+        self.latest_quotes = latest_quotes or {}
         self.buys: list[tuple[str, Decimal]] = []
         self.sells: list[tuple[str, Decimal]] = []
 
@@ -64,6 +83,12 @@ class FakeClient:
 
     def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
         return self.bar_map[symbol][-minutes:]
+
+    def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
+        return self.latest_trades.get(symbol)
+
+    def get_latest_quote(self, symbol: str) -> dict[str, Any] | None:
+        return self.latest_quotes.get(symbol)
 
     def list_open_orders(self) -> list[dict[str, Any]]:
         return []
@@ -81,12 +106,65 @@ class FakeClient:
         self.sells.append((symbol, qty))
 
 
+class FakeMarketData:
+    source_name = "stream"
+
+    def __init__(
+        self,
+        bar_map: dict[str, list[dict[str, Any]]],
+        data_status: str = "LIVE",
+        latest_trades: dict[str, dict[str, Any] | None] | None = None,
+        latest_quotes: dict[str, dict[str, Any] | None] | None = None,
+    ) -> None:
+        self.bar_map = bar_map
+        self.data_status = data_status
+        self.latest_trades = latest_trades or {}
+        self.latest_quotes = latest_quotes or {}
+
+    def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
+        return self.bar_map[symbol][-minutes:]
+
+    def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
+        return self.latest_trades.get(symbol)
+
+    def get_latest_quote(self, symbol: str) -> dict[str, Any] | None:
+        return self.latest_quotes.get(symbol)
+
+    def status(self, symbol: str, required_bars: int | None = None) -> dict[str, Any]:
+        symbol_bars = self.bar_map.get(symbol, [])
+        latest_bar_time = (
+            parse_market_timestamp(symbol_bars[-1].get("t")) if symbol_bars else None
+        )
+        return {
+            "data_source": "stream",
+            "data_feed": "iex",
+            "data_status": self.data_status,
+            "stream_connected": self.data_status == "LIVE",
+            "stream_authenticated": self.data_status == "LIVE",
+            "stream_subscribed": self.data_status == "LIVE",
+            "stream_error": None,
+            "stream_bar_count": len(symbol_bars),
+            "stream_last_message_at": None,
+            "latest_bar_time": (
+                latest_bar_time.isoformat().replace("+00:00", "Z")
+                if latest_bar_time
+                else None
+            ),
+            "bar_age_seconds": bar_end_age_seconds(latest_bar_time),
+            "latest_trade_time": None,
+            "trade_age_seconds": None,
+            "latest_quote_time": None,
+            "quote_age_seconds": None,
+        }
+
+
 class EdgeWalkerBotTest(unittest.TestCase):
     def run_bot(
         self,
         client: FakeClient,
         setup_state: Any | None = None,
         bot_config: BotConfig | None = None,
+        market_data: FakeMarketData | None = None,
     ) -> tuple[str, Any]:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_store = BotStateStore(Path(tmpdir) / "state.json")
@@ -98,6 +176,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
                     bot_config or config(),
                     client,
                     state_store,
+                    market_data,
                 ).run_once()
             return output.getvalue(), status
 
@@ -115,6 +194,14 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "collecting_data")
 
+    def test_market_timestamp_accepts_alpaca_nanosecond_precision(self) -> None:
+        parsed = parse_market_timestamp("2026-05-21T14:56:53.123456789Z")
+
+        self.assertEqual(
+            parsed,
+            datetime(2026, 5, 21, 14, 56, 53, 123456, tzinfo=timezone.utc),
+        )
+
     def test_exact_slow_sma_history_allows_chop_routing(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "99")})
 
@@ -127,6 +214,53 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "ChopBot")
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_stale_market_data_blocks_strategy_actions(self) -> None:
+        stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        client = FakeClient({"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("market_data_freshness=", output)
+        self.assertIn('"isStale": true', output)
+        self.assertIn("action_taken=wait_stale_market_data", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, "ChopBot")
+        self.assertEqual(status.routed_symbol, "SOXL")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "wait_stale_market_data")
+
+    def test_streaming_market_data_replaces_rest_bars_for_regime(self) -> None:
+        stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        client = FakeClient({"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)})
+        stream = FakeMarketData({"SOXL": bars("100", "101", "99")})
+
+        output, status = self.run_bot(client, market_data=stream)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
+        self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
+        self.assertEqual(status.data_source, "stream")
+        self.assertEqual(status.data_status, "LIVE")
+        self.assertEqual(status.action_taken, "market_buy")
+
+    def test_stream_status_must_be_live_before_strategy_actions(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "99")})
+        stream = FakeMarketData(
+            {"SOXL": bars("100", "101", "99")},
+            data_status="CONNECTING",
+        )
+
+        output, status = self.run_bot(client, market_data=stream)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("action_taken=wait_stream_market_data", output)
+        self.assertEqual(status.data_source, "stream")
+        self.assertEqual(status.data_status, "CONNECTING")
+        self.assertEqual(status.action_taken, "wait_stream_market_data")
 
     def test_downtrend_closes_soxl_without_same_cycle_soxs_buy(self) -> None:
         client = FakeClient(

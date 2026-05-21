@@ -1,6 +1,7 @@
 .env
 .bot_state.json
 .bot_activity.json
+.market_data_state.json
 logs/
 __pycache__/
 *.pyc

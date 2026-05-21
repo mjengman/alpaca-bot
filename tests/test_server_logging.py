@@ -116,7 +116,7 @@ class ServerLoggingTest(unittest.TestCase):
         )
         self.assertEqual(
             _format_regime_transition(transition),
-            "REGIME CHANGE: SIDEWAYS -> DOWNTREND gap=0.28%",
+            "[REGIME] REGIME CHANGE: SIDEWAYS -> DOWNTREND gap=0.28%",
         )
 
 

@@ -7,6 +7,7 @@ A small local proof of concept for Alpaca paper trading. EdgeWalker polls one-mi
 Browser UI:
 
 ```bash
+python3 -m pip install -r requirements.txt
 python3 server.py
 ```
 
@@ -27,6 +28,7 @@ python3 bot.py --edgewalker
 ```
 
 Omit `--edgewalker` to run the original single-symbol trailing stop bot.
+For live EdgeWalker testing, prefer the browser server because it owns the WebSocket stream and warmup cache. The CLI path is still useful for manual order tests and diagnostics.
 
 The checked-in `.env.example` shows the settings. The local `.env` file is ignored by git.
 The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
@@ -35,14 +37,16 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 
 - Regime source: `SOXL`
 - Regimes: `UPTREND`, `SIDEWAYS`, `DOWNTREND` from fast/slow SMA separation
-- Router: `MomentumBot` trades `SOXL`, `InverseBot` trades `SOXS`, `ChopBot` is a no-trade placeholder
-- Entry: active routed bot may buy when its fast SMA crosses above its slow SMA
+- Router: `MomentumBot` trades `SOXL`, `InverseBot` trades `SOXS`, `ChopBot` trades SOXL mean reversion
+- Entry: Momentum and Inverse use fast/slow SMA crossover timing; ChopBot buys SOXL when SIDEWAYS price is discounted below the slow SMA
 - Position size: market buy by `POSITION_NOTIONAL`, which supports fractional shares through Alpaca notional orders
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
 - Regime flip guard: stale opposite exposure is sold first, with no same-cycle reversal
 - Poll interval: `POLL_SECONDS`, default 60 seconds
 - Closeout guard: sell the full open position inside `CLOSE_LIQUIDATE_MINUTES`, default 5, before Alpaca's reported market close
-- Market data feed: `DATA_FEED=iex`, suitable for free Alpaca market data plans
+- Market data feed: `DATA_FEED=iex`, suitable for free Alpaca market data plans; use `sip` only if the account has SIP entitlement
+- Live data source: the local server keeps an Alpaca WebSocket stream warm for SOXL/SOXS trades, quotes, and one-minute bars
+- Trading block: EdgeWalker will not enter trades unless the stream is live and the latest completed one-minute bar is fresh
 - Market-hours guard: no fresh entry orders are submitted while Alpaca reports the market is closed
 
 The bot defaults to `DRY_RUN=true`, so it will show what it would do without placing orders. Set `DRY_RUN=false` in `.env` when you want the paper account to place orders.
