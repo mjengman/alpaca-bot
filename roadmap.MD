@@ -69,6 +69,8 @@ foundation for future work.
   submission/rejection, broker acceptance/fill reconciliation,
   position opened/closed transitions, and trailing-risk management events
 - Broker constraint classifier and dashboard state for rejected orders
+- Lifecycle-derived session realized P/L summary and closed-trade count in the
+  dashboard
 
 ## Priority 0: Operational Truth
 
@@ -89,8 +91,10 @@ Goal: make realized and unrealized performance painfully obvious.
 
 Notes:
 
-- Realized P/L should come from fills/trade lifecycle records, not inferred only
-  from account-level equity changes.
+- Foundation implemented: session realized P/L and closed-trade count are
+  calculated from lifecycle fill records and shown in the dashboard.
+- Remaining P/L work should add realized P/L per closed trade, bot-level
+  performance, richer history, and exportable journal records.
 - UI should separate account-level daily P/L from strategy/session P/L.
 
 ### Broker Constraint State
@@ -328,8 +332,8 @@ Notes:
 
 ## Suggested Next Sprint
 
-1. Calculate realized trade results from lifecycle fill records.
-2. Add realized and unrealized P/L cards to the UI.
-3. Surface pending-order and fill state in the dashboard.
+1. Add realized trade detail/history from lifecycle fill records.
+2. Surface pending-order and fill state in the dashboard.
+3. Add bot-level performance breakdowns.
 4. Add rejection cooldown behavior for repeated broker failures.
 5. Improve log styling around trade open, trade close, P/L, and rejection events.

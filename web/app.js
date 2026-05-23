@@ -43,6 +43,8 @@ const els = {
   mode: document.querySelector("#modeValue"),
   dataStatus: document.querySelector("#dataStatusValue"),
   brokerState: document.querySelector("#brokerStateValue"),
+  sessionRealizedPl: document.querySelector("#sessionRealizedPlValue"),
+  sessionTrades: document.querySelector("#sessionTradesValue"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   cycles: document.querySelector("#cycleValue"),
@@ -399,6 +401,24 @@ function renderBrokerState(brokerState) {
     els.brokerState.classList.add("data-warn");
   } else {
     els.brokerState.classList.add("data-danger");
+  }
+}
+
+function renderPerformance(performance) {
+  const realizedPl = performance?.session_realized_pl ?? null;
+  const tradeCount = performance?.session_trade_count ?? 0;
+  const lastTradePl = performance?.last_trade_realized_pl ?? null;
+
+  els.sessionRealizedPl.textContent =
+    realizedPl === null ? "--" : formatMoney(realizedPl);
+  setTone(els.sessionRealizedPl, realizedPl);
+
+  if (tradeCount > 0 && lastTradePl !== null) {
+    els.sessionTrades.textContent = `${tradeCount} / last ${formatMoney(lastTradePl)}`;
+    setTone(els.sessionTrades, lastTradePl);
+  } else {
+    els.sessionTrades.textContent = String(tradeCount || 0);
+    setTone(els.sessionTrades, 0);
   }
 }
 
@@ -887,6 +907,7 @@ function render(data) {
   renderMode(isDryRun);
   renderDataHealth(data.edgewalker_status || data.market_data_status);
   renderBrokerState(data.broker_state);
+  renderPerformance(data.performance);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.cycles.textContent = String(data.cycle_count || 0);

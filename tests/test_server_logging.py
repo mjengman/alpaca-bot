@@ -10,7 +10,13 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from bot import BotConfig, broker_constraint_ok, broker_constraint_payload
+from bot import (
+    BotConfig,
+    LIFECYCLE_FULL_FILL,
+    LIFECYCLE_PARTIAL_FILL,
+    broker_constraint_ok,
+    broker_constraint_payload,
+)
 from server import (
     BotRunner,
     NY_TZ,
@@ -20,6 +26,7 @@ from server import (
     _daily_log_path,
     _format_regime_transition,
     config_from_payload,
+    lifecycle_performance_summary,
 )
 
 
@@ -132,6 +139,88 @@ class ServerLoggingTest(unittest.TestCase):
             _format_regime_transition(transition),
             "[REGIME] REGIME CHANGE: SIDEWAYS -> DOWNTREND gap=0.28%",
         )
+
+    def test_lifecycle_performance_summary_calculates_realized_pl(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "MomentumBot",
+                "order_id": "buy-1",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": "MomentumBot",
+                "order_id": "sell-1",
+                "reason": "trailing_stop_breached",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "103",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+
+        self.assertEqual(summary["session_date"], "2026-05-22")
+        self.assertEqual(summary["session_realized_pl"], "6")
+        self.assertEqual(summary["session_trade_count"], 1)
+        self.assertEqual(summary["session_wins"], 1)
+        self.assertEqual(summary["session_losses"], 0)
+        self.assertEqual(summary["last_trade_realized_pl"], "6")
+        self.assertEqual(summary["last_trade"]["realized_pl_percent"], "3")
+        self.assertEqual(summary["open_lot_qty"], "0")
+        self.assertEqual(summary["unmatched_exit_qty"], "0")
+
+    def test_lifecycle_performance_summary_handles_empty_session(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+
+        summary = lifecycle_performance_summary([], now)
+
+        self.assertEqual(summary["session_realized_pl"], "0")
+        self.assertEqual(summary["session_trade_count"], 0)
+        self.assertEqual(summary["last_trade"], None)
+        self.assertEqual(summary["open_lot_qty"], "0")
+
+    def test_lifecycle_performance_summary_handles_partial_open_lot(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_PARTIAL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "ChopBot",
+                "order_id": "buy-1",
+                "fill_delta_qty": "3",
+                "filled_avg_price": "10",
+            },
+            {
+                "event_type": LIFECYCLE_PARTIAL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": "ChopBot",
+                "order_id": "sell-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "9",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+
+        self.assertEqual(summary["session_realized_pl"], "-1")
+        self.assertEqual(summary["session_trade_count"], 1)
+        self.assertEqual(summary["session_wins"], 0)
+        self.assertEqual(summary["session_losses"], 1)
+        self.assertEqual(summary["open_lot_qty"], "2")
+        self.assertEqual(summary["open_lot_cost_basis"], "20")
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

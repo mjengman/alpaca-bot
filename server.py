@@ -19,7 +19,9 @@ from bot import (
     BotConfig,
     BotError,
     EdgeWalkerBot,
+    LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_REJECTED,
+    LIFECYCLE_PARTIAL_FILL,
     LifecycleLedger,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
@@ -29,6 +31,7 @@ from bot import (
     broker_constraint_ok,
     broker_constraint_payload,
     classify_broker_error,
+    format_decimal,
     load_dotenv,
     parse_clock_time,
 )
@@ -76,6 +79,7 @@ class RunnerSnapshot:
     edgewalker_status: dict[str, Any] | None
     market_data_status: dict[str, Any] | None
     broker_state: dict[str, Any]
+    performance: dict[str, Any]
     last_error: str | None
 
 
@@ -478,8 +482,168 @@ class BotRunner:
             edgewalker_status=self._edgewalker_status,
             market_data_status=market_data_status,
             broker_state=self._broker_state,
+            performance=lifecycle_performance_summary(LifecycleLedger().read_all()),
             last_error=self._last_error,
         )
+
+
+def lifecycle_performance_summary(
+    records: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    session_date = _ny_date_text(now)
+    lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    realized_trades: list[dict[str, Any]] = []
+    unmatched_exit_qty = Decimal("0")
+
+    for record in records:
+        if record.get("event_type") not in {
+            LIFECYCLE_PARTIAL_FILL,
+            LIFECYCLE_FULL_FILL,
+        }:
+            continue
+        created_at = _record_created_at(record)
+        if created_at is None or _ny_date_text(created_at) != session_date:
+            continue
+
+        symbol = record.get("symbol")
+        side = str(record.get("side") or "").lower()
+        fill_qty = _record_decimal(record, "fill_delta_qty") or _record_decimal(
+            record,
+            "filled_qty",
+        )
+        fill_price = _record_decimal(record, "filled_avg_price")
+        if not isinstance(symbol, str) or side not in {"buy", "sell"}:
+            continue
+        if fill_qty is None or fill_qty <= 0 or fill_price is None:
+            continue
+
+        if side == "buy":
+            lots_by_symbol.setdefault(symbol, []).append(
+                {
+                    "qty": fill_qty,
+                    "price": fill_price,
+                    "bot": record.get("bot"),
+                    "created_at": created_at,
+                    "order_id": record.get("order_id"),
+                }
+            )
+            continue
+
+        remaining = fill_qty
+        matched_qty = Decimal("0")
+        cost_basis = Decimal("0")
+        lots = lots_by_symbol.setdefault(symbol, [])
+        while remaining > 0 and lots:
+            lot = lots[0]
+            lot_qty = lot["qty"]
+            consumed_qty = min(remaining, lot_qty)
+            matched_qty += consumed_qty
+            cost_basis += consumed_qty * lot["price"]
+            remaining -= consumed_qty
+            lot["qty"] = lot_qty - consumed_qty
+            if lot["qty"] <= 0:
+                lots.pop(0)
+
+        if matched_qty <= 0:
+            unmatched_exit_qty += remaining
+            continue
+
+        unmatched_exit_qty += max(remaining, Decimal("0"))
+        proceeds = matched_qty * fill_price
+        realized_pl = proceeds - cost_basis
+        avg_entry_price = cost_basis / matched_qty
+        realized_pl_percent = (
+            realized_pl / cost_basis * Decimal("100")
+            if cost_basis > 0
+            else None
+        )
+        realized_trades.append(
+            {
+                "symbol": symbol,
+                "bot": record.get("bot"),
+                "qty": format_decimal(matched_qty),
+                "avg_entry_price": format_decimal(avg_entry_price),
+                "exit_price": format_decimal(fill_price),
+                "realized_pl": format_decimal(realized_pl),
+                "realized_pl_percent": (
+                    format_decimal(realized_pl_percent)
+                    if realized_pl_percent is not None
+                    else None
+                ),
+                "exit_reason": record.get("reason"),
+                "exit_order_id": record.get("order_id"),
+                "closed_at": created_at.astimezone(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            }
+        )
+
+    total_realized = sum(
+        (
+            _record_decimal(trade, "realized_pl") or Decimal("0")
+            for trade in realized_trades
+        ),
+        Decimal("0"),
+    )
+    open_qty = sum(
+        (lot["qty"] for lots in lots_by_symbol.values() for lot in lots),
+        Decimal("0"),
+    )
+    open_cost_basis = sum(
+        (lot["qty"] * lot["price"] for lots in lots_by_symbol.values() for lot in lots),
+        Decimal("0"),
+    )
+    wins = sum(
+        1
+        for trade in realized_trades
+        if (_record_decimal(trade, "realized_pl") or Decimal("0")) > 0
+    )
+    losses = sum(
+        1
+        for trade in realized_trades
+        if (_record_decimal(trade, "realized_pl") or Decimal("0")) < 0
+    )
+    last_trade = realized_trades[-1] if realized_trades else None
+
+    return {
+        "source": "position_lifecycle",
+        "session_date": session_date,
+        "session_realized_pl": format_decimal(total_realized),
+        "session_trade_count": len(realized_trades),
+        "session_wins": wins,
+        "session_losses": losses,
+        "last_trade": last_trade,
+        "last_trade_realized_pl": (
+            last_trade.get("realized_pl") if last_trade else None
+        ),
+        "open_lot_qty": format_decimal(open_qty),
+        "open_lot_cost_basis": format_decimal(open_cost_basis),
+        "unmatched_exit_qty": format_decimal(unmatched_exit_qty),
+    }
+
+
+def _record_created_at(record: dict[str, Any]) -> datetime | None:
+    raw = record.get("created_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _record_decimal(record: dict[str, Any], key: str) -> Decimal | None:
+    raw = record.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        return Decimal(str(raw))
+    except InvalidOperation:
+        return None
 
 
 def now_iso() -> str:
