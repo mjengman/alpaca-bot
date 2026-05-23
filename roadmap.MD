@@ -71,6 +71,7 @@ foundation for future work.
 - Broker constraint classifier and dashboard state for rejected orders
 - Lifecycle-derived session realized P/L summary and closed-trade count in the
   dashboard
+- Pending-order and recent order/fill lifecycle visibility in the dashboard
 
 ## Priority 0: Operational Truth
 
@@ -151,8 +152,10 @@ Notes:
   `logs/position_lifecycle.jsonl`.
 - This is a prerequisite for trustworthy P/L, metrics, trade journal export,
   scale-in mode, replay, and arena work.
-- Remaining lifecycle work should calculate realized results from filled entries
-  and exits, then expose those results in the UI.
+- Remaining lifecycle work should persist realized-result records per closed
+  trade instead of deriving them only as a dashboard read model.
+- Foundation implemented: pending orders and recent same-session order/fill
+  lifecycle events are exposed as dashboard order flow.
 
 ### Effective Notional Visibility
 
@@ -332,8 +335,8 @@ Notes:
 
 ## Suggested Next Sprint
 
-1. Add realized trade detail/history from lifecycle fill records.
-2. Surface pending-order and fill state in the dashboard.
-3. Add bot-level performance breakdowns.
-4. Add rejection cooldown behavior for repeated broker failures.
+1. Add bot-level performance breakdowns.
+2. Add rejection cooldown behavior for repeated broker failures.
+3. Add realized trade detail/history from lifecycle fill records.
+4. Persist realized-result lifecycle records per closed trade.
 5. Improve log styling around trade open, trade close, P/L, and rejection events.

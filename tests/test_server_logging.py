@@ -13,6 +13,7 @@ from unittest.mock import patch
 from bot import (
     BotConfig,
     LIFECYCLE_FULL_FILL,
+    LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_PARTIAL_FILL,
     broker_constraint_ok,
     broker_constraint_payload,
@@ -27,6 +28,7 @@ from server import (
     _format_regime_transition,
     config_from_payload,
     lifecycle_performance_summary,
+    order_visibility_summary,
 )
 
 
@@ -221,6 +223,55 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["session_losses"], 1)
         self.assertEqual(summary["open_lot_qty"], "2")
         self.assertEqual(summary["open_lot_cost_basis"], "20")
+
+    def test_order_visibility_summary_lists_pending_and_recent_events(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        pending_orders = {
+            "buy-1": {
+                "bot": "ChopBot",
+                "reason": "discount_confirmed",
+                "symbol": "SOXL",
+                "side": "buy",
+                "last_status": "partially_filled",
+                "last_filled_qty": "0.25",
+                "submitted_at": "2026-05-22T14:30:00+00:00",
+                "updated_at": "2026-05-22T14:31:00+00:00",
+            }
+        }
+        records = [
+            {
+                "event_type": LIFECYCLE_ORDER_ACCEPTED,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "ChopBot",
+                "order_id": "buy-1",
+                "status": "new",
+                "reason": "discount_confirmed",
+            },
+            {
+                "event_type": LIFECYCLE_PARTIAL_FILL,
+                "created_at": "2026-05-22T14:31:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "ChopBot",
+                "order_id": "buy-1",
+                "status": "partially_filled",
+                "fill_delta_qty": "0.25",
+                "filled_qty": "0.25",
+                "filled_avg_price": "99.5",
+                "reason": "discount_confirmed",
+            },
+        ]
+
+        summary = order_visibility_summary(records, pending_orders, now)
+
+        self.assertEqual(summary["pending_count"], 1)
+        self.assertEqual(summary["pending_orders"][0]["order_id"], "buy-1")
+        self.assertEqual(summary["pending_orders"][0]["status"], "partially_filled")
+        self.assertEqual(summary["pending_orders"][0]["filled_qty"], "0.25")
+        self.assertEqual(summary["recent_events"][0]["event_type"], LIFECYCLE_PARTIAL_FILL)
+        self.assertEqual(summary["latest_fill"]["filled_avg_price"], "99.5")
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

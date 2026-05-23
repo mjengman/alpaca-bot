@@ -60,6 +60,9 @@ const els = {
   position: document.querySelector("#positionValue"),
   positionPl: document.querySelector("#positionPlValue"),
   trailExit: document.querySelector("#trailExitValue"),
+  orderSummary: document.querySelector("#orderSummaryValue"),
+  pendingOrders: document.querySelector("#pendingOrdersList"),
+  orderEvents: document.querySelector("#orderEventsList"),
   error: document.querySelector("#errorText"),
   activityPanel: document.querySelector("#activityPanel"),
   activityCopy: document.querySelector("#activityCopy"),
@@ -747,6 +750,100 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+function formatOrderEventType(value) {
+  const labels = {
+    ORDER_ACCEPTED: "Accepted",
+    ORDER_REJECTED: "Rejected",
+    PARTIAL_FILL: "Partial Fill",
+    FULL_FILL: "Full Fill",
+  };
+  return labels[value] || formatLabel(value || "event");
+}
+
+function formatOrderQty(value) {
+  return formatQty(value) || value || "--";
+}
+
+function renderPendingOrder(order) {
+  const side = order.side ? order.side.toUpperCase() : "--";
+  const symbol = order.symbol || "--";
+  const bot = order.bot ? formatLabel(order.bot) : "Unassigned";
+  const reason = order.reason ? formatLabel(order.reason) : "Pending";
+  const status = order.status ? formatLabel(order.status) : "Submitted";
+  const filled = formatOrderQty(order.filled_qty);
+  const updated = formatTime(order.updated_at || order.submitted_at, "--");
+  return `
+    <div class="order-row">
+      <div>
+        <strong>${escapeHtml(symbol)} ${escapeHtml(side)}</strong>
+        <span>${escapeHtml(bot)} · ${escapeHtml(reason)}</span>
+      </div>
+      <div>
+        <strong>${escapeHtml(status)}</strong>
+        <span>${escapeHtml(filled)} filled · ${escapeHtml(updated)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderOrderEvent(event) {
+  const side = event.side ? event.side.toUpperCase() : "--";
+  const symbol = event.symbol || "--";
+  const eventLabel = formatOrderEventType(event.event_type);
+  const time = formatTime(event.created_at, "--");
+  const qty = formatOrderQty(event.fill_delta_qty || event.filled_qty);
+  const price = event.filled_avg_price ? ` @ ${formatPrice(event.filled_avg_price)}` : "";
+  const reason = event.reason ? formatLabel(event.reason) : event.status || "Lifecycle";
+  const detail =
+    event.error ||
+    `${qty}${price} · ${formatLabel(reason)}`;
+  return `
+    <div class="order-row">
+      <div>
+        <strong>${escapeHtml(eventLabel)}</strong>
+        <span>${escapeHtml(symbol)} ${escapeHtml(side)} · ${escapeHtml(time)}</span>
+      </div>
+      <div>
+        <strong>${escapeHtml(event.order_id || "--")}</strong>
+        <span>${escapeHtml(detail)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderOrderState(orderState) {
+  const pending = Array.isArray(orderState?.pending_orders)
+    ? orderState.pending_orders
+    : [];
+  const events = Array.isArray(orderState?.recent_events)
+    ? orderState.recent_events
+    : [];
+  const latestFill = orderState?.latest_fill || null;
+
+  if (pending.length > 0) {
+    els.orderSummary.textContent = `${pending.length} pending`;
+    els.orderSummary.classList.remove("is-positive", "is-negative", "is-neutral");
+    els.orderSummary.classList.add("data-warn");
+  } else if (latestFill) {
+    els.orderSummary.textContent = `Last fill ${formatOrderQty(
+      latestFill.fill_delta_qty || latestFill.filled_qty,
+    )}`;
+    els.orderSummary.classList.remove("data-warn");
+    els.orderSummary.classList.add("is-neutral");
+  } else {
+    els.orderSummary.textContent = "No pending orders";
+    els.orderSummary.classList.remove("data-warn");
+    els.orderSummary.classList.add("is-neutral");
+  }
+
+  els.pendingOrders.innerHTML = pending.length
+    ? pending.map(renderPendingOrder).join("")
+    : '<div class="order-empty">None</div>';
+  els.orderEvents.innerHTML = events.length
+    ? events.map(renderOrderEvent).join("")
+    : '<div class="order-empty">No events</div>';
+}
+
 function logToneForLine(line) {
   const lower = line.toLowerCase();
   if (lower.includes("regime change")) {
@@ -908,6 +1005,7 @@ function render(data) {
   renderDataHealth(data.edgewalker_status || data.market_data_status);
   renderBrokerState(data.broker_state);
   renderPerformance(data.performance);
+  renderOrderState(data.order_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.cycles.textContent = String(data.cycle_count || 0);

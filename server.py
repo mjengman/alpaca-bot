@@ -18,8 +18,10 @@ from bot import (
     AlpacaClient,
     BotConfig,
     BotError,
+    BotStateStore,
     EdgeWalkerBot,
     LIFECYCLE_FULL_FILL,
+    LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_REJECTED,
     LIFECYCLE_PARTIAL_FILL,
     LifecycleLedger,
@@ -80,6 +82,7 @@ class RunnerSnapshot:
     market_data_status: dict[str, Any] | None
     broker_state: dict[str, Any]
     performance: dict[str, Any]
+    order_state: dict[str, Any]
     last_error: str | None
 
 
@@ -447,6 +450,7 @@ class BotRunner:
             SOXL,
             required_bars=self._config.slow_sma_minutes,
         )
+        lifecycle_records = LifecycleLedger().read_all()
         return RunnerSnapshot(
             running=self._running,
             symbol=self._config.symbol,
@@ -482,7 +486,11 @@ class BotRunner:
             edgewalker_status=self._edgewalker_status,
             market_data_status=market_data_status,
             broker_state=self._broker_state,
-            performance=lifecycle_performance_summary(LifecycleLedger().read_all()),
+            performance=lifecycle_performance_summary(lifecycle_records),
+            order_state=order_visibility_summary(
+                lifecycle_records,
+                BotStateStore().get_pending_orders(),
+            ),
             last_error=self._last_error,
         )
 
@@ -621,6 +629,92 @@ def lifecycle_performance_summary(
         "open_lot_cost_basis": format_decimal(open_cost_basis),
         "unmatched_exit_qty": format_decimal(unmatched_exit_qty),
     }
+
+
+def order_visibility_summary(
+    records: list[dict[str, Any]],
+    pending_orders: dict[str, dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    session_date = _ny_date_text(now)
+    pending = [
+        _pending_order_payload(order_id, order)
+        for order_id, order in pending_orders.items()
+        if isinstance(order, dict)
+    ]
+    pending.sort(key=lambda order: order.get("updated_at") or "", reverse=True)
+
+    recent_events: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("event_type") not in {
+            LIFECYCLE_ORDER_ACCEPTED,
+            LIFECYCLE_ORDER_REJECTED,
+            LIFECYCLE_PARTIAL_FILL,
+            LIFECYCLE_FULL_FILL,
+        }:
+            continue
+        created_at = _record_created_at(record)
+        if created_at is None or _ny_date_text(created_at) != session_date:
+            continue
+        recent_events.append(_order_event_payload(record, created_at))
+
+    recent_events = list(reversed(recent_events[-8:]))
+    latest_fill = next(
+        (
+            event
+            for event in recent_events
+            if event["event_type"] in {LIFECYCLE_PARTIAL_FILL, LIFECYCLE_FULL_FILL}
+        ),
+        None,
+    )
+    return {
+        "source": "position_lifecycle",
+        "session_date": session_date,
+        "pending_count": len(pending),
+        "pending_orders": pending,
+        "recent_events": recent_events,
+        "latest_fill": latest_fill,
+    }
+
+
+def _pending_order_payload(order_id: str, order: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "order_id": order_id,
+        "symbol": _optional_text(order.get("symbol")),
+        "side": _optional_text(order.get("side")),
+        "bot": _optional_text(order.get("bot")),
+        "reason": _optional_text(order.get("reason")),
+        "status": _optional_text(order.get("last_status")) or "submitted",
+        "filled_qty": _optional_text(order.get("last_filled_qty")) or "0",
+        "submitted_at": _optional_text(order.get("submitted_at")),
+        "updated_at": _optional_text(order.get("updated_at")),
+    }
+
+
+def _order_event_payload(
+    record: dict[str, Any],
+    created_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "event_type": _optional_text(record.get("event_type")),
+        "created_at": created_at.astimezone(timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+        "order_id": _optional_text(record.get("order_id")),
+        "symbol": _optional_text(record.get("symbol")),
+        "side": _optional_text(record.get("side")),
+        "bot": _optional_text(record.get("bot")),
+        "status": _optional_text(record.get("status")),
+        "reason": _optional_text(record.get("reason")),
+        "filled_qty": _optional_text(record.get("filled_qty")),
+        "fill_delta_qty": _optional_text(record.get("fill_delta_qty")),
+        "filled_avg_price": _optional_text(record.get("filled_avg_price")),
+        "error": _optional_text(record.get("error")),
+    }
+
+
+def _optional_text(value: Any) -> str | None:
+    return str(value) if value not in (None, "") else None
 
 
 def _record_created_at(record: dict[str, Any]) -> datetime | None:

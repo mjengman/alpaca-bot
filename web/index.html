@@ -519,6 +519,36 @@
         </div>
       </section>
 
+      <section class="panel order-panel">
+        <div class="section-head">
+          <h2
+            class="has-tooltip"
+            data-tooltip="Lifecycle order state from submitted, accepted, partial-fill, full-fill, and rejection records."
+          >
+            Order Flow
+          </h2>
+          <strong id="orderSummaryValue">No pending orders</strong>
+        </div>
+        <div class="order-grid">
+          <div class="order-column">
+            <span
+              class="has-tooltip"
+              data-tooltip="Orders still tracked by EdgeWalker because the broker has not reported a terminal state."
+              >Pending orders</span
+            >
+            <div id="pendingOrdersList" class="order-list">None</div>
+          </div>
+          <div class="order-column">
+            <span
+              class="has-tooltip"
+              data-tooltip="Latest same-session broker acceptance, fill, and rejection lifecycle events."
+              >Recent events</span
+            >
+            <div id="orderEventsList" class="order-list">No events</div>
+          </div>
+        </div>
+      </section>
+
       <section class="panel activity-panel" id="activityPanel">
         <div class="section-head">
           <h2
