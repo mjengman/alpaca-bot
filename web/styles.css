@@ -792,6 +792,10 @@ button:disabled {
   display: none;
 }
 
+.activity-panel.is-collapsed .narrative-output {
+  display: none;
+}
+
 .log-line {
   display: block;
   min-height: 1.4em;
@@ -827,6 +831,130 @@ button:disabled {
 
 .log-red {
   color: var(--log-red);
+}
+
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.panel-tab {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 1rem/1 inherit;
+  letter-spacing: 0;
+  min-height: auto;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.panel-tab:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.panel-tab.is-active {
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.narrative-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.timeframe-selector {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.timeframe-btn {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 0.78rem/1 inherit;
+  letter-spacing: 0.03em;
+  min-height: auto;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.timeframe-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.timeframe-btn.is-active {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.narrative-output {
+  height: 250px;
+  overflow: auto;
+  transition: height 160ms ease;
+}
+
+.activity-panel.is-expanded .narrative-output {
+  height: min(68vh, 760px);
+}
+
+.narrative-content {
+  padding: 18px 20px;
+}
+
+.narrative-content p {
+  margin: 0 0 1em;
+  font-size: 0.92rem;
+  line-height: 1.75;
+  color: var(--ink);
+}
+
+.narrative-content p:last-child {
+  margin-bottom: 0;
+}
+
+.narrative-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.narrative-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 1.2em !important;
+}
+
+.narrative-loading {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+  animation: narrative-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes narrative-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 body.live-paper .switch-label {

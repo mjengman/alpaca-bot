@@ -5,7 +5,10 @@ import contextlib
 import io
 import json
 import mimetypes
+import os
 import threading
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -25,6 +28,7 @@ from bot import (
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_REJECTED,
+    LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
     LifecycleLedger,
     MOMENTUM_BOT,
@@ -51,6 +55,13 @@ ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX"}
+ALLOWED_UI_ORIGINS = {
+    f"http://{HOST}:{PORT}",
+    f"http://localhost:{PORT}",
+}
 
 
 @dataclass
@@ -1131,6 +1142,687 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
     )
 
 
+def _log_date_from_path(path: Path) -> str | None:
+    stem = path.stem
+    if not stem.startswith("edgewalker-"):
+        return None
+    return stem[len("edgewalker-"):]
+
+
+def _most_recent_log_date(
+    *,
+    market_open_only: bool = False,
+    logs_root: Path | None = None,
+) -> str | None:
+    root = logs_root or LOGS_ROOT
+    paths = sorted(root.glob("edgewalker-*.jsonl"), reverse=True)
+    for path in paths:
+        log_date = _log_date_from_path(path)
+        if log_date is None:
+            continue
+        if market_open_only and not _log_has_market_open(path):
+            continue
+        return log_date
+    return None
+
+
+def _load_log_records(log_path: Path) -> list[dict[str, Any]]:
+    records = []
+    for raw in log_path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            records.append(json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+    return records
+
+
+def _log_has_market_open(log_path: Path) -> bool:
+    return any(bool(record.get("market_open")) for record in _load_log_records(log_path))
+
+
+def _resolve_1d_log_path(date: str | None) -> tuple[str, Path]:
+    if date:
+        log_path = LOGS_ROOT / f"edgewalker-{date}.jsonl"
+        if not log_path.exists():
+            raise BotError(f"No session log found for {date}.")
+        return date, log_path
+
+    target_date = _most_recent_log_date(market_open_only=True)
+    if target_date is None:
+        target_date = _most_recent_log_date()
+    if target_date is None:
+        raise BotError("No session logs found.")
+    return target_date, LOGS_ROOT / f"edgewalker-{target_date}.jsonl"
+
+
+def _to_ny_time(ts: str) -> str:
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.astimezone(NY_TZ).strftime("%I:%M %p")
+    except (ValueError, AttributeError):
+        return ts
+
+
+def _record_time_text(record: dict[str, Any]) -> str:
+    created_at = _record_created_at(record)
+    if created_at is not None:
+        return _to_ny_time(created_at.isoformat())
+    return _to_ny_time(_optional_text(record.get("created_at")) or "")
+
+
+def _record_order_id(record: dict[str, Any]) -> str | None:
+    order_id = _optional_text(record.get("order_id"))
+    if order_id:
+        return order_id
+    order = record.get("order")
+    if isinstance(order, dict):
+        return _optional_text(order.get("id"))
+    return None
+
+
+def _record_order_value(record: dict[str, Any], key: str) -> str | None:
+    value = _optional_text(record.get(key))
+    if value is not None:
+        return value
+    order = record.get("order")
+    if isinstance(order, dict):
+        return _optional_text(order.get(key))
+    return None
+
+
+def _lifecycle_records_for_date(
+    lifecycle_records: list[dict[str, Any]],
+    log_date: str,
+) -> list[dict[str, Any]]:
+    records = []
+    for record in lifecycle_records:
+        created_at = _record_created_at(record)
+        if created_at is None or _ny_date_text(created_at) != log_date:
+            continue
+        records.append(record)
+    return records
+
+
+def _extract_lifecycle_trade_actions(
+    lifecycle_records: list[dict[str, Any]],
+    log_date: str,
+) -> list[dict[str, Any]]:
+    submitted = [
+        record
+        for record in _lifecycle_records_for_date(lifecycle_records, log_date)
+        if record.get("event_type") == LIFECYCLE_ORDER_SUBMITTED
+    ]
+    source_records = submitted
+    if not source_records:
+        source_records = [
+            record
+            for record in _lifecycle_records_for_date(lifecycle_records, log_date)
+            if record.get("event_type") in {LIFECYCLE_PARTIAL_FILL, LIFECYCLE_FULL_FILL}
+        ]
+
+    trades: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str, str, str]] = set()
+    for record in source_records:
+        side = str(record.get("side") or "").lower()
+        if side not in {"buy", "sell"}:
+            continue
+        symbol = _optional_text(record.get("symbol")) or _record_order_value(
+            record,
+            "symbol",
+        )
+        action = "BUY" if side == "buy" else "SELL"
+        order_id = _record_order_id(record)
+        reason = _optional_text(record.get("reason"))
+        key = (
+            order_id,
+            action,
+            _optional_text(record.get("created_at")) or "",
+            symbol or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        trades.append(
+            {
+                "at": _record_time_text(record),
+                "bot": _optional_text(record.get("bot")),
+                "action": action,
+                "symbol": symbol,
+                "price": _record_order_value(record, "filled_avg_price")
+                or _record_order_value(record, "price")
+                or _optional_text(record.get("current_price")),
+                "notional": _record_order_value(record, "notional"),
+                "qty": _record_order_value(record, "qty")
+                or _record_order_value(record, "filled_qty")
+                or _record_order_value(record, "fill_delta_qty"),
+                "reason": reason,
+            }
+        )
+    return trades
+
+
+def _cycle_position_owner(record: dict[str, Any]) -> str | None:
+    owner = _optional_text(record.get("position_owner"))
+    if owner:
+        return owner
+    for line in record.get("console_lines") or []:
+        if not isinstance(line, str) or "owner=" not in line:
+            continue
+        owner_text = line.split("owner=", 1)[1].split()[0].strip(" ;,.")
+        if owner_text:
+            return owner_text
+    return _optional_text(record.get("active_bot"))
+
+
+def _extract_cycle_trade_actions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    trades = []
+    exit_actions = {
+        "trailing_stop_sell",
+        "market_close_liquidation",
+        "chop_exit_reclaim_slow_sma",
+        "close_stale_position_no_same_cycle_reversal",
+    }
+    for record in records:
+        action = record.get("action_taken")
+        if action == "market_buy":
+            trades.append(
+                {
+                    "at": _to_ny_time(record.get("timestamp", "")),
+                    "bot": record.get("active_bot"),
+                    "action": "BUY",
+                    "symbol": record.get("routed_symbol"),
+                    "price": record.get("source_price"),
+                    "notional": record.get("effective_position_notional")
+                    or record.get("config", {}).get("position_notional"),
+                    "reason": record.get("entry_reason"),
+                }
+            )
+        elif action in exit_actions:
+            trades.append(
+                {
+                    "at": _to_ny_time(record.get("timestamp", "")),
+                    "bot": _cycle_position_owner(record),
+                    "action": "SELL",
+                    "reason": action,
+                    "symbol": record.get("position_symbol") or record.get("routed_symbol"),
+                    "price": record.get("position_current_price")
+                    or record.get("source_price"),
+                    "qty": record.get("position_qty"),
+                }
+            )
+    return trades
+
+
+def _extract_session_context(
+    records: list[dict[str, Any]],
+    log_date: str,
+    lifecycle_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not records:
+        return {}
+
+    first = records[0]
+    last = records[-1]
+
+    transitions = []
+    for r in records:
+        t = r.get("regime_transition")
+        if t:
+            transitions.append({
+                "at": _to_ny_time(r["timestamp"]),
+                "from": t["from"],
+                "to": t["to"],
+            })
+
+    trades = _extract_lifecycle_trade_actions(lifecycle_records or [], log_date)
+    if not trades:
+        trades = _extract_cycle_trade_actions(records)
+
+    error_records = [r for r in records if r.get("error")]
+    error_samples = [
+        {
+            "at": _to_ny_time(r["timestamp"]),
+            "cycle": r.get("cycle_id"),
+            "error": str(r.get("error", ""))[:200],
+        }
+        for r in error_records[:8]
+    ]
+
+    prices = []
+    for r in records:
+        try:
+            prices.append(float(r["source_price"]))
+        except (TypeError, ValueError, KeyError):
+            pass
+    price_range = (
+        f"${min(prices):.2f} – ${max(prices):.2f}" if prices else "N/A"
+    )
+
+    perf = next(
+        (r.get("performance") for r in reversed(records) if r.get("performance")),
+        None,
+    )
+    last_config = last.get("config", {})
+    market_was_open = any(bool(r.get("market_open")) for r in records)
+
+    return {
+        "session": {
+            "date": log_date,
+            "start": _to_ny_time(first["timestamp"]),
+            "end": _to_ny_time(last["timestamp"]),
+            "total_cycles": len(records),
+        },
+        "config": {
+            "directional_mode": last_config.get("directional_mode"),
+            "dry_run": last_config.get("dry_run"),
+            "position_notional": f"${last_config.get('position_notional', '?')}",
+        },
+        "market": {
+            "symbol": "SOXL",
+            "price_range": price_range,
+            "initial_regime": first.get("regime", "UNKNOWN"),
+            "was_open": market_was_open,
+        },
+        "regime_transitions": transitions,
+        "trades": trades,
+        "error_count": len(error_records),
+        "error_samples": error_samples,
+        "performance": perf,
+        "final_state": {
+            "portfolio_value": last.get("portfolio_value") or last.get("account_value"),
+            "buying_power": last.get("buying_power"),
+            "open_position": last.get("position_symbol"),
+        },
+    }
+
+
+def _trade_size_text(trade: dict[str, Any]) -> str:
+    notional = _optional_text(trade.get("notional"))
+    if notional:
+        return f"notional={notional}"
+    qty = _optional_text(trade.get("qty"))
+    if qty:
+        return f"qty={qty}"
+    return "size=unknown"
+
+
+def _trade_price_text(trade: dict[str, Any]) -> str:
+    price = _optional_text(trade.get("price"))
+    return f" @ ${price}" if price else ""
+
+
+def _build_summary_prompt(context: dict[str, Any]) -> str:
+    session = context.get("session", {})
+    config = context.get("config", {})
+    market = context.get("market", {})
+    transitions = context.get("regime_transitions", [])
+    trades = context.get("trades", [])
+    error_count = context.get("error_count", 0)
+    error_samples = context.get("error_samples", [])
+    performance = context.get("performance")
+    final = context.get("final_state", {})
+
+    mode = (
+        "DRY RUN (simulated, no real orders)"
+        if config.get("dry_run")
+        else "PAPER LIVE (orders sent to Alpaca paper account)"
+    )
+    market_status = (
+        "OPEN (regular trading day)"
+        if market.get("was_open")
+        else "CLOSED (weekend or holiday — no trades possible)"
+    )
+
+    parts = [
+        "You are the debrief assistant for EdgeWalker, an autonomous semiconductor trading bot.",
+        "",
+        "EdgeWalker classifies the SOXL market regime and routes to specialist bots:",
+        "  MomentumBot — buys SOXL when the trend is up",
+        "  InverseBot — buys SOXS when the trend is down",
+        "  ChopBot — buys SOXL at a discount to the slow SMA when the market is sideways",
+        "",
+        f"SESSION: {session.get('date')} | {session.get('start')} – {session.get('end')} ET",
+        f"MARKET: {market_status}",
+        f"CYCLES: {session.get('total_cycles')} | MODE: {mode}",
+        f"POSITION SIZE: {config.get('position_notional')} | DIRECTIONAL MODE: {config.get('directional_mode')}",
+        f"SOXL PRICE RANGE: {market.get('price_range')} | OPENING REGIME: {market.get('initial_regime')}",
+        "",
+    ]
+
+    if transitions:
+        parts.append(f"REGIME CHANGES ({len(transitions)}):")
+        for t in transitions:
+            parts.append(f"  {t['at']} — {t['from']} → {t['to']}")
+        parts.append("")
+
+    if trades:
+        buys = [t for t in trades if t["action"] == "BUY"]
+        sells = [t for t in trades if t["action"] == "SELL"]
+        parts.append(f"TRADE ACTIONS — {len(buys)} entries, {len(sells)} exits:")
+        for t in trades:
+            if t["action"] == "BUY":
+                parts.append(
+                    f"  {t['at']} BUY  {t.get('symbol')}{_trade_price_text(t)}"
+                    f"  {_trade_size_text(t)}  bot={t.get('bot')}"
+                )
+            else:
+                parts.append(
+                    f"  {t['at']} SELL {t.get('symbol')}{_trade_price_text(t)}"
+                    f"  reason={t.get('reason')}  bot={t.get('bot')}"
+                    f"  {_trade_size_text(t)}"
+                )
+        parts.append("")
+    else:
+        parts.append("TRADE ACTIONS: None executed this session.")
+        parts.append("")
+
+    if error_count:
+        parts.append(f"ERRORS / REJECTIONS ({error_count} total):")
+        for e in error_samples:
+            parts.append(f"  {e['at']} (cycle {e['cycle']}): {e['error']}")
+        parts.append("")
+
+    if performance:
+        parts.append("REALIZED PERFORMANCE (from lifecycle ledger):")
+        parts.append(f"  Session P/L: {performance.get('session_realized_pl')}")
+        parts.append(f"  Closed trades: {performance.get('session_trade_count')}")
+        parts.append(
+            f"  Wins/Losses: {performance.get('session_wins')}/{performance.get('session_losses')}"
+        )
+        parts.append("")
+
+    pv = final.get("portfolio_value")
+    pos = final.get("open_position")
+    if pv is not None:
+        parts.append("SESSION END:")
+        parts.append(f"  Portfolio value: ${pv}")
+        parts.append(f"  Open position: {pos or 'None (flat)'}")
+        parts.append("")
+
+    parts += [
+        "---",
+        "Write a concise trading debrief for the operator. 3–4 short paragraphs covering:",
+        "  1. Market conditions — how did SOXL trend? What regimes dominated?",
+        "  2. Bot decisions — what entries/exits happened, and what was blocked?",
+        "  3. Operational issues — any errors, rejections, or data problems worth noting?",
+        "  4. Bottom line — how did the session go overall?",
+        "",
+        "Style: plain prose, operator-facing, direct. No bullet lists. No headers. No markdown formatting. No fluff.",
+    ]
+
+    return "\n".join(parts)
+
+
+def _call_openai(prompt: str, api_key: str) -> str:
+    payload = json.dumps({
+        "model": OPENAI_DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 700,
+        "temperature": 0.4,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        OPENAI_API_URL,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise BotError(f"OpenAI API error {exc.code}: {body[:300]}") from exc
+    except urllib.error.URLError as exc:
+        raise BotError(f"OpenAI connection error: {exc.reason}") from exc
+
+
+def _date_range_for_timeframe(timeframe: str) -> tuple[str, str]:
+    from datetime import date as _date
+    today = datetime.now(NY_TZ).date()
+    if timeframe == "1W":
+        start = today - timedelta(days=7)
+    elif timeframe == "1M":
+        start = today - timedelta(days=30)
+    elif timeframe == "3M":
+        start = today - timedelta(days=90)
+    elif timeframe == "YTD":
+        start = _date(today.year, 1, 1)
+    else:  # MAX
+        start = _date(2000, 1, 1)
+    return start.isoformat(), today.isoformat()
+
+
+def _find_log_files_in_range(start_date: str, end_date: str) -> list[Path]:
+    files = []
+    for path in sorted(LOGS_ROOT.glob("edgewalker-*.jsonl")):
+        date_str = path.stem[len("edgewalker-"):]
+        if start_date <= date_str <= end_date:
+            files.append(path)
+    return files
+
+
+def _extract_period_context(
+    log_files: list[Path],
+    lifecycle_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    days: list[dict[str, Any]] = []
+    total_cycles = 0
+    total_trades = 0
+    total_errors = 0
+    for log_path in log_files:
+        date_str = log_path.stem[len("edgewalker-"):]
+        records = _load_log_records(log_path)
+        if not records:
+            continue
+        ctx = _extract_session_context(records, date_str, lifecycle_records)
+        days.append(ctx)
+        total_cycles += len(records)
+        total_trades += len(ctx.get("trades", []))
+        total_errors += ctx.get("error_count", 0)
+    return {
+        "day_count": len(days),
+        "total_cycles": total_cycles,
+        "total_trades": total_trades,
+        "total_errors": total_errors,
+        "days": days,
+    }
+
+
+def _build_period_prompt(
+    context: dict[str, Any],
+    timeframe: str,
+    date_range: tuple[str, str],
+) -> str:
+    days = context.get("days", [])
+    start, end = date_range
+    period_label = f"{start} to {end}" if start != end else start
+
+    parts = [
+        "You are the debrief assistant for EdgeWalker, an autonomous semiconductor trading bot.",
+        "",
+        "EdgeWalker classifies the SOXL market regime and routes to specialist bots:",
+        "  MomentumBot — buys SOXL when the trend is up",
+        "  InverseBot — buys SOXS when the trend is down",
+        "  ChopBot — buys SOXL at a discount to the slow SMA when the market is sideways",
+        "",
+        f"PERIOD: {period_label} ({timeframe}) | {context['day_count']} trading day(s) with data",
+        f"TOTAL CYCLES: {context['total_cycles']} | TOTAL TRADES: {context['total_trades']}"
+        f" | TOTAL ERRORS: {context['total_errors']}",
+        "",
+        "DAY-BY-DAY:",
+    ]
+
+    for day in days:
+        session = day.get("session", {})
+        trades = day.get("trades", [])
+        transitions = day.get("regime_transitions", [])
+        errors = day.get("error_count", 0)
+        perf = day.get("performance")
+        config = day.get("config", {})
+        market = day.get("market", {})
+
+        buys = len([t for t in trades if t.get("action") == "BUY"])
+        sells = len([t for t in trades if t.get("action") == "SELL"])
+        mode = "DRY RUN" if config.get("dry_run") else "PAPER LIVE"
+        market_open = market.get("was_open", False)
+        market_tag = "MARKET OPEN" if market_open else "MARKET CLOSED (weekend/holiday)"
+        regime_chain = " → ".join(
+            f"{t['from']}→{t['to']}" for t in transitions
+        ) if transitions else "no changes"
+        pl_str = (
+            f" | P/L: {perf['session_realized_pl']}"
+            if perf and perf.get("session_realized_pl")
+            else ""
+        )
+        if market_open:
+            parts.append(
+                f"  {session.get('date', '?')} [{mode}] | {market_tag}"
+                f" | {session.get('total_cycles', '?')} cycles"
+                f" | SOXL {market.get('price_range', '?')}"
+                f" | Trades: {buys}B/{sells}S | Errors: {errors}{pl_str}"
+                f" | Regimes: {regime_chain[:100]}"
+            )
+        else:
+            parts.append(
+                f"  {session.get('date', '?')} [{mode}] | {market_tag}"
+                f" | {session.get('total_cycles', '?')} warmup cycles only — no trading possible"
+            )
+
+    parts += [
+        "",
+        "---",
+        f"Write a concise trading debrief for the {timeframe} period. 3–5 short paragraphs covering:",
+        "  1. Overall market conditions — what regimes dominated and how did SOXL move?",
+        "  2. Bot behavior — what trades happened, what patterns or tendencies emerged?",
+        "  3. Operational issues — any recurring errors, rejections, or anomalies worth noting?",
+        "  4. Bottom line — how did the period go overall? Any trends the operator should watch?",
+        "",
+        "Style: plain prose, operator-facing, direct. No bullet lists. No headers."
+        " No markdown formatting. No fluff.",
+    ]
+    return "\n".join(parts)
+
+
+def generate_session_summary(
+    date: str | None = None,
+    timeframe: str = "1D",
+) -> dict[str, Any]:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise BotError(
+            "OPENAI_API_KEY is not configured. Add it to your .env file."
+        )
+
+    if timeframe not in VALID_TIMEFRAMES:
+        raise BotError(
+            f"Invalid timeframe. Must be one of: {', '.join(sorted(VALID_TIMEFRAMES))}"
+        )
+
+    if timeframe == "1D":
+        target_date, log_path = _resolve_1d_log_path(date)
+        records = _load_log_records(log_path)
+        if not records:
+            raise BotError(f"Session log for {target_date} is empty.")
+        context = _extract_session_context(
+            records,
+            target_date,
+            LifecycleLedger().read_all(),
+        )
+        prompt = _build_summary_prompt(context)
+        narrative = _call_openai(prompt, api_key)
+        return {
+            "summary": narrative,
+            "date": target_date,
+            "cycle_count": len(records),
+            "generated_at": now_iso(),
+        }
+
+    # Multi-day timeframes
+    start_date, end_date = _date_range_for_timeframe(timeframe)
+    log_files = _find_log_files_in_range(start_date, end_date)
+    if not log_files:
+        raise BotError(
+            f"No session logs found for {timeframe} ({start_date} to {end_date})."
+        )
+    context = _extract_period_context(log_files, LifecycleLedger().read_all())
+    if not context["days"]:
+        raise BotError(f"No usable session data found for {timeframe}.")
+    prompt = _build_period_prompt(context, timeframe, (start_date, end_date))
+    narrative = _call_openai(prompt, api_key)
+    actual_start = context["days"][0]["session"]["date"]
+    actual_end = context["days"][-1]["session"]["date"]
+    date_label = (
+        f"{actual_start} to {actual_end}" if actual_start != actual_end else actual_start
+    )
+    return {
+        "summary": narrative,
+        "date": date_label,
+        "cycle_count": context["total_cycles"],
+        "generated_at": now_iso(),
+    }
+
+
+def build_summary_prompt(
+    date: str | None = None,
+    timeframe: str = "1D",
+) -> dict[str, Any]:
+    """Return the raw prompt that would be sent to OpenAI, without calling it."""
+    if timeframe not in VALID_TIMEFRAMES:
+        raise BotError(
+            f"Invalid timeframe. Must be one of: {', '.join(sorted(VALID_TIMEFRAMES))}"
+        )
+
+    if timeframe == "1D":
+        target_date, log_path = _resolve_1d_log_path(date)
+        records = _load_log_records(log_path)
+        if not records:
+            raise BotError(f"Session log for {target_date} is empty.")
+        context = _extract_session_context(
+            records,
+            target_date,
+            LifecycleLedger().read_all(),
+        )
+        prompt = _build_summary_prompt(context)
+        return {"timeframe": timeframe, "date": target_date, "prompt": prompt}
+
+    start_date, end_date = _date_range_for_timeframe(timeframe)
+    log_files = _find_log_files_in_range(start_date, end_date)
+    if not log_files:
+        raise BotError(
+            f"No session logs found for {timeframe} ({start_date} to {end_date})."
+        )
+    context = _extract_period_context(log_files, LifecycleLedger().read_all())
+    if not context["days"]:
+        raise BotError(f"No usable session data found for {timeframe}.")
+    prompt = _build_period_prompt(context, timeframe, (start_date, end_date))
+    actual_start = context["days"][0]["session"]["date"]
+    actual_end = context["days"][-1]["session"]["date"]
+    date_label = (
+        f"{actual_start} to {actual_end}" if actual_start != actual_end else actual_start
+    )
+    return {"timeframe": timeframe, "date": date_label, "prompt": prompt}
+
+
+def _is_allowed_ui_origin(origin: str | None) -> bool:
+    return origin in ALLOWED_UI_ORIGINS
+
+
+def _is_allowed_ui_referer(referer: str | None) -> bool:
+    if not referer:
+        return True
+    return any(
+        referer == origin or referer.startswith(f"{origin}/")
+        for origin in ALLOWED_UI_ORIGINS
+    )
+
+
 class AppHandler(BaseHTTPRequestHandler):
     runner: BotRunner
 
@@ -1149,6 +1841,18 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             payload = self.read_json()
+            if self.path == "/api/summary":
+                self.require_local_ai_request()
+                date_str = _optional_text(payload.get("date"))
+                timeframe = str(payload.get("timeframe", "1D")).strip().upper()
+                self.send_json(generate_session_summary(date_str, timeframe))
+                return
+            if self.path == "/api/prompt":
+                self.require_local_ai_request()
+                date_str = _optional_text(payload.get("date"))
+                timeframe = str(payload.get("timeframe", "1D")).strip().upper()
+                self.send_json(build_summary_prompt(date_str, timeframe))
+                return
             if self.path == "/api/start":
                 snapshot = self.runner.start(config_from_payload(payload))
             elif self.path == "/api/stop":
@@ -1173,6 +1877,14 @@ class AppHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise BotError("JSON body must be an object")
         return data
+
+    def require_local_ai_request(self) -> None:
+        origin = self.headers.get("Origin")
+        referer = self.headers.get("Referer")
+        if origin and not _is_allowed_ui_origin(origin):
+            raise BotError("AI narrative requests must come from the local EdgeWalker UI.")
+        if not origin and not _is_allowed_ui_referer(referer):
+            raise BotError("AI narrative requests must come from the local EdgeWalker UI.")
 
     def serve_static(self) -> None:
         route = self.path.split("?", 1)[0]
@@ -1203,7 +1915,10 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def send_common_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if _is_allowed_ui_origin(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Cache-Control", "no-store")

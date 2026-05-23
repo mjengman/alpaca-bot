@@ -9,6 +9,12 @@ const state = {
   fixedNotionalValue: "25",
   latestBuyingPower: null,
   lastSizingValue: "FIXED",
+  activeTab: "activity",
+  narrativeTimeframe: "1D",
+  narrativeText: null,
+  narrativeDate: null,
+  narrativeCycles: null,
+  narrativeLoading: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -67,9 +73,14 @@ const els = {
   orderEvents: document.querySelector("#orderEventsList"),
   error: document.querySelector("#errorText"),
   activityPanel: document.querySelector("#activityPanel"),
+  activityTab: document.querySelector("#activityTab"),
+  narrativeTab: document.querySelector("#narrativeTab"),
   activityCopy: document.querySelector("#activityCopy"),
   activityExpand: document.querySelector("#activityExpand"),
   activityToggle: document.querySelector("#activityToggle"),
+  narrativeGenerate: document.querySelector("#narrativeGenerate"),
+  narrativeOutput: document.querySelector("#narrativeOutput"),
+  narrativeContent: document.querySelector("#narrativeContent"),
   log: document.querySelector("#logOutput"),
 };
 
@@ -589,13 +600,18 @@ async function copyActivityLog() {
     return;
   }
 
-  const text = state.logText || els.log?.textContent || "";
+  const isNarrative = state.activeTab === "narrative";
+  const text = isNarrative
+    ? (state.narrativeText || "")
+    : (state.logText || els.log?.textContent || "");
   const originalText = els.activityCopy.textContent;
   const originalTooltip = els.activityCopy.dataset.tooltip;
 
   if (!text.trim()) {
     els.activityCopy.textContent = "Empty";
-    els.activityCopy.dataset.tooltip = "There is no activity log text to copy yet.";
+    els.activityCopy.dataset.tooltip = isNarrative
+      ? "There is no narrative to copy yet."
+      : "There is no activity log text to copy yet.";
     window.setTimeout(() => {
       els.activityCopy.textContent = originalText;
       els.activityCopy.dataset.tooltip = originalTooltip;
@@ -618,15 +634,88 @@ async function copyActivityLog() {
       textarea.remove();
     }
     els.activityCopy.textContent = "Copied";
-    els.activityCopy.dataset.tooltip = "Activity log copied.";
+    els.activityCopy.dataset.tooltip = isNarrative
+      ? "Narrative copied."
+      : "Activity log copied.";
   } catch {
     els.activityCopy.textContent = "Failed";
-    els.activityCopy.dataset.tooltip = "Could not copy the activity log.";
+    els.activityCopy.dataset.tooltip = "Could not copy.";
   } finally {
     window.setTimeout(() => {
       els.activityCopy.textContent = originalText;
       els.activityCopy.dataset.tooltip = originalTooltip;
     }, 1400);
+  }
+}
+
+function switchTab(tab) {
+  state.activeTab = tab;
+  const isActivity = tab === "activity";
+
+  if (els.activityTab) {
+    els.activityTab.classList.toggle("is-active", isActivity);
+    els.activityTab.setAttribute("aria-selected", String(isActivity));
+  }
+  if (els.narrativeTab) {
+    els.narrativeTab.classList.toggle("is-active", !isActivity);
+    els.narrativeTab.setAttribute("aria-selected", String(!isActivity));
+  }
+  if (els.log) els.log.hidden = !isActivity;
+  if (els.narrativeOutput) els.narrativeOutput.hidden = isActivity;
+  if (els.activityExpand) {
+    els.activityExpand.disabled = state.logCollapsed;
+  }
+}
+
+function renderNarrative() {
+  if (!els.narrativeContent) return;
+  if (!state.narrativeText) {
+    els.narrativeContent.innerHTML =
+      '<p class="narrative-empty">Hit Generate to create an AI debrief of the most recent session.</p>';
+    return;
+  }
+  const meta = state.narrativeDate
+    ? `<p class="narrative-meta">${escapeHtml(state.narrativeDate)} · ${state.narrativeCycles || "?"} cycles</p>`
+    : "";
+  const body = state.narrativeText
+    .split(/\n\n+/)
+    .map((p) => `<p>${escapeHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+  els.narrativeContent.innerHTML = meta + body;
+}
+
+async function generateNarrative() {
+  if (state.narrativeLoading) return;
+  state.narrativeLoading = true;
+  if (els.narrativeGenerate) {
+    els.narrativeGenerate.textContent = "Generating…";
+    els.narrativeGenerate.disabled = true;
+  }
+  if (els.narrativeContent) {
+    els.narrativeContent.innerHTML =
+      '<p class="narrative-loading">Generating session debrief…</p>';
+  }
+  try {
+    const data = await request("/api/summary", {
+      method: "POST",
+      body: JSON.stringify({ timeframe: state.narrativeTimeframe }),
+    });
+    state.narrativeText = data.summary;
+    state.narrativeDate = data.date;
+    state.narrativeCycles = data.cycle_count;
+    renderNarrative();
+  } catch (error) {
+    if (els.narrativeContent) {
+      els.narrativeContent.innerHTML = `<p class="narrative-empty">Error: ${escapeHtml(error.message)}</p>`;
+    }
+  } finally {
+    state.narrativeLoading = false;
+    if (els.narrativeGenerate) {
+      els.narrativeGenerate.textContent = state.narrativeText
+        ? "Regenerate"
+        : "Generate";
+      els.narrativeGenerate.disabled = false;
+    }
   }
 }
 
@@ -646,6 +735,34 @@ function setupActivityLog() {
       setLogExpanded(!state.logExpanded);
     });
   }
+  if (els.activityTab) {
+    els.activityTab.addEventListener("click", () => switchTab("activity"));
+  }
+  if (els.narrativeTab) {
+    els.narrativeTab.addEventListener("click", () => switchTab("narrative"));
+  }
+  if (els.narrativeGenerate) {
+    els.narrativeGenerate.addEventListener("click", generateNarrative);
+  }
+
+  document.querySelectorAll(".timeframe-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tf = btn.dataset.timeframe;
+      if (!tf || tf === state.narrativeTimeframe) return;
+      state.narrativeTimeframe = tf;
+      // Clear stale narrative so the placeholder re-appears
+      state.narrativeText = null;
+      state.narrativeDate = null;
+      state.narrativeCycles = null;
+      renderNarrative();
+      if (els.narrativeGenerate) {
+        els.narrativeGenerate.textContent = "Generate";
+      }
+      document.querySelectorAll(".timeframe-btn").forEach((b) => {
+        b.classList.toggle("is-active", b.dataset.timeframe === tf);
+      });
+    });
+  });
 }
 
 function numberOrNull(value) {

@@ -566,19 +566,31 @@
 
       <section class="panel activity-panel" id="activityPanel">
         <div class="section-head">
-          <h2
-            class="has-tooltip"
-            data-tooltip="Current trading-day account, signal, position, and order-management output from the bot."
-          >
-            Activity
-          </h2>
+          <div class="panel-tabs" role="tablist">
+            <button
+              id="activityTab"
+              type="button"
+              class="panel-tab is-active has-tooltip"
+              role="tab"
+              aria-selected="true"
+              data-tooltip="Current trading-day account, signal, position, and order-management output from the bot."
+            >Activity</button>
+            <button
+              id="narrativeTab"
+              type="button"
+              class="panel-tab has-tooltip"
+              role="tab"
+              aria-selected="false"
+              data-tooltip="AI-generated debrief of the trading session — regime behavior, bot decisions, and P/L summary."
+            >Narrative</button>
+          </div>
           <div class="section-actions">
             <span id="errorText"></span>
             <button
               id="activityCopy"
               type="button"
               class="log-toggle has-tooltip"
-              data-tooltip="Copy the current activity log text."
+              data-tooltip="Copy the current tab's text."
             >
               Copy
             </button>
@@ -587,7 +599,7 @@
               type="button"
               class="log-toggle log-expand has-tooltip"
               aria-pressed="false"
-              data-tooltip="Expand the activity log vertically for review."
+              data-tooltip="Expand the panel vertically for review."
             >
               ^
             </button>
@@ -596,7 +608,7 @@
               type="button"
               class="log-toggle has-tooltip"
               aria-expanded="true"
-              data-tooltip="Hide or show the rolling activity log."
+              data-tooltip="Hide or show the panel."
             >
               Hide
             </button>
@@ -604,6 +616,29 @@
         </div>
         <div id="logOutput" class="log-output" role="log" aria-live="polite">
           Waiting for a run.
+        </div>
+        <div id="narrativeOutput" class="narrative-output" hidden>
+          <div class="narrative-toolbar">
+            <div class="timeframe-selector" role="group" aria-label="Summary timeframe">
+              <button class="timeframe-btn is-active" data-timeframe="1D">1D</button>
+              <button class="timeframe-btn" data-timeframe="1W">1W</button>
+              <button class="timeframe-btn" data-timeframe="1M">1M</button>
+              <button class="timeframe-btn" data-timeframe="3M">3M</button>
+              <button class="timeframe-btn" data-timeframe="YTD">YTD</button>
+              <button class="timeframe-btn" data-timeframe="MAX">MAX</button>
+            </div>
+            <button
+              id="narrativeGenerate"
+              type="button"
+              class="log-toggle has-tooltip"
+              data-tooltip="Generate an AI debrief of the most recent trading session."
+            >
+              Generate
+            </button>
+          </div>
+          <div id="narrativeContent" class="narrative-content">
+            <p class="narrative-empty">Hit Generate to create a debrief of the most recent session.</p>
+          </div>
         </div>
       </section>
     </main>
