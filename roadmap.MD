@@ -65,6 +65,8 @@ foundation for future work.
 - Stale-bar entry protection
 - Open-position live risk management during stale-bar conditions
 - Structured decision logs and daily JSONL records
+- Position lifecycle JSONL foundation for entry/exit intent, order
+  submission/rejection, and trailing-risk management events
 
 ## Priority 0: Operational Truth
 
@@ -129,8 +131,13 @@ trust.
 
 Notes:
 
+- Foundation implemented: intent events, submitted/rejected order events, and
+  position-managed trailing-risk events are written to
+  `logs/position_lifecycle.jsonl`.
 - This is a prerequisite for trustworthy P/L, metrics, trade journal export,
   scale-in mode, replay, and arena work.
+- Remaining lifecycle work should add broker fill reconciliation, position
+  opened/closed transitions, and realized-result calculation.
 
 ### Effective Notional Visibility
 

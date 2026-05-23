@@ -12,9 +12,16 @@ from typing import Any
 
 from bot import (
     AlpacaClient,
+    BotError,
     BotConfig,
     BotStateStore,
     EdgeWalkerBot,
+    LIFECYCLE_INTENDED_ENTRY,
+    LIFECYCLE_INTENDED_EXIT,
+    LIFECYCLE_ORDER_REJECTED,
+    LIFECYCLE_ORDER_SUBMITTED,
+    LIFECYCLE_POSITION_MANAGED,
+    LifecycleLedger,
     _last_completed_bar_end,
     bar_end_age_seconds,
     parse_market_timestamp,
@@ -73,11 +80,15 @@ class FakeClient:
         positions: dict[str, dict[str, Any] | None] | None = None,
         latest_trades: dict[str, dict[str, Any] | None] | None = None,
         latest_quotes: dict[str, dict[str, Any] | None] | None = None,
+        buy_error: BotError | None = None,
+        sell_error: BotError | None = None,
     ) -> None:
         self.bar_map = bar_map
         self.positions = positions or {}
         self.latest_trades = latest_trades or {}
         self.latest_quotes = latest_quotes or {}
+        self.buy_error = buy_error
+        self.sell_error = sell_error
         self.buys: list[tuple[str, Decimal]] = []
         self.sells: list[tuple[str, Decimal]] = []
 
@@ -108,11 +119,17 @@ class FakeClient:
     def get_asset(self, symbol: str) -> dict[str, Any]:
         return {"symbol": symbol, "fractionable": True}
 
-    def submit_market_buy(self, symbol: str, notional: Decimal) -> None:
+    def submit_market_buy(self, symbol: str, notional: Decimal) -> dict[str, Any]:
+        if self.buy_error:
+            raise self.buy_error
         self.buys.append((symbol, notional))
+        return {"id": f"buy-{len(self.buys)}", "symbol": symbol, "side": "buy"}
 
-    def submit_market_sell_qty(self, symbol: str, qty: Decimal) -> None:
+    def submit_market_sell_qty(self, symbol: str, qty: Decimal) -> dict[str, Any]:
+        if self.sell_error:
+            raise self.sell_error
         self.sells.append((symbol, qty))
+        return {"id": f"sell-{len(self.sells)}", "symbol": symbol, "side": "sell"}
 
 
 class FakeMarketData:
@@ -175,8 +192,24 @@ class EdgeWalkerBotTest(unittest.TestCase):
         bot_config: BotConfig | None = None,
         market_data: FakeMarketData | None = None,
     ) -> tuple[str, Any]:
+        output, status, _records = self.run_bot_with_lifecycle(
+            client,
+            setup_state,
+            bot_config,
+            market_data,
+        )
+        return output, status
+
+    def run_bot_with_lifecycle(
+        self,
+        client: FakeClient,
+        setup_state: Any | None = None,
+        bot_config: BotConfig | None = None,
+        market_data: FakeMarketData | None = None,
+    ) -> tuple[str, Any, list[dict[str, Any]]]:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
             if setup_state:
                 setup_state(state_store)
             output = io.StringIO()
@@ -186,8 +219,9 @@ class EdgeWalkerBotTest(unittest.TestCase):
                     client,
                     state_store,
                     market_data,
+                    lifecycle_ledger,
                 ).run_once()
-            return output.getvalue(), status
+            return output.getvalue(), status, lifecycle_ledger.read_all()
 
     def test_warmup_blocks_regime_routing_until_slow_sma_history_exists(self) -> None:
         client = FakeClient({"SOXL": bars("100", "99")})
@@ -224,6 +258,26 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.action_taken, "market_buy")
 
+    def test_lifecycle_ledger_records_edgewalker_entry_order(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "99")})
+
+        _output, status, records = self.run_bot_with_lifecycle(client)
+
+        self.assertEqual(status.action_taken, "market_buy")
+        self.assertEqual(
+            [record["event_type"] for record in records],
+            [LIFECYCLE_INTENDED_ENTRY, LIFECYCLE_ORDER_SUBMITTED],
+        )
+        intended = records[0]
+        submitted = records[1]
+        self.assertEqual(intended["runtime"], "EdgeWalker")
+        self.assertEqual(intended["bot"], "ChopBot")
+        self.assertEqual(intended["symbol"], "SOXL")
+        self.assertEqual(intended["side"], "buy")
+        self.assertEqual(intended["notional"], "25")
+        self.assertEqual(intended["reason"], "discount_confirmed")
+        self.assertEqual(submitted["order"]["id"], "buy-1")
+
     def test_stale_market_data_blocks_strategy_actions(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
         client = FakeClient({"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)})
@@ -258,6 +312,66 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertIn("[RISK] SOXL: trailing stop holding", output)
         self.assertNotIn("action_taken=wait_stale_market_data", output)
         self.assertEqual(status.action_taken, "manage_open_position_stale_bars")
+
+    def test_lifecycle_ledger_records_live_risk_exit_during_stale_bars(self) -> None:
+        stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        now_text = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)},
+            {"SOXL": {"symbol": "SOXL", "qty": "1", "avg_entry_price": "100"}},
+            latest_quotes={"SOXL": {"bp": "98", "ap": "98", "t": now_text}},
+        )
+
+        output, status, records = self.run_bot_with_lifecycle(client)
+
+        self.assertEqual(client.sells, [("SOXL", Decimal("1.000000000"))])
+        self.assertIn("live risk management remains active", output)
+        self.assertEqual(status.action_taken, "manage_open_position_stale_bars")
+        self.assertEqual(
+            [record["event_type"] for record in records],
+            [
+                LIFECYCLE_POSITION_MANAGED,
+                LIFECYCLE_INTENDED_EXIT,
+                LIFECYCLE_ORDER_SUBMITTED,
+            ],
+        )
+        managed = records[0]
+        submitted = records[2]
+        self.assertEqual(managed["runtime"], "TrailingStopBot")
+        self.assertEqual(managed["symbol"], "SOXL")
+        self.assertEqual(managed["stop_breached"], True)
+        self.assertEqual(managed["require_live_mark"], True)
+        self.assertEqual(submitted["reason"], "trailing_stop_breached")
+        self.assertEqual(submitted["order"]["id"], "sell-1")
+
+    def test_lifecycle_ledger_records_broker_rejected_entry(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "99")},
+            buy_error=BotError("broker rejected buy"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            output = io.StringIO()
+            with self.assertRaises(BotError):
+                with contextlib.redirect_stdout(output):
+                    EdgeWalkerBot(
+                        config(),
+                        client,
+                        state_store,
+                        lifecycle_ledger=lifecycle_ledger,
+                    ).run_once()
+
+            records = lifecycle_ledger.read_all()
+
+        self.assertEqual(client.buys, [])
+        self.assertEqual(
+            [record["event_type"] for record in records],
+            [LIFECYCLE_INTENDED_ENTRY, LIFECYCLE_ORDER_REJECTED],
+        )
+        self.assertEqual(records[1]["side"], "buy")
+        self.assertEqual(records[1]["error"], "broker rejected buy")
 
     def test_streaming_market_data_replaces_rest_bars_for_regime(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
