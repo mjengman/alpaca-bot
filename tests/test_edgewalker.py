@@ -23,8 +23,13 @@ from bot import (
     EdgeWalkerBot,
     LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
+    LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_REJECTED,
+    LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_SUBMITTED,
+    LIFECYCLE_PARTIAL_FILL,
+    LIFECYCLE_POSITION_CLOSED,
+    LIFECYCLE_POSITION_OPENED,
     LIFECYCLE_POSITION_MANAGED,
     LifecycleLedger,
     _last_completed_bar_end,
@@ -88,6 +93,9 @@ class FakeClient:
         latest_quotes: dict[str, dict[str, Any] | None] | None = None,
         buy_error: BotError | None = None,
         sell_error: BotError | None = None,
+        buy_order_response: dict[str, Any] | None = None,
+        sell_order_response: dict[str, Any] | None = None,
+        order_lookup: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.bar_map = bar_map
         self.positions = positions or {}
@@ -95,6 +103,9 @@ class FakeClient:
         self.latest_quotes = latest_quotes or {}
         self.buy_error = buy_error
         self.sell_error = sell_error
+        self.buy_order_response = buy_order_response
+        self.sell_order_response = sell_order_response
+        self.order_lookup = order_lookup or {}
         self.buys: list[tuple[str, Decimal]] = []
         self.sells: list[tuple[str, Decimal]] = []
 
@@ -125,17 +136,30 @@ class FakeClient:
     def get_asset(self, symbol: str) -> dict[str, Any]:
         return {"symbol": symbol, "fractionable": True}
 
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        if order_id not in self.order_lookup:
+            raise BotError(f"order not found: {order_id}")
+        return self.order_lookup[order_id]
+
     def submit_market_buy(self, symbol: str, notional: Decimal) -> dict[str, Any]:
         if self.buy_error:
             raise self.buy_error
         self.buys.append((symbol, notional))
-        return {"id": f"buy-{len(self.buys)}", "symbol": symbol, "side": "buy"}
+        order = dict(self.buy_order_response or {})
+        order.setdefault("id", f"buy-{len(self.buys)}")
+        order.setdefault("symbol", symbol)
+        order.setdefault("side", "buy")
+        return order
 
     def submit_market_sell_qty(self, symbol: str, qty: Decimal) -> dict[str, Any]:
         if self.sell_error:
             raise self.sell_error
         self.sells.append((symbol, qty))
-        return {"id": f"sell-{len(self.sells)}", "symbol": symbol, "side": "sell"}
+        order = dict(self.sell_order_response or {})
+        order.setdefault("id", f"sell-{len(self.sells)}")
+        order.setdefault("symbol", symbol)
+        order.setdefault("side", "sell")
+        return order
 
 
 class FakeMarketData:
@@ -283,6 +307,119 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(intended["notional"], "25")
         self.assertEqual(intended["reason"], "discount_confirmed")
         self.assertEqual(submitted["order"]["id"], "buy-1")
+
+    def test_lifecycle_ledger_records_filled_entry_order(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "99")},
+            buy_order_response={
+                "id": "buy-1",
+                "symbol": "SOXL",
+                "side": "buy",
+                "status": "filled",
+                "filled_qty": "0.25",
+                "filled_avg_price": "99.50",
+            },
+        )
+
+        _output, status, records = self.run_bot_with_lifecycle(client)
+
+        self.assertEqual(status.action_taken, "market_buy")
+        self.assertEqual(
+            [record["event_type"] for record in records],
+            [
+                LIFECYCLE_INTENDED_ENTRY,
+                LIFECYCLE_ORDER_SUBMITTED,
+                LIFECYCLE_ORDER_ACCEPTED,
+                LIFECYCLE_FULL_FILL,
+                LIFECYCLE_POSITION_OPENED,
+            ],
+        )
+        self.assertEqual(records[2]["order_id"], "buy-1")
+        self.assertEqual(records[3]["filled_qty"], "0.25")
+        self.assertEqual(records[3]["filled_avg_price"], "99.5")
+        self.assertEqual(records[4]["qty"], "0.25")
+        self.assertEqual(records[4]["avg_entry_price"], "99.5")
+
+    def test_lifecycle_ledger_reconciles_partial_fill_for_pending_order(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.track_order(
+                "buy-1",
+                {
+                    "bot": "ChopBot",
+                    "reason": "discount_confirmed",
+                    "symbol": "SOXL",
+                    "side": "buy",
+                    "last_status": "new",
+                    "last_filled_qty": "0",
+                    "accepted_recorded": True,
+                },
+            )
+
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "100")},
+            order_lookup={
+                "buy-1": {
+                    "id": "buy-1",
+                    "symbol": "SOXL",
+                    "side": "buy",
+                    "status": "partially_filled",
+                    "filled_qty": "0.10",
+                    "filled_avg_price": "100",
+                }
+            },
+        )
+
+        _output, status, records = self.run_bot_with_lifecycle(client, setup_state)
+
+        self.assertEqual(status.action_taken, "no_entry_signal")
+        self.assertEqual(
+            [record["event_type"] for record in records],
+            [LIFECYCLE_PARTIAL_FILL, LIFECYCLE_POSITION_OPENED],
+        )
+        self.assertEqual(records[0]["order_id"], "buy-1")
+        self.assertEqual(records[0]["fill_delta_qty"], "0.1")
+        self.assertEqual(records[1]["qty"], "0.1")
+
+    def test_lifecycle_ledger_reconciles_pending_sell_fill_as_position_closed(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.track_order(
+                "sell-1",
+                {
+                    "bot": "MomentumBot",
+                    "reason": "trailing_stop_breached",
+                    "symbol": "SOXL",
+                    "side": "sell",
+                    "last_status": "new",
+                    "last_filled_qty": "0",
+                    "accepted_recorded": True,
+                },
+            )
+
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "100")},
+            order_lookup={
+                "sell-1": {
+                    "id": "sell-1",
+                    "symbol": "SOXL",
+                    "side": "sell",
+                    "status": "filled",
+                    "filled_qty": "1",
+                    "filled_avg_price": "98",
+                }
+            },
+        )
+
+        _output, status, records = self.run_bot_with_lifecycle(client, setup_state)
+
+        self.assertEqual(status.action_taken, "no_entry_signal")
+        self.assertEqual(
+            [record["event_type"] for record in records],
+            [LIFECYCLE_FULL_FILL, LIFECYCLE_POSITION_CLOSED],
+        )
+        self.assertEqual(records[0]["order_id"], "sell-1")
+        self.assertEqual(records[0]["filled_qty"], "1")
+        self.assertEqual(records[1]["qty"], "1")
+        self.assertEqual(records[1]["exit_price"], "98")
 
     def test_stale_market_data_blocks_strategy_actions(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)

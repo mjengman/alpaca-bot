@@ -66,7 +66,8 @@ foundation for future work.
 - Open-position live risk management during stale-bar conditions
 - Structured decision logs and daily JSONL records
 - Position lifecycle JSONL foundation for entry/exit intent, order
-  submission/rejection, and trailing-risk management events
+  submission/rejection, broker acceptance/fill reconciliation,
+  position opened/closed transitions, and trailing-risk management events
 - Broker constraint classifier and dashboard state for rejected orders
 
 ## Priority 0: Operational Truth
@@ -140,13 +141,14 @@ trust.
 
 Notes:
 
-- Foundation implemented: intent events, submitted/rejected order events, and
-  position-managed trailing-risk events are written to
+- Foundation implemented: intent events, submitted/rejected order events,
+  position-managed trailing-risk events, broker acceptance/fill reconciliation,
+  and position opened/closed transitions are written to
   `logs/position_lifecycle.jsonl`.
 - This is a prerequisite for trustworthy P/L, metrics, trade journal export,
   scale-in mode, replay, and arena work.
-- Remaining lifecycle work should add broker fill reconciliation, position
-  opened/closed transitions, and realized-result calculation.
+- Remaining lifecycle work should calculate realized results from filled entries
+  and exits, then expose those results in the UI.
 
 ### Effective Notional Visibility
 
@@ -326,8 +328,8 @@ Notes:
 
 ## Suggested Next Sprint
 
-1. Build the position lifecycle ledger.
+1. Calculate realized trade results from lifecycle fill records.
 2. Add realized and unrealized P/L cards to the UI.
-3. Add broker constraint state and rejection classification.
-4. Expose effective notional and buying-power clamp in the UI.
+3. Surface pending-order and fill state in the dashboard.
+4. Add rejection cooldown behavior for repeated broker failures.
 5. Improve log styling around trade open, trade close, P/L, and rejection events.

@@ -65,6 +65,11 @@ LIFECYCLE_INTENDED_ENTRY = "INTENDED_ENTRY"
 LIFECYCLE_INTENDED_EXIT = "INTENDED_EXIT"
 LIFECYCLE_ORDER_SUBMITTED = "ORDER_SUBMITTED"
 LIFECYCLE_ORDER_REJECTED = "ORDER_REJECTED"
+LIFECYCLE_ORDER_ACCEPTED = "ORDER_ACCEPTED"
+LIFECYCLE_PARTIAL_FILL = "PARTIAL_FILL"
+LIFECYCLE_FULL_FILL = "FULL_FILL"
+LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
+LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
 BROKER_STATE_OK = "OK"
 BROKER_STATE_RESTRICTED = "RESTRICTED"
@@ -403,6 +408,12 @@ class AlpacaClient:
             print(f"[dry-run] Would submit market sell: {json.dumps(payload)}")
             return None
         return self._trading_request("POST", "/orders", payload=payload)
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        order = self._trading_request("GET", f"/orders/{order_id}")
+        if not isinstance(order, dict):
+            raise BotError(f"Unexpected order response: {order!r}")
+        return order
 
     def submit_trailing_stop_sell(
         self, symbol: str, qty: Decimal, trail_percent: Decimal
@@ -942,9 +953,35 @@ class BotStateStore:
         }
         self._write(data)
 
+    def get_pending_orders(self) -> dict[str, dict[str, Any]]:
+        data = self._read()
+        orders = data.get("orders", {})
+        return orders if isinstance(orders, dict) else {}
+
+    def get_pending_order(self, order_id: str) -> dict[str, Any] | None:
+        order = self.get_pending_orders().get(order_id)
+        return order if isinstance(order, dict) else None
+
+    def track_order(self, order_id: str, metadata: dict[str, Any]) -> None:
+        data = self._read()
+        orders = data.setdefault("orders", {})
+        existing_order = orders.get(order_id)
+        existing = existing_order if isinstance(existing_order, dict) else {}
+        existing.update(lifecycle_json_value(metadata))
+        existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+        orders[order_id] = existing
+        self._write(data)
+
+    def clear_order(self, order_id: str) -> None:
+        data = self._read()
+        orders = data.get("orders", {})
+        if order_id in orders:
+            del orders[order_id]
+            self._write(data)
+
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"trailing": {}, "entries": {}, "regime": {}}
+            return {"trailing": {}, "entries": {}, "regime": {}, "orders": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -954,6 +991,7 @@ class BotStateStore:
         data.setdefault("trailing", {})
         data.setdefault("entries", {})
         data.setdefault("regime", {})
+        data.setdefault("orders", {})
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -984,6 +1022,250 @@ class LifecycleLedger:
         return records
 
 
+class OrderLifecycleTracker:
+    ACCEPTED_STATUSES = {
+        "accepted",
+        "accepted_for_bidding",
+        "new",
+        "pending_new",
+        "partially_filled",
+        "filled",
+        "done_for_day",
+    }
+    TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected"}
+
+    def __init__(
+        self,
+        client: AlpacaClient,
+        state_store: BotStateStore,
+        lifecycle_ledger: LifecycleLedger,
+        runtime: str,
+        dry_run: bool,
+    ) -> None:
+        self.client = client
+        self.state_store = state_store
+        self.lifecycle_ledger = lifecycle_ledger
+        self.runtime = runtime
+        self.dry_run = dry_run
+
+    def track_submitted_order(
+        self,
+        order: dict[str, Any] | None,
+        bot_name: str | None,
+        reason: str,
+    ) -> None:
+        order_id = self._order_id(order)
+        if order_id is None or order is None:
+            return
+
+        metadata = {
+            "bot": bot_name,
+            "reason": reason,
+            "symbol": order.get("symbol"),
+            "side": order.get("side"),
+            "last_status": None,
+            "last_filled_qty": "0",
+            "position_opened_recorded": False,
+            "position_closed_recorded": False,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.state_store.track_order(order_id, metadata)
+        self.reconcile_order(order_id, order)
+
+    def reconcile_pending_orders(self) -> None:
+        for order_id in list(self.state_store.get_pending_orders().keys()):
+            try:
+                order = self.client.get_order(order_id)
+            except BotError as exc:
+                print(f"[ORDER] {order_id}: reconciliation failed: {exc}")
+                continue
+            self.reconcile_order(order_id, order)
+
+    def reconcile_order(
+        self,
+        order_id: str,
+        order: dict[str, Any],
+    ) -> None:
+        pending = self.state_store.get_pending_order(order_id) or {}
+        status = self._order_status(order)
+        side = self._order_side(order, pending)
+        symbol = self._order_symbol(order, pending)
+        filled_qty = self._filled_qty(order)
+        previous_status = pending.get("last_status")
+        previous_filled_qty = optional_decimal_from_api(
+            pending.get("last_filled_qty"),
+            "last filled qty",
+        ) or Decimal("0")
+        filled_avg_price = optional_decimal_from_api(
+            order.get("filled_avg_price"),
+            "filled avg price",
+        )
+        bot_name = self._field(order, pending, "bot")
+        reason = self._field(order, pending, "reason")
+
+        if (
+            status in self.ACCEPTED_STATUSES
+            and status != previous_status
+            and not pending.get("accepted_recorded")
+        ):
+            self._record(
+                LIFECYCLE_ORDER_ACCEPTED,
+                order_id=order_id,
+                bot=bot_name,
+                symbol=symbol,
+                side=side,
+                status=status,
+                reason=reason,
+                order=order,
+            )
+            pending["accepted_recorded"] = True
+
+        if (
+            status == "rejected"
+            and status != previous_status
+            and not pending.get("rejected_recorded")
+        ):
+            self._record(
+                LIFECYCLE_ORDER_REJECTED,
+                order_id=order_id,
+                bot=bot_name,
+                symbol=symbol,
+                side=side,
+                status=status,
+                reason=reason,
+                error=str(order.get("reject_reason") or "order rejected"),
+                order=order,
+            )
+            pending["rejected_recorded"] = True
+
+        if filled_qty > previous_filled_qty:
+            fill_event = (
+                LIFECYCLE_FULL_FILL
+                if status == "filled"
+                else LIFECYCLE_PARTIAL_FILL
+            )
+            fill_delta = filled_qty - previous_filled_qty
+            self._record(
+                fill_event,
+                order_id=order_id,
+                bot=bot_name,
+                symbol=symbol,
+                side=side,
+                status=status,
+                filled_qty=filled_qty,
+                fill_delta_qty=fill_delta,
+                filled_avg_price=filled_avg_price,
+                reason=reason,
+                order=order,
+            )
+            if side == "buy" and not pending.get("position_opened_recorded"):
+                self._record(
+                    LIFECYCLE_POSITION_OPENED,
+                    order_id=order_id,
+                    bot=bot_name,
+                    symbol=symbol,
+                    side=side,
+                    qty=filled_qty,
+                    avg_entry_price=filled_avg_price,
+                    reason=reason,
+                )
+                pending["position_opened_recorded"] = True
+            if (
+                side == "sell"
+                and status == "filled"
+                and not pending.get("position_closed_recorded")
+            ):
+                self._record(
+                    LIFECYCLE_POSITION_CLOSED,
+                    order_id=order_id,
+                    bot=bot_name,
+                    symbol=symbol,
+                    side=side,
+                    qty=filled_qty,
+                    exit_price=filled_avg_price,
+                    reason=reason,
+                )
+                pending["position_closed_recorded"] = True
+
+        pending.update(
+            {
+                "bot": bot_name,
+                "reason": reason,
+                "symbol": symbol,
+                "side": side,
+                "last_status": status,
+                "last_filled_qty": format_decimal(filled_qty),
+                "accepted_recorded": pending.get("accepted_recorded", False),
+                "position_opened_recorded": pending.get(
+                    "position_opened_recorded",
+                    False,
+                ),
+                "position_closed_recorded": pending.get(
+                    "position_closed_recorded",
+                    False,
+                ),
+                "rejected_recorded": pending.get("rejected_recorded", False),
+            }
+        )
+
+        if status in self.TERMINAL_STATUSES:
+            self.state_store.clear_order(order_id)
+        else:
+            self.state_store.track_order(order_id, pending)
+
+    def _record(self, event_type: str, **fields: Any) -> None:
+        payload = {
+            "runtime": self.runtime,
+            "dry_run": self.dry_run,
+        }
+        payload.update(fields)
+        self.lifecycle_ledger.record(event_type, **payload)
+
+    def _field(
+        self,
+        order: dict[str, Any],
+        pending: dict[str, Any],
+        key: str,
+    ) -> str | None:
+        value = order.get(key) or pending.get(key)
+        return str(value) if value not in (None, "") else None
+
+    def _order_id(self, order: dict[str, Any] | None) -> str | None:
+        if not order:
+            return None
+        value = order.get("id")
+        return str(value) if value else None
+
+    def _order_status(self, order: dict[str, Any]) -> str:
+        return str(order.get("status") or "unknown").lower()
+
+    def _order_side(
+        self,
+        order: dict[str, Any],
+        pending: dict[str, Any],
+    ) -> str | None:
+        value = order.get("side") or pending.get("side")
+        return str(value).lower() if value else None
+
+    def _order_symbol(
+        self,
+        order: dict[str, Any],
+        pending: dict[str, Any],
+    ) -> str | None:
+        value = order.get("symbol") or pending.get("symbol")
+        return str(value) if value else None
+
+    def _filled_qty(self, order: dict[str, Any]) -> Decimal:
+        filled_qty = optional_decimal_from_api(order.get("filled_qty"), "filled qty")
+        if filled_qty is not None:
+            return filled_qty
+        if self._order_status(order) == "filled":
+            return optional_decimal_from_api(order.get("qty"), "order qty") or Decimal(
+                "0"
+            )
+        return Decimal("0")
+
+
 class TrailingStopBot:
     def __init__(
         self,
@@ -998,6 +1280,13 @@ class TrailingStopBot:
         self.state_store = state_store or BotStateStore()
         self.market_data = market_data
         self.lifecycle_ledger = lifecycle_ledger or LifecycleLedger()
+        self.order_tracker = OrderLifecycleTracker(
+            self.client,
+            self.state_store,
+            self.lifecycle_ledger,
+            "TrailingStopBot",
+            self.config.dry_run,
+        )
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
         payload = {
@@ -1045,6 +1334,7 @@ class TrailingStopBot:
             f"buying_power={account.get('buying_power')} "
             f"portfolio_value={account.get('portfolio_value')}"
         )
+        self.order_tracker.reconcile_pending_orders()
 
         symbol = self.config.symbol
         orders = self.client.list_open_orders()
@@ -1135,6 +1425,7 @@ class TrailingStopBot:
             reason="closeout_window",
             order=order,
         )
+        self.order_tracker.track_submitted_order(order, None, "closeout_window")
         self.state_store.clear_symbol(symbol)
 
     def _manage_trailing_stop(
@@ -1223,6 +1514,11 @@ class TrailingStopBot:
                 qty=qty,
                 reason="trailing_stop_breached",
                 order=order,
+            )
+            self.order_tracker.track_submitted_order(
+                order,
+                None,
+                "trailing_stop_breached",
             )
             self.state_store.clear_symbol(symbol)
         else:
@@ -1374,6 +1670,7 @@ class TrailingStopBot:
             reason="sma_crossed_above",
             order=order,
         )
+        self.order_tracker.track_submitted_order(order, None, "sma_crossed_above")
 
 
 class RegimeDetector:
@@ -1443,6 +1740,13 @@ class EdgeWalkerBot:
         self.state_store = state_store or BotStateStore()
         self.market_data = market_data
         self.lifecycle_ledger = lifecycle_ledger or LifecycleLedger()
+        self.order_tracker = OrderLifecycleTracker(
+            self.client,
+            self.state_store,
+            self.lifecycle_ledger,
+            "EdgeWalker",
+            self.config.dry_run,
+        )
         self._latest_freshness: MarketDataFreshness | None = None
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
@@ -1482,6 +1786,7 @@ class EdgeWalkerBot:
             f"buying_power={account.get('buying_power')} "
             f"portfolio_value={account.get('portfolio_value')}"
         )
+        self.order_tracker.reconcile_pending_orders()
 
         detector = RegimeDetector(self.config, self.client, self.market_data)
         signal, soxl_snapshot = detector.detect()
@@ -1911,6 +2216,11 @@ class EdgeWalkerBot:
             reason=entry_decision.reason,
             mode=self._directional_mode_for_route(route),
             order=order,
+        )
+        self.order_tracker.track_submitted_order(
+            order,
+            route.active_bot,
+            entry_decision.reason,
         )
         if not self.config.dry_run:
             self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
@@ -2606,6 +2916,11 @@ class EdgeWalkerBot:
             owner=owner_text,
             order=order,
         )
+        self.order_tracker.track_submitted_order(
+            order,
+            owner_text,
+            "stale_position_regime_mismatch",
+        )
         self.state_store.clear_symbol(symbol)
         print("entry_signal=False action_taken=close_stale_position_no_same_cycle_reversal")
         return "close_stale_position_no_same_cycle_reversal"
@@ -2679,6 +2994,11 @@ class EdgeWalkerBot:
             slow_sma=soxl_snapshot.slow_sma,
             order=order,
         )
+        self.order_tracker.track_submitted_order(
+            order,
+            CHOP_BOT,
+            "chop_reclaim_slow_sma",
+        )
         self.state_store.clear_symbol(symbol)
         print("entry_signal=False action_taken=chop_exit_reclaim_slow_sma")
         return "chop_exit_reclaim_slow_sma"
@@ -2745,6 +3065,11 @@ class EdgeWalkerBot:
                 reason="market_close_liquidation",
                 seconds_to_close=seconds_to_close,
                 order=order,
+            )
+            self.order_tracker.track_submitted_order(
+                order,
+                owner,
+                "market_close_liquidation",
             )
             self.state_store.clear_symbol(symbol)
             sold_any = True
