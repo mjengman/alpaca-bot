@@ -4,7 +4,7 @@ Last updated: 2026-05-23
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
-more inspectable before adding more aggression.
+more inspectable so it can grow into more aggression with confidence.
 
 ## Operating Doctrine
 
@@ -14,6 +14,40 @@ more inspectable before adding more aggression.
 - Aggression is configurable.
 - The system should always explain itself.
 - Observability is a core feature, not a debugging afterthought.
+
+## Project Spirit
+
+EdgeWalker should remain fun, hopeful, and ambitious. Safety work should not
+bury the project under procedural weight or make the UI feel timid. The point of
+operational truth is to give the bot room to grow without fooling the operator.
+
+Profitability is not assumed, but it is absolutely an aspiration. The product
+should keep room for the excitement that this could become a genuinely
+profitable autonomous trading runtime.
+
+Practical implications:
+
+- Safety should feel like confidence, not bureaucracy.
+- The UI should feel alive, legible, and optimistic.
+- Strategy evolution should stay exciting, but earn its freedom.
+- Metrics should clarify opportunity, not only catalog risk.
+- Operator experience should preserve the feeling that this is a powerful system
+  becoming more capable over time.
+
+## Safety Invariants
+
+These should stay true as the app evolves.
+
+- Never enter when required market data for that decision path is stale.
+- Never manage exits from stale bars alone when live quote/trade data is
+  unavailable.
+- Never exceed the configured allocation clamp or safe buying-power threshold.
+- Never reverse in the same cycle after a forced stale-position close.
+- Never continue entering during stale-bar entry-block conditions.
+- Never hide a broker-rejected exit behind ordinary log noise.
+- Never orphan a position lifecycle state.
+- Never auto-send logs, credentials, or trading records to an outside service
+  without explicit user action.
 
 ## Current Baseline
 
@@ -107,6 +141,19 @@ Goal: make sizing behavior obvious before an order is submitted.
 - Show buying power clamp
 - Show why a proposed entry size changed
 - Log sizing decisions as structured events
+
+### Explainability Layer
+
+Goal: make the system's reasoning available as a first-class product surface,
+not only as raw logs.
+
+- Explain why an entry was approved or blocked
+- Explain why a route changed
+- Explain why a stop moved
+- Explain why allocation changed
+- Explain why cooldown is active
+- Explain why stale data is blocking entries but not open-position risk
+- Preserve concise machine-readable reason codes alongside human-readable text
 
 ## Priority 1: Operator Experience
 
@@ -246,6 +293,7 @@ These are important, but should follow the operational truth phase.
 - Persistent database layer
 - Trade journal export
 - Replay and simulation engine
+- Session replay and timeline scrubbing
 - Multi-position support
 - Multi-symbol routing
 - Arena / competing bots
