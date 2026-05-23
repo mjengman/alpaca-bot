@@ -45,6 +45,8 @@ const els = {
   brokerState: document.querySelector("#brokerStateValue"),
   sessionRealizedPl: document.querySelector("#sessionRealizedPlValue"),
   sessionTrades: document.querySelector("#sessionTradesValue"),
+  botPerformanceSummary: document.querySelector("#botPerformanceSummaryValue"),
+  botPerformanceGrid: document.querySelector("#botPerformanceGrid"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   cycles: document.querySelector("#cycleValue"),
@@ -423,6 +425,58 @@ function renderPerformance(performance) {
     els.sessionTrades.textContent = String(tradeCount || 0);
     setTone(els.sessionTrades, 0);
   }
+
+  renderBotPerformance(performance?.bot_performance || []);
+}
+
+function renderBotPerformance(botPerformance) {
+  const rows = Array.isArray(botPerformance) ? botPerformance : [];
+  const totalTrades = rows.reduce(
+    (sum, row) => sum + (numberOrNull(row.trade_count) || 0),
+    0,
+  );
+  els.botPerformanceSummary.textContent =
+    totalTrades > 0 ? `${totalTrades} closed trades` : "No closed trades";
+  els.botPerformanceSummary.classList.remove(
+    "is-positive",
+    "is-negative",
+    "is-neutral",
+  );
+  els.botPerformanceSummary.classList.add("is-neutral");
+
+  els.botPerformanceGrid.innerHTML = rows.length
+    ? rows.map(renderBotPerformanceCard).join("")
+    : '<div class="bot-performance-empty">No closed trades yet.</div>';
+}
+
+function renderBotPerformanceCard(row) {
+  const realized = row.realized_pl ?? "0";
+  const trades = numberOrNull(row.trade_count) || 0;
+  const winRate = row.win_rate_percent === null ? "--" : formatPercent(row.win_rate_percent);
+  const lastTrade =
+    row.last_trade_realized_pl === null
+      ? "No trade"
+      : `${formatMoney(row.last_trade_realized_pl)} ${
+          row.last_trade_symbol || ""
+        }`.trim();
+  const toneClass =
+    numberOrNull(realized) === null || numberOrNull(realized) === 0
+      ? "is-neutral"
+      : numberOrNull(realized) > 0
+      ? "is-positive"
+      : "is-negative";
+  return `
+    <div class="bot-performance-card">
+      <span>${escapeHtml(formatLabel(row.bot || "Bot"))}</span>
+      <strong class="${toneClass}">${escapeHtml(formatMoney(realized))}</strong>
+      <div class="bot-performance-stats">
+        <span>${escapeHtml(String(trades))} trades</span>
+        <span>${escapeHtml(String(row.wins || 0))}W/${escapeHtml(String(row.losses || 0))}L</span>
+        <span>${escapeHtml(winRate)}</span>
+      </div>
+      <small>${escapeHtml(lastTrade)}</small>
+    </div>
+  `;
 }
 
 function savedTheme() {

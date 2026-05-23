@@ -12,9 +12,12 @@ from unittest.mock import patch
 
 from bot import (
     BotConfig,
+    CHOP_BOT,
+    INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_PARTIAL_FILL,
+    MOMENTUM_BOT,
     broker_constraint_ok,
     broker_constraint_payload,
 )
@@ -223,6 +226,63 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["session_losses"], 1)
         self.assertEqual(summary["open_lot_qty"], "2")
         self.assertEqual(summary["open_lot_cost_basis"], "20")
+
+    def test_lifecycle_performance_summary_groups_realized_pl_by_bot(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": MOMENTUM_BOT,
+                "order_id": "buy-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:40:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": MOMENTUM_BOT,
+                "order_id": "sell-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "105",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:00:00+00:00",
+                "symbol": "SOXS",
+                "side": "buy",
+                "bot": INVERSE_BOT,
+                "order_id": "buy-2",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "10",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXS",
+                "side": "sell",
+                "bot": INVERSE_BOT,
+                "order_id": "sell-2",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "9",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+        by_bot = {item["bot"]: item for item in summary["bot_performance"]}
+
+        self.assertEqual(by_bot[MOMENTUM_BOT]["realized_pl"], "5")
+        self.assertEqual(by_bot[MOMENTUM_BOT]["trade_count"], 1)
+        self.assertEqual(by_bot[MOMENTUM_BOT]["wins"], 1)
+        self.assertEqual(by_bot[MOMENTUM_BOT]["win_rate_percent"], "100")
+        self.assertEqual(by_bot[INVERSE_BOT]["realized_pl"], "-2")
+        self.assertEqual(by_bot[INVERSE_BOT]["losses"], 1)
+        self.assertEqual(by_bot[CHOP_BOT]["realized_pl"], "0")
+        self.assertEqual(by_bot[CHOP_BOT]["trade_count"], 0)
 
     def test_order_visibility_summary_lists_pending_and_recent_events(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)

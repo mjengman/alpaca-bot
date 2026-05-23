@@ -71,6 +71,8 @@ foundation for future work.
 - Broker constraint classifier and dashboard state for rejected orders
 - Lifecycle-derived session realized P/L summary and closed-trade count in the
   dashboard
+- Bot-level realized P/L, trade count, wins/losses, and last trade result in
+  the dashboard
 - Pending-order and recent order/fill lifecycle visibility in the dashboard
 
 ## Priority 0: Operational Truth
@@ -92,10 +94,11 @@ Goal: make realized and unrealized performance painfully obvious.
 
 Notes:
 
-- Foundation implemented: session realized P/L and closed-trade count are
-  calculated from lifecycle fill records and shown in the dashboard.
-- Remaining P/L work should add realized P/L per closed trade, bot-level
-  performance, richer history, and exportable journal records.
+- Foundation implemented: session realized P/L, closed-trade count, and
+  bot-level realized performance are calculated from lifecycle fill records and
+  shown in the dashboard.
+- Remaining P/L work should add realized P/L per closed trade, richer history,
+  and exportable journal records.
 - UI should separate account-level daily P/L from strategy/session P/L.
 
 ### Broker Constraint State
@@ -251,6 +254,8 @@ Metrics should be built from the lifecycle ledger, not from loose log scraping.
 - Worst trade
 - Regime participation breakdown
 - Bot-level performance by MomentumBot, ChopBot, and InverseBot
+  - Foundation implemented for realized P/L, trade count, wins/losses, win
+    rate, and last trade result.
 
 ### System Health Telemetry
 
@@ -335,8 +340,8 @@ Notes:
 
 ## Suggested Next Sprint
 
-1. Add bot-level performance breakdowns.
-2. Add rejection cooldown behavior for repeated broker failures.
-3. Add realized trade detail/history from lifecycle fill records.
-4. Persist realized-result lifecycle records per closed trade.
+1. Add realized trade detail/history from lifecycle fill records.
+2. Persist realized-result lifecycle records per closed trade.
+3. Add rejection cooldown behavior for repeated broker failures.
+4. Add average hold duration and best/worst trade metrics.
 5. Improve log styling around trade open, trade close, P/L, and rejection events.

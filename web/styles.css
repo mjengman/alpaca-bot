@@ -621,15 +621,67 @@ button:disabled {
   min-width: 0;
 }
 
+.bot-performance-panel,
 .order-panel {
   margin: 10px 0;
   overflow: hidden;
 }
 
+.bot-performance-panel .section-head strong,
 .order-panel .section-head strong {
   color: var(--muted);
   font-size: 0.9rem;
   overflow-wrap: anywhere;
+}
+
+.bot-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.bot-performance-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  min-height: 128px;
+  padding: 14px 16px;
+}
+
+.bot-performance-card:not(:last-child) {
+  border-right: 1px solid var(--line);
+}
+
+.bot-performance-card > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.bot-performance-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.35rem;
+}
+
+.bot-performance-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.bot-performance-stats span,
+.bot-performance-card small,
+.bot-performance-empty {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.bot-performance-empty {
+  padding: 16px;
 }
 
 .order-grid {
@@ -790,6 +842,7 @@ body.live-paper .metric:first-child {
   .control-grid,
   .decision-lead,
   .decision-grid,
+  .bot-performance-grid,
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -800,6 +853,11 @@ body.live-paper .metric:first-child {
 
   .decision-lead > div,
   .decision-grid > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .bot-performance-card:not(:last-child) {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
@@ -836,6 +894,7 @@ body.live-paper .metric:first-child {
   .control-grid,
   .decision-lead,
   .decision-grid,
+  .bot-performance-grid,
   .metrics {
     grid-template-columns: 1fr;
   }

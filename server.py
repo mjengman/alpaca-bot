@@ -19,12 +19,15 @@ from bot import (
     BotConfig,
     BotError,
     BotStateStore,
+    CHOP_BOT,
     EdgeWalkerBot,
+    INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_REJECTED,
     LIFECYCLE_PARTIAL_FILL,
     LifecycleLedger,
+    MOMENTUM_BOT,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
     REGIME_STRENGTHS,
@@ -47,6 +50,7 @@ PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
+BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 
 
 @dataclass
@@ -541,6 +545,7 @@ def lifecycle_performance_summary(
         remaining = fill_qty
         matched_qty = Decimal("0")
         cost_basis = Decimal("0")
+        matched_lot_bots: list[tuple[str | None, Decimal]] = []
         lots = lots_by_symbol.setdefault(symbol, [])
         while remaining > 0 and lots:
             lot = lots[0]
@@ -548,6 +553,7 @@ def lifecycle_performance_summary(
             consumed_qty = min(remaining, lot_qty)
             matched_qty += consumed_qty
             cost_basis += consumed_qty * lot["price"]
+            matched_lot_bots.append((_optional_text(lot.get("bot")), consumed_qty))
             remaining -= consumed_qty
             lot["qty"] = lot_qty - consumed_qty
             if lot["qty"] <= 0:
@@ -569,7 +575,8 @@ def lifecycle_performance_summary(
         realized_trades.append(
             {
                 "symbol": symbol,
-                "bot": record.get("bot"),
+                "bot": _optional_text(record.get("bot"))
+                or _dominant_bot(matched_lot_bots),
                 "qty": format_decimal(matched_qty),
                 "avg_entry_price": format_decimal(avg_entry_price),
                 "exit_price": format_decimal(fill_price),
@@ -613,6 +620,7 @@ def lifecycle_performance_summary(
         if (_record_decimal(trade, "realized_pl") or Decimal("0")) < 0
     )
     last_trade = realized_trades[-1] if realized_trades else None
+    bot_performance = bot_performance_summary(realized_trades)
 
     return {
         "source": "position_lifecycle",
@@ -625,6 +633,7 @@ def lifecycle_performance_summary(
         "last_trade_realized_pl": (
             last_trade.get("realized_pl") if last_trade else None
         ),
+        "bot_performance": bot_performance,
         "open_lot_qty": format_decimal(open_qty),
         "open_lot_cost_basis": format_decimal(open_cost_basis),
         "unmatched_exit_qty": format_decimal(unmatched_exit_qty),
@@ -677,6 +686,70 @@ def order_visibility_summary(
     }
 
 
+def bot_performance_summary(realized_trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    aggregates: dict[str, dict[str, Any]] = {
+        bot: _blank_bot_performance(bot) for bot in BOT_PERFORMANCE_ORDER
+    }
+    order = list(BOT_PERFORMANCE_ORDER)
+
+    for trade in realized_trades:
+        bot = _optional_text(trade.get("bot")) or "UNKNOWN"
+        if bot not in aggregates:
+            aggregates[bot] = _blank_bot_performance(bot)
+            order.append(bot)
+        aggregate = aggregates[bot]
+        realized_pl = _record_decimal(trade, "realized_pl") or Decimal("0")
+        aggregate["realized_pl_value"] += realized_pl
+        aggregate["trade_count"] += 1
+        if realized_pl > 0:
+            aggregate["wins"] += 1
+        elif realized_pl < 0:
+            aggregate["losses"] += 1
+        aggregate["last_trade"] = trade
+
+    return [_bot_performance_payload(aggregates[bot]) for bot in order]
+
+
+def _blank_bot_performance(bot: str) -> dict[str, Any]:
+    return {
+        "bot": bot,
+        "realized_pl_value": Decimal("0"),
+        "trade_count": 0,
+        "wins": 0,
+        "losses": 0,
+        "last_trade": None,
+    }
+
+
+def _bot_performance_payload(aggregate: dict[str, Any]) -> dict[str, Any]:
+    trade_count = int(aggregate["trade_count"])
+    wins = int(aggregate["wins"])
+    losses = int(aggregate["losses"])
+    last_trade = aggregate.get("last_trade")
+    win_rate = (
+        Decimal(wins) / Decimal(trade_count) * Decimal("100")
+        if trade_count > 0
+        else None
+    )
+    return {
+        "bot": aggregate["bot"],
+        "realized_pl": format_decimal(aggregate["realized_pl_value"]),
+        "trade_count": trade_count,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_percent": format_decimal(win_rate) if win_rate is not None else None,
+        "last_trade_realized_pl": (
+            last_trade.get("realized_pl") if isinstance(last_trade, dict) else None
+        ),
+        "last_trade_symbol": (
+            last_trade.get("symbol") if isinstance(last_trade, dict) else None
+        ),
+        "last_trade_closed_at": (
+            last_trade.get("closed_at") if isinstance(last_trade, dict) else None
+        ),
+    }
+
+
 def _pending_order_payload(order_id: str, order: dict[str, Any]) -> dict[str, Any]:
     return {
         "order_id": order_id,
@@ -715,6 +788,17 @@ def _order_event_payload(
 
 def _optional_text(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
+
+
+def _dominant_bot(matched_lot_bots: list[tuple[str | None, Decimal]]) -> str | None:
+    totals: dict[str, Decimal] = {}
+    for bot, qty in matched_lot_bots:
+        if bot is None:
+            continue
+        totals[bot] = totals.get(bot, Decimal("0")) + qty
+    if not totals:
+        return None
+    return max(totals.items(), key=lambda item: item[1])[0]
 
 
 def _record_created_at(record: dict[str, Any]) -> datetime | None:
