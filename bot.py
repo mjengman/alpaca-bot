@@ -66,6 +66,18 @@ LIFECYCLE_INTENDED_EXIT = "INTENDED_EXIT"
 LIFECYCLE_ORDER_SUBMITTED = "ORDER_SUBMITTED"
 LIFECYCLE_ORDER_REJECTED = "ORDER_REJECTED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
+BROKER_STATE_OK = "OK"
+BROKER_STATE_RESTRICTED = "RESTRICTED"
+BROKER_STATE_EXIT_BLOCKED = "EXIT_BLOCKED"
+BROKER_STATE_BUYING_POWER_LIMITED = "BUYING_POWER_LIMITED"
+BROKER_STATE_ORDER_PENDING = "ORDER_PENDING"
+BROKER_CATEGORY_PDT = "PDT"
+BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER = "INSUFFICIENT_BUYING_POWER"
+BROKER_CATEGORY_MARKET_CLOSED = "MARKET_CLOSED"
+BROKER_CATEGORY_DUPLICATE_ORDER = "DUPLICATE_ORDER"
+BROKER_CATEGORY_NOTIONAL_TOO_LARGE = "NOTIONAL_TOO_LARGE"
+BROKER_CATEGORY_ASSET_NOT_TRADABLE = "ASSET_NOT_TRADABLE"
+BROKER_CATEGORY_GENERIC_REJECTION = "GENERIC_BROKER_REJECTION"
 BUYING_POWER_ORDER_BUFFER_PERCENT = Decimal("5")
 MONEY_STEP = Decimal("0.01")
 
@@ -507,6 +519,101 @@ def lifecycle_json_value(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True)
+class BrokerConstraint:
+    state: str
+    category: str | None
+    message: str | None
+    side: str | None = None
+    symbol: str | None = None
+    code: str | None = None
+
+
+def broker_constraint_ok() -> BrokerConstraint:
+    return BrokerConstraint(
+        state=BROKER_STATE_OK,
+        category=None,
+        message=None,
+    )
+
+
+def broker_constraint_payload(constraint: BrokerConstraint) -> dict[str, Any]:
+    return {
+        "state": constraint.state,
+        "category": constraint.category,
+        "message": constraint.message,
+        "side": constraint.side,
+        "symbol": constraint.symbol,
+        "code": constraint.code,
+    }
+
+
+def classify_broker_error(
+    message: str,
+    side: str | None = None,
+    symbol: str | None = None,
+) -> BrokerConstraint:
+    payload = broker_error_payload(message)
+    payload_message = str(payload.get("message") or "") if payload else ""
+    code = str(payload.get("code")) if payload and payload.get("code") else None
+    text = f"{message} {payload_message}".lower()
+    normalized_side = side.lower() if isinstance(side, str) else None
+
+    category = BROKER_CATEGORY_GENERIC_REJECTION
+    state = BROKER_STATE_RESTRICTED
+    if "pattern day" in text or "pdt" in text:
+        category = BROKER_CATEGORY_PDT
+    elif "insufficient buying power" in text or code == "40310000":
+        category = BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER
+        state = BROKER_STATE_BUYING_POWER_LIMITED
+    elif (
+        "market closed" in text
+        or "market is closed" in text
+        or "market is not open" in text
+        or "outside of trading" in text
+    ):
+        category = BROKER_CATEGORY_MARKET_CLOSED
+    elif "duplicate" in text or "already open" in text:
+        category = BROKER_CATEGORY_DUPLICATE_ORDER
+        state = BROKER_STATE_ORDER_PENDING
+    elif "notional" in text and (
+        "too large" in text
+        or "exceed" in text
+        or "greater" in text
+    ):
+        category = BROKER_CATEGORY_NOTIONAL_TOO_LARGE
+    elif (
+        "not tradable" in text
+        or "not fractionable" in text
+        or "asset" in text
+        and "tradable" in text
+    ):
+        category = BROKER_CATEGORY_ASSET_NOT_TRADABLE
+
+    if normalized_side == "sell" and state != BROKER_STATE_ORDER_PENDING:
+        state = BROKER_STATE_EXIT_BLOCKED
+
+    return BrokerConstraint(
+        state=state,
+        category=category,
+        message=payload_message or message,
+        side=normalized_side,
+        symbol=symbol,
+        code=code,
+    )
+
+
+def broker_error_payload(message: str) -> dict[str, Any] | None:
+    start = message.find("{")
+    if start == -1:
+        return None
+    try:
+        payload = json.loads(message[start:])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def sma(values: list[Decimal]) -> Decimal:
     return sum(values) / Decimal(len(values))
 
@@ -900,6 +1007,16 @@ class TrailingStopBot:
         payload.update(fields)
         self.lifecycle_ledger.record(event_type, **payload)
 
+    def _broker_rejection_payload(
+        self,
+        exc: BotError,
+        side: str,
+        symbol: str,
+    ) -> dict[str, Any]:
+        return broker_constraint_payload(
+            classify_broker_error(str(exc), side=side, symbol=symbol)
+        )
+
     def run_forever(self) -> None:
         print(
             f"Starting {self.config.symbol} bot. "
@@ -1007,6 +1124,7 @@ class TrailingStopBot:
                 qty=qty,
                 reason="closeout_window",
                 error=str(exc),
+                broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
             )
             raise
         self._record_lifecycle(
@@ -1095,6 +1213,7 @@ class TrailingStopBot:
                     qty=qty,
                     reason="trailing_stop_breached",
                     error=str(exc),
+                    broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
                 )
                 raise
             self._record_lifecycle(
@@ -1244,6 +1363,7 @@ class TrailingStopBot:
                 notional=self.config.position_notional,
                 reason="sma_crossed_above",
                 error=str(exc),
+                broker_constraint=self._broker_rejection_payload(exc, "buy", symbol),
             )
             raise
         self._record_lifecycle(
@@ -1332,6 +1452,16 @@ class EdgeWalkerBot:
         }
         payload.update(fields)
         self.lifecycle_ledger.record(event_type, **payload)
+
+    def _broker_rejection_payload(
+        self,
+        exc: BotError,
+        side: str,
+        symbol: str,
+    ) -> dict[str, Any]:
+        return broker_constraint_payload(
+            classify_broker_error(str(exc), side=side, symbol=symbol)
+        )
 
     def run_once(self) -> EdgeWalkerStatus:
         self._latest_freshness = None
@@ -1762,6 +1892,11 @@ class EdgeWalkerBot:
                 reason=entry_decision.reason,
                 mode=self._directional_mode_for_route(route),
                 error=str(exc),
+                broker_constraint=self._broker_rejection_payload(
+                    exc,
+                    "buy",
+                    route.routed_symbol,
+                ),
             )
             raise
         self._record_lifecycle(
@@ -2456,6 +2591,7 @@ class EdgeWalkerBot:
                 active_bot=active_bot,
                 owner=owner_text,
                 error=str(exc),
+                broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
             )
             raise
         self._record_lifecycle(
@@ -2529,6 +2665,7 @@ class EdgeWalkerBot:
                 qty=qty,
                 reason="chop_reclaim_slow_sma",
                 error=str(exc),
+                broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
             )
             raise
         self._record_lifecycle(
@@ -2596,6 +2733,7 @@ class EdgeWalkerBot:
                     qty=qty,
                     reason="market_close_liquidation",
                     error=str(exc),
+                    broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
                 )
                 raise
             self._record_lifecycle(

@@ -10,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from bot import BotConfig
+from bot import BotConfig, broker_constraint_ok, broker_constraint_payload
 from server import (
     BotRunner,
     NY_TZ,
@@ -71,6 +71,7 @@ class ServerLoggingTest(unittest.TestCase):
             console_lines=["SOXL regime check", "entry_signal=False"],
             error=None,
             edgewalker_status=status,
+            broker_state=broker_constraint_payload(broker_constraint_ok()),
             regime_transition=transition,
         )
 
@@ -80,6 +81,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(record["regime"], "UPTREND")
         self.assertEqual(record["price"], "170.42")
         self.assertEqual(record["account_value"], "50.09")
+        self.assertEqual(record["broker_state"]["state"], "OK")
         self.assertEqual(record["console_lines"], ["SOXL regime check", "entry_signal=False"])
         self.assertEqual(record["regime_transition"], transition)
         self.assertNotIn("api_secret_key", record["config"])

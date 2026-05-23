@@ -19,11 +19,16 @@ from bot import (
     BotConfig,
     BotError,
     EdgeWalkerBot,
+    LIFECYCLE_ORDER_REJECTED,
+    LifecycleLedger,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
     REGIME_STRENGTHS,
     SOXL,
     SOXS,
+    broker_constraint_ok,
+    broker_constraint_payload,
+    classify_broker_error,
     load_dotenv,
     parse_clock_time,
 )
@@ -70,6 +75,7 @@ class RunnerSnapshot:
     activity_log: list[str]
     edgewalker_status: dict[str, Any] | None
     market_data_status: dict[str, Any] | None
+    broker_state: dict[str, Any]
     last_error: str | None
 
 
@@ -92,6 +98,9 @@ class BotRunner:
         self._last_output: list[str] = []
         self._activity_log: list[tuple[datetime, str]] = self._load_activity_log()
         self._edgewalker_status: dict[str, Any] | None = None
+        self._broker_state: dict[str, Any] = broker_constraint_payload(
+            broker_constraint_ok()
+        )
         self._last_error: str | None = None
         self._market_idle_logged_for: str | None = None
         self._last_regime: str | None = None
@@ -111,6 +120,7 @@ class BotRunner:
             self._last_started_at = now_iso()
             self._last_stopped_at = None
             self._last_error = None
+            self._broker_state = broker_constraint_payload(broker_constraint_ok())
             self._next_run_at = None
             self._next_run_reason = None
             self._market_idle_logged_for = None
@@ -236,6 +246,9 @@ class BotRunner:
         lines = [f"[error] Could not check market clock: {exc}"]
         with self._lock:
             self._last_error = str(exc)
+            self._broker_state = broker_constraint_payload(
+                classify_broker_error(str(exc))
+            )
             self._last_output = lines
             self._next_run_at = next_run.isoformat(timespec="seconds")
             self._next_run_reason = "poll"
@@ -245,6 +258,7 @@ class BotRunner:
         output = io.StringIO()
         error: str | None = None
         edgewalker_status: dict[str, Any] | None = None
+        broker_state = broker_constraint_payload(broker_constraint_ok())
         run_timestamp = datetime.now(timezone.utc)
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
@@ -257,8 +271,10 @@ class BotRunner:
                 edgewalker_status = asdict(status)
         except BotError as exc:
             error = str(exc)
+            broker_state = self._broker_state_for_cycle_error(error, run_timestamp)
         except Exception as exc:  # Keep the local control server alive on surprises.
             error = f"{type(exc).__name__}: {exc}"
+            broker_state = broker_constraint_payload(classify_broker_error(error))
 
         lines = [line for line in output.getvalue().splitlines() if line.strip()]
         if error:
@@ -270,6 +286,7 @@ class BotRunner:
             cycle_id = self._cycle_count
             self._last_run_at = now_iso()
             self._last_error = error
+            self._broker_state = broker_state
             transition = self._regime_transition_locked(edgewalker_status)
             if transition:
                 lines.append(_format_regime_transition(transition))
@@ -284,8 +301,43 @@ class BotRunner:
                 console_lines=lines,
                 error=error,
                 edgewalker_status=edgewalker_status,
+                broker_state=broker_state,
                 regime_transition=transition,
             )
+
+    def _broker_state_for_cycle_error(
+        self,
+        error: str,
+        run_timestamp: datetime,
+    ) -> dict[str, Any]:
+        recent_rejection = self._latest_recent_order_rejection(run_timestamp)
+        if recent_rejection:
+            constraint = recent_rejection.get("broker_constraint")
+            if isinstance(constraint, dict):
+                return constraint
+        return broker_constraint_payload(classify_broker_error(error))
+
+    def _latest_recent_order_rejection(
+        self,
+        run_timestamp: datetime,
+    ) -> dict[str, Any] | None:
+        records = LifecycleLedger().read_all()
+        for record in reversed(records):
+            if record.get("event_type") != LIFECYCLE_ORDER_REJECTED:
+                continue
+            created_at = record.get("created_at")
+            if not isinstance(created_at, str):
+                continue
+            try:
+                parsed = datetime.fromisoformat(created_at)
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if parsed.astimezone(timezone.utc) >= run_timestamp - timedelta(seconds=2):
+                return record
+            return None
+        return None
 
     def _append_activity_locked(self, lines: list[str]) -> None:
         now = datetime.now(NY_TZ)
@@ -352,6 +404,7 @@ class BotRunner:
         console_lines: list[str],
         error: str | None,
         edgewalker_status: dict[str, Any] | None,
+        broker_state: dict[str, Any],
         regime_transition: dict[str, Any] | None,
     ) -> None:
         record = _cycle_log_record(
@@ -361,6 +414,7 @@ class BotRunner:
             console_lines=console_lines,
             error=error,
             edgewalker_status=edgewalker_status,
+            broker_state=broker_state,
             regime_transition=regime_transition,
         )
         try:
@@ -423,6 +477,7 @@ class BotRunner:
             activity_log=[line for _, line in self._activity_log],
             edgewalker_status=self._edgewalker_status,
             market_data_status=market_data_status,
+            broker_state=self._broker_state,
             last_error=self._last_error,
         )
 
@@ -492,6 +547,7 @@ def _cycle_log_record(
     console_lines: list[str],
     error: str | None,
     edgewalker_status: dict[str, Any] | None,
+    broker_state: dict[str, Any],
     regime_transition: dict[str, Any] | None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
@@ -500,6 +556,7 @@ def _cycle_log_record(
         "cycle_id": cycle_id,
         "config": _config_log_payload(config),
         "console_lines": console_lines,
+        "broker_state": broker_state,
     }
     if edgewalker_status:
         record.update(edgewalker_status)

@@ -15,6 +15,11 @@ from bot import (
     BotError,
     BotConfig,
     BotStateStore,
+    BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER,
+    BROKER_CATEGORY_MARKET_CLOSED,
+    BROKER_STATE_BUYING_POWER_LIMITED,
+    BROKER_STATE_EXIT_BLOCKED,
+    BROKER_STATE_RESTRICTED,
     EdgeWalkerBot,
     LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
@@ -24,6 +29,7 @@ from bot import (
     LifecycleLedger,
     _last_completed_bar_end,
     bar_end_age_seconds,
+    classify_broker_error,
     parse_market_timestamp,
 )
 
@@ -372,6 +378,47 @@ class EdgeWalkerBotTest(unittest.TestCase):
         )
         self.assertEqual(records[1]["side"], "buy")
         self.assertEqual(records[1]["error"], "broker rejected buy")
+        self.assertEqual(
+            records[1]["broker_constraint"]["category"],
+            "GENERIC_BROKER_REJECTION",
+        )
+
+    def test_broker_error_classifier_maps_buying_power_rejection(self) -> None:
+        error = (
+            'HTTP 403 from https://paper-api.alpaca.markets/v2/orders: '
+            '{"buying_power":"99860.01","code":40310000,'
+            '"cost_basis":"100000.18","message":"insufficient buying power"}'
+        )
+
+        constraint = classify_broker_error(error, side="buy", symbol="SOXL")
+
+        self.assertEqual(constraint.state, BROKER_STATE_BUYING_POWER_LIMITED)
+        self.assertEqual(
+            constraint.category,
+            BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER,
+        )
+        self.assertEqual(constraint.code, "40310000")
+        self.assertEqual(constraint.symbol, "SOXL")
+
+    def test_broker_error_classifier_marks_failed_exit_as_exit_blocked(self) -> None:
+        constraint = classify_broker_error(
+            "HTTP 403: market is closed",
+            side="sell",
+            symbol="SOXL",
+        )
+
+        self.assertEqual(constraint.state, BROKER_STATE_EXIT_BLOCKED)
+        self.assertEqual(constraint.category, BROKER_CATEGORY_MARKET_CLOSED)
+
+    def test_broker_error_classifier_marks_market_closed_entry_restricted(self) -> None:
+        constraint = classify_broker_error(
+            "HTTP 403: market is closed",
+            side="buy",
+            symbol="SOXL",
+        )
+
+        self.assertEqual(constraint.state, BROKER_STATE_RESTRICTED)
+        self.assertEqual(constraint.category, BROKER_CATEGORY_MARKET_CLOSED)
 
     def test_streaming_market_data_replaces_rest_bars_for_regime(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)

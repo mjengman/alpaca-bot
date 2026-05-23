@@ -67,6 +67,7 @@ foundation for future work.
 - Structured decision logs and daily JSONL records
 - Position lifecycle JSONL foundation for entry/exit intent, order
   submission/rejection, and trailing-risk management events
+- Broker constraint classifier and dashboard state for rejected orders
 
 ## Priority 0: Operational Truth
 
@@ -111,6 +112,14 @@ Goal: broker failures should be first-class operational state, not just log text
   - Generic broker rejection
 - Failed exits should become high-priority state.
 - Repeated rejected entries should cool down until account or broker state changes.
+
+Notes:
+
+- Foundation implemented: rejected orders are classified into broker constraint
+  state and exposed in the API/dashboard.
+- Remaining broker-state work should persist restrictions across restarts,
+  classify pending orders directly from open-order state, and add rejection
+  cooldown behavior.
 
 ### Position Lifecycle Ledger
 

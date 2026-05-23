@@ -39,6 +39,7 @@ const els = {
   toggle: document.querySelector("#toggleButton"),
   mode: document.querySelector("#modeValue"),
   dataStatus: document.querySelector("#dataStatusValue"),
+  brokerState: document.querySelector("#brokerStateValue"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   cycles: document.querySelector("#cycleValue"),
@@ -316,6 +317,40 @@ function renderDataHealth(status) {
     els.dataStatus.classList.add("data-danger");
   } else {
     els.dataStatus.classList.add("data-warn");
+  }
+}
+
+function renderBrokerState(brokerState) {
+  if (!els.brokerState) {
+    return;
+  }
+
+  els.brokerState.classList.remove("data-live", "data-warn", "data-danger");
+  const stateValue = brokerState?.state || "OK";
+  const labels = {
+    OK: "OK",
+    RESTRICTED: "Restricted",
+    EXIT_BLOCKED: "Exit Blocked",
+    BUYING_POWER_LIMITED: "Buying Power",
+    ORDER_PENDING: "Order Pending",
+  };
+  els.brokerState.textContent = labels[stateValue] || formatLabel(stateValue);
+
+  if (brokerState?.message) {
+    const category = brokerState.category
+      ? `${formatLabel(brokerState.category)}: `
+      : "";
+    els.brokerState.dataset.tooltip = `${category}${brokerState.message}`;
+  } else {
+    els.brokerState.dataset.tooltip = "No broker constraint is currently active.";
+  }
+
+  if (stateValue === "OK") {
+    els.brokerState.classList.add("data-live");
+  } else if (stateValue === "ORDER_PENDING" || stateValue === "BUYING_POWER_LIMITED") {
+    els.brokerState.classList.add("data-warn");
+  } else {
+    els.brokerState.classList.add("data-danger");
   }
 }
 
@@ -799,6 +834,7 @@ function render(data) {
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
   renderMode(isDryRun);
   renderDataHealth(data.edgewalker_status || data.market_data_status);
+  renderBrokerState(data.broker_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.cycles.textContent = String(data.cycle_count || 0);
