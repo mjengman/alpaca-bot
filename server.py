@@ -418,6 +418,13 @@ class BotRunner:
         broker_state: dict[str, Any],
         regime_transition: dict[str, Any] | None,
     ) -> None:
+        lifecycle_records = LifecycleLedger().read_all()
+        performance = lifecycle_performance_summary(lifecycle_records, timestamp)
+        order_state = order_visibility_summary(
+            lifecycle_records,
+            BotStateStore().get_pending_orders(),
+            timestamp,
+        )
         record = _cycle_log_record(
             config=config,
             cycle_id=cycle_id,
@@ -427,6 +434,8 @@ class BotRunner:
             edgewalker_status=edgewalker_status,
             broker_state=broker_state,
             regime_transition=regime_transition,
+            performance=performance,
+            order_state=order_state,
         )
         try:
             _append_daily_jsonl(record, timestamp)
@@ -891,6 +900,8 @@ def _cycle_log_record(
     edgewalker_status: dict[str, Any] | None,
     broker_state: dict[str, Any],
     regime_transition: dict[str, Any] | None,
+    performance: dict[str, Any] | None = None,
+    order_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "timestamp": _utc_timestamp(timestamp),
@@ -908,6 +919,14 @@ def _cycle_log_record(
         record["error"] = error
     if regime_transition:
         record["regime_transition"] = regime_transition
+    if performance:
+        record["performance"] = performance
+        record["bot_performance"] = performance.get("bot_performance")
+        record["session_realized_pl"] = performance.get("session_realized_pl")
+        record["session_trade_count"] = performance.get("session_trade_count")
+    if order_state:
+        record["order_state"] = order_state
+        record["pending_order_count"] = order_state.get("pending_count")
     return record
 
 

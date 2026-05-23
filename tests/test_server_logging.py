@@ -75,6 +75,33 @@ class ServerLoggingTest(unittest.TestCase):
             "action_taken": "no_entry_signal",
         }
         transition = {"from": "SIDEWAYS", "to": "UPTREND", "gap_percent": "0.28"}
+        performance = {
+            "source": "position_lifecycle",
+            "session_date": "2026-05-21",
+            "session_realized_pl": "5",
+            "session_trade_count": 1,
+            "bot_performance": [
+                {
+                    "bot": MOMENTUM_BOT,
+                    "realized_pl": "5",
+                    "trade_count": 1,
+                    "wins": 1,
+                    "losses": 0,
+                    "win_rate_percent": "100",
+                    "last_trade_realized_pl": "5",
+                    "last_trade_symbol": "SOXL",
+                    "last_trade_closed_at": "2026-05-22T01:00:00+00:00",
+                }
+            ],
+        }
+        order_state = {
+            "source": "position_lifecycle",
+            "session_date": "2026-05-21",
+            "pending_count": 1,
+            "pending_orders": [{"order_id": "order-1"}],
+            "recent_events": [],
+            "latest_fill": None,
+        }
 
         record = _cycle_log_record(
             config=config(),
@@ -85,6 +112,8 @@ class ServerLoggingTest(unittest.TestCase):
             edgewalker_status=status,
             broker_state=broker_constraint_payload(broker_constraint_ok()),
             regime_transition=transition,
+            performance=performance,
+            order_state=order_state,
         )
 
         self.assertEqual(record["timestamp"], "2026-05-22T01:05:00Z")
@@ -96,6 +125,12 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(record["broker_state"]["state"], "OK")
         self.assertEqual(record["console_lines"], ["SOXL regime check", "entry_signal=False"])
         self.assertEqual(record["regime_transition"], transition)
+        self.assertEqual(record["performance"], performance)
+        self.assertEqual(record["bot_performance"], performance["bot_performance"])
+        self.assertEqual(record["session_realized_pl"], "5")
+        self.assertEqual(record["session_trade_count"], 1)
+        self.assertEqual(record["order_state"], order_state)
+        self.assertEqual(record["pending_order_count"], 1)
         self.assertNotIn("api_secret_key", record["config"])
         self.assertNotIn("api_key_id", record["config"])
 

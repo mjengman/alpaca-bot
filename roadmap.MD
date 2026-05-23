@@ -73,6 +73,8 @@ foundation for future work.
   dashboard
 - Bot-level realized P/L, trade count, wins/losses, and last trade result in
   the dashboard
+- Daily cycle JSONL performance snapshots with session P/L, bot-level
+  performance, pending-order counts, and order-flow state
 - Pending-order and recent order/fill lifecycle visibility in the dashboard
 
 ## Priority 0: Operational Truth
@@ -97,6 +99,8 @@ Notes:
 - Foundation implemented: session realized P/L, closed-trade count, and
   bot-level realized performance are calculated from lifecycle fill records and
   shown in the dashboard.
+- Foundation implemented: cycle logs now persist the same lifecycle-derived
+  performance snapshot for post-session metric analysis and tuning.
 - Remaining P/L work should add realized P/L per closed trade, richer history,
   and exportable journal records.
 - UI should separate account-level daily P/L from strategy/session P/L.
@@ -255,7 +259,7 @@ Metrics should be built from the lifecycle ledger, not from loose log scraping.
 - Regime participation breakdown
 - Bot-level performance by MomentumBot, ChopBot, and InverseBot
   - Foundation implemented for realized P/L, trade count, wins/losses, win
-    rate, and last trade result.
+    rate, last trade result, and daily cycle-log snapshots.
 
 ### System Health Telemetry
 
