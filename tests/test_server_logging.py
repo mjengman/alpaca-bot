@@ -4,6 +4,7 @@ import json
 import threading
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -30,12 +31,15 @@ def config() -> BotConfig:
         api_secret_key="secret",
         symbol="SOXL",
         position_notional=Decimal("25"),
+        position_sizing_mode="FIXED",
+        position_allocation_percent=Decimal("25"),
         trail_percent=Decimal("1.5"),
         fast_sma_minutes=5,
         slow_sma_minutes=20,
         poll_seconds=60,
         close_liquidate_minutes=5,
         regime_gap_threshold=Decimal("0.20"),
+        regime_exit_gap_threshold=Decimal("0.10"),
         chop_entry_discount_percent=Decimal("0.50"),
         directional_mode="BALANCED",
         directional_max_extension_percent=Decimal("0.50"),
@@ -127,9 +131,10 @@ class ServerLoggingTest(unittest.TestCase):
             "[REGIME] REGIME CHANGE: SIDEWAYS -> DOWNTREND gap=0.28%",
         )
 
-    def test_runner_switches_off_when_market_is_closed(self) -> None:
+    def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)
         stop_event = threading.Event()
+        runner._config = config()
         runner._lock = threading.Lock()
         runner._stop_event = stop_event
         runner._running = True
@@ -140,21 +145,23 @@ class ServerLoggingTest(unittest.TestCase):
         runner._last_output = ["previous"]
         runner._activity_log = []
         runner._save_activity_log = lambda: None
+        fast_config = replace(config(), poll_seconds=0)
 
-        runner._stop_after_market_close(
+        runner._arm_until_market_open(
+            fast_config,
             stop_event,
             datetime(2026, 5, 22, 13, 30, 0, tzinfo=timezone.utc),
         )
 
-        self.assertTrue(stop_event.is_set())
-        self.assertFalse(runner._running)
-        self.assertIsNone(runner._next_run_at)
-        self.assertIsNone(runner._next_run_reason)
-        self.assertIsNone(runner._market_idle_logged_for)
-        self.assertIsNotNone(runner._last_stopped_at)
+        self.assertFalse(stop_event.is_set())
+        self.assertTrue(runner._running)
+        self.assertEqual(runner._next_run_at, "2026-05-22T13:30:00+00:00")
+        self.assertEqual(runner._next_run_reason, "market_open")
+        self.assertEqual(runner._market_idle_logged_for, runner._next_run_at)
+        self.assertIsNone(runner._last_stopped_at)
         self.assertEqual(
             runner._last_output[0],
-            "Market closed. EdgeWalker switched off; "
+            "Market closed. EdgeWalker armed; "
             "next market open at 2026-05-22T13:30:00+00:00.",
         )
         self.assertEqual(
@@ -189,6 +196,27 @@ class ServerLoggingTest(unittest.TestCase):
         )
         self.assertEqual(parsed.directional_min_strength, "STRONG")
         self.assertEqual(parsed.directional_cooldown_minutes, 3)
+
+    def test_config_payload_accepts_dynamic_sizing_and_hysteresis(self) -> None:
+        payload = {
+            "positionSizingMode": "dynamic",
+            "positionAllocationPercent": "95",
+            "regimeExitGapThreshold": "0.10",
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.position_sizing_mode, "DYNAMIC")
+        self.assertEqual(parsed.position_allocation_percent, Decimal("95"))
+        self.assertEqual(parsed.regime_exit_gap_threshold, Decimal("0.10"))
 
     def test_config_payload_keeps_legacy_momentum_aliases(self) -> None:
         payload = {

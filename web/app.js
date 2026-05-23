@@ -20,10 +20,12 @@ const els = {
   statusText: document.querySelector("#statusText"),
   symbol: document.querySelector("#symbolInput"),
   notional: document.querySelector("#notionalInput"),
+  positionSizing: document.querySelector("#positionSizingInput"),
   trail: document.querySelector("#trailInput"),
   poll: document.querySelector("#pollInput"),
   closeout: document.querySelector("#closeoutInput"),
   regimeGap: document.querySelector("#regimeGapInput"),
+  regimeExitGap: document.querySelector("#regimeExitGapInput"),
   chopDiscount: document.querySelector("#chopDiscountInput"),
   directionalModes: document.querySelectorAll('input[name="directionalMode"]'),
   directionalMaxExtension: document.querySelector("#directionalMaxExtensionInput"),
@@ -54,6 +56,7 @@ const els = {
   trailExit: document.querySelector("#trailExitValue"),
   error: document.querySelector("#errorText"),
   activityPanel: document.querySelector("#activityPanel"),
+  activityCopy: document.querySelector("#activityCopy"),
   activityExpand: document.querySelector("#activityExpand"),
   activityToggle: document.querySelector("#activityToggle"),
   log: document.querySelector("#logOutput"),
@@ -61,10 +64,12 @@ const els = {
 
 const settingInputs = [
   els.notional,
+  els.positionSizing,
   els.trail,
   els.poll,
   els.closeout,
   els.regimeGap,
+  els.regimeExitGap,
   els.chopDiscount,
   ...els.directionalModes,
   els.directionalMaxExtension,
@@ -85,13 +90,20 @@ document.body.appendChild(tooltipBubble);
 function payloadFromForm() {
   const selectedDirectionalMode =
     [...els.directionalModes].find((input) => input.checked)?.value || "BALANCED";
+  const sizingValue = els.positionSizing ? els.positionSizing.value : "FIXED";
+  const positionSizingMode = sizingValue === "FIXED" ? "FIXED" : "DYNAMIC";
+  const positionAllocationPercent =
+    sizingValue === "FIXED" ? "25" : sizingValue;
   return {
     symbol: els.symbol ? els.symbol.value.trim().toUpperCase() : "SOXL",
     positionNotional: els.notional.value,
+    positionSizingMode,
+    positionAllocationPercent,
     trailPercent: els.trail.value,
     pollSeconds: els.poll.value,
     closeLiquidateMinutes: els.closeout ? els.closeout.value : "5",
     regimeGapThreshold: els.regimeGap.value,
+    regimeExitGapThreshold: els.regimeExitGap.value,
     chopEntryDiscountPercent: els.chopDiscount.value,
     directionalMode: selectedDirectionalMode,
     directionalMaxExtensionPercent: els.directionalMaxExtension.value,
@@ -172,6 +184,37 @@ function formatNextCheck(data) {
   return formatTime(data.next_run_at, "Queued");
 }
 
+function sizingValueFromData(data) {
+  if (data.position_sizing_mode !== "DYNAMIC") {
+    return "FIXED";
+  }
+  const allocation = String(data.position_allocation_percent || "25");
+  const exact = ["25", "50", "75", "95"].find((value) => value === allocation);
+  if (exact) {
+    return exact;
+  }
+  const numeric = Number(allocation);
+  if (numeric >= 90) {
+    return "95";
+  }
+  if (numeric >= 75) {
+    return "75";
+  }
+  if (numeric >= 50) {
+    return "50";
+  }
+  return "25";
+}
+
+function syncSizingControls() {
+  if (!els.positionSizing || !els.notional) {
+    return;
+  }
+  const dynamicSizing = els.positionSizing.value !== "FIXED";
+  els.notional.disabled = state.running || state.busy || dynamicSizing;
+  els.notional.closest(".field")?.classList.toggle("is-disabled", dynamicSizing);
+}
+
 function hydrateForm(data) {
   if (
     state.hydrated ||
@@ -183,12 +226,16 @@ function hydrateForm(data) {
     els.symbol.value = data.symbol || "SOXL";
   }
   els.notional.value = data.position_notional || "25";
+  if (els.positionSizing) {
+    els.positionSizing.value = sizingValueFromData(data);
+  }
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
   if (els.closeout) {
     els.closeout.value = data.close_liquidate_minutes || "5";
   }
   els.regimeGap.value = data.regime_gap_threshold || "0.20";
+  els.regimeExitGap.value = data.regime_exit_gap_threshold || "0.10";
   els.chopDiscount.value = data.chop_entry_discount_percent || "0.50";
   const directionalMode = data.directional_mode || "BALANCED";
   els.directionalModes.forEach((input) => {
@@ -203,6 +250,7 @@ function hydrateForm(data) {
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
   els.dryRun.checked = Boolean(data.dry_run);
+  syncSizingControls();
   state.hydrated = true;
 }
 
@@ -376,9 +424,58 @@ function setLogExpanded(expanded) {
   saveLogExpanded(expanded);
 }
 
+async function copyActivityLog() {
+  if (!els.activityCopy) {
+    return;
+  }
+
+  const text = state.logText || els.log?.textContent || "";
+  const originalText = els.activityCopy.textContent;
+  const originalTooltip = els.activityCopy.dataset.tooltip;
+
+  if (!text.trim()) {
+    els.activityCopy.textContent = "Empty";
+    els.activityCopy.dataset.tooltip = "There is no activity log text to copy yet.";
+    window.setTimeout(() => {
+      els.activityCopy.textContent = originalText;
+      els.activityCopy.dataset.tooltip = originalTooltip;
+    }, 1400);
+    return;
+  }
+
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    els.activityCopy.textContent = "Copied";
+    els.activityCopy.dataset.tooltip = "Activity log copied.";
+  } catch {
+    els.activityCopy.textContent = "Failed";
+    els.activityCopy.dataset.tooltip = "Could not copy the activity log.";
+  } finally {
+    window.setTimeout(() => {
+      els.activityCopy.textContent = originalText;
+      els.activityCopy.dataset.tooltip = originalTooltip;
+    }, 1400);
+  }
+}
+
 function setupActivityLog() {
   setLogExpanded(loadLogExpanded());
   setLogCollapsed(loadLogCollapsed());
+  if (els.activityCopy) {
+    els.activityCopy.addEventListener("click", copyActivityLog);
+  }
   if (els.activityToggle) {
     els.activityToggle.addEventListener("click", () => {
       setLogCollapsed(!state.logCollapsed);
@@ -464,6 +561,8 @@ function formatLabel(value) {
     wait_for_data: "Waiting For Data",
     wait_stale_market_data: "Stale Market Data",
     wait_stream_market_data: "Waiting For Stream",
+    manage_open_position_stale_bars: "Live Risk On Stale Bars",
+    insufficient_buying_power: "Insufficient Buying Power",
     no_entry: "No Entry",
     noop: "No Action",
   };
@@ -683,18 +782,19 @@ function render(data) {
   els.statusPill.dataset.tooltip = waitingForOpen
     ? "The bot is armed and will resume when the regular market opens."
     : state.running
-    ? "The repeating bot loop is running. It will switch off after the regular market closes."
+    ? "The repeating bot loop is running. It arms itself outside regular market hours."
     : "The repeating bot loop is stopped.";
   els.toggle.textContent = state.running ? "Turn Off" : "Turn On";
   els.toggle.dataset.tooltip = state.running
     ? "Stop the repeating bot loop after the current cycle."
-    : "Start the repeating bot loop. It will switch itself off after the regular market closes.";
+    : "Start the repeating bot loop. If the market is closed, it will arm itself for the next open.";
   els.toggle.classList.toggle("is-stop", state.running);
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
   settingInputs.forEach((input) => {
     input.disabled = state.running || state.busy;
   });
+  syncSizingControls();
 
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
   renderMode(isDryRun);
@@ -786,6 +886,10 @@ if (els.symbol) {
   els.symbol.addEventListener("input", () => {
     els.symbol.value = els.symbol.value.toUpperCase();
   });
+}
+
+if (els.positionSizing) {
+  els.positionSizing.addEventListener("change", syncSizingControls);
 }
 
 els.dryRun.addEventListener("change", () => {

@@ -29,12 +29,15 @@ def config() -> BotConfig:
         api_secret_key="secret",
         symbol="SOXL",
         position_notional=Decimal("25"),
+        position_sizing_mode="FIXED",
+        position_allocation_percent=Decimal("25"),
         trail_percent=Decimal("1.5"),
         fast_sma_minutes=2,
         slow_sma_minutes=3,
         poll_seconds=60,
         close_liquidate_minutes=5,
         regime_gap_threshold=Decimal("0.20"),
+        regime_exit_gap_threshold=Decimal("0.10"),
         chop_entry_discount_percent=Decimal("0.50"),
         directional_mode="BALANCED",
         directional_max_extension_percent=Decimal("0.50"),
@@ -238,6 +241,24 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "wait_stale_market_data")
 
+    def test_stale_market_data_still_manages_open_position_with_live_marks(self) -> None:
+        stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        now_text = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)},
+            {"SOXL": {"symbol": "SOXL", "qty": "1", "avg_entry_price": "100"}},
+            latest_quotes={"SOXL": {"bp": "99", "ap": "99", "t": now_text}},
+        )
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("live risk management remains active", output)
+        self.assertIn("[RISK] SOXL: trailing stop holding", output)
+        self.assertNotIn("action_taken=wait_stale_market_data", output)
+        self.assertEqual(status.action_taken, "manage_open_position_stale_bars")
+
     def test_streaming_market_data_replaces_rest_bars_for_regime(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
         client = FakeClient({"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)})
@@ -414,6 +435,18 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "MomentumBot")
         self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
 
+    def test_regime_hysteresis_holds_prior_trend_above_exit_threshold(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "100", "100.7")})
+
+        output, status = self.run_bot(
+            client,
+            lambda state: state.set_regime_state("UPTREND", Decimal("0.30")),
+        )
+
+        self.assertIn("hysteresis hold", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+
     def test_balanced_directional_buys_valid_soxl_continuation_without_fresh_cross(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "102")})
 
@@ -492,6 +525,36 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_fixed_position_sizing_clamps_to_buying_power_buffer(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "99")})
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), position_notional=Decimal("100000")),
+        )
+
+        self.assertEqual(client.buys, [("SOXL", Decimal("950.00"))])
+        self.assertIn("mode=FIXED", output)
+        self.assertIn("effective=$950", output)
+        self.assertEqual(status.effective_position_notional, "950")
+
+    def test_dynamic_full_deployment_uses_allocation_percent(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "99")})
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                position_sizing_mode="DYNAMIC",
+                position_allocation_percent=Decimal("95"),
+            ),
+        )
+
+        self.assertEqual(client.buys, [("SOXL", Decimal("950.00"))])
+        self.assertIn("mode=DYNAMIC allocation=95%", output)
+        self.assertIn("effective=$950", output)
+        self.assertEqual(status.effective_position_notional, "950")
 
     def test_chop_exit_sells_when_price_reclaims_slow_sma(self) -> None:
         client = FakeClient(

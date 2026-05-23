@@ -52,6 +52,14 @@ REGIME_STRENGTH_ORDER = {
 MOMENTUM_BOT = "MomentumBot"
 CHOP_BOT = "ChopBot"
 INVERSE_BOT = "InverseBot"
+POSITION_SIZING_FIXED = "FIXED"
+POSITION_SIZING_DYNAMIC = "DYNAMIC"
+POSITION_SIZING_MODES = {
+    POSITION_SIZING_FIXED,
+    POSITION_SIZING_DYNAMIC,
+}
+BUYING_POWER_ORDER_BUFFER_PERCENT = Decimal("5")
+MONEY_STEP = Decimal("0.01")
 
 
 class BotError(Exception):
@@ -114,12 +122,15 @@ class BotConfig:
     api_secret_key: str
     symbol: str
     position_notional: Decimal
+    position_sizing_mode: str
+    position_allocation_percent: Decimal
     trail_percent: Decimal
     fast_sma_minutes: int
     slow_sma_minutes: int
     poll_seconds: int
     close_liquidate_minutes: int
     regime_gap_threshold: Decimal
+    regime_exit_gap_threshold: Decimal
     chop_entry_discount_percent: Decimal
     directional_mode: str
     directional_max_extension_percent: Decimal
@@ -151,6 +162,17 @@ class BotConfig:
         if position_notional <= 0:
             raise BotError("POSITION_NOTIONAL must be greater than 0")
 
+        position_sizing_mode = os.environ.get(
+            "POSITION_SIZING_MODE",
+            POSITION_SIZING_FIXED,
+        ).strip().upper()
+        if position_sizing_mode not in POSITION_SIZING_MODES:
+            raise BotError("POSITION_SIZING_MODE must be FIXED or DYNAMIC")
+
+        position_allocation_percent = env_decimal("POSITION_ALLOCATION_PERCENT", "25")
+        if position_allocation_percent <= 0 or position_allocation_percent > 100:
+            raise BotError("POSITION_ALLOCATION_PERCENT must be between 0 and 100")
+
         poll_seconds = env_int("POLL_SECONDS", 60)
         if poll_seconds < 5:
             raise BotError("POLL_SECONDS must be at least 5")
@@ -162,6 +184,10 @@ class BotConfig:
         regime_gap_threshold = env_decimal("REGIME_GAP_THRESHOLD", "0.20")
         if regime_gap_threshold < 0:
             raise BotError("REGIME_GAP_THRESHOLD must be at least 0")
+
+        regime_exit_gap_threshold = env_decimal("REGIME_EXIT_GAP_THRESHOLD", "0.10")
+        if regime_exit_gap_threshold < 0:
+            raise BotError("REGIME_EXIT_GAP_THRESHOLD must be at least 0")
 
         chop_entry_discount_percent = env_decimal("CHOP_ENTRY_DISCOUNT_PERCENT", "0.50")
         if chop_entry_discount_percent < 0:
@@ -217,12 +243,15 @@ class BotConfig:
             api_secret_key=api_secret_key,
             symbol=os.environ.get("SYMBOL", SOXL).strip().upper(),
             position_notional=position_notional,
+            position_sizing_mode=position_sizing_mode,
+            position_allocation_percent=position_allocation_percent,
             trail_percent=trail_percent,
             fast_sma_minutes=fast_sma,
             slow_sma_minutes=slow_sma,
             poll_seconds=poll_seconds,
             close_liquidate_minutes=close_liquidate_minutes,
             regime_gap_threshold=regime_gap_threshold,
+            regime_exit_gap_threshold=regime_exit_gap_threshold,
             chop_entry_discount_percent=chop_entry_discount_percent,
             directional_mode=directional_mode,
             directional_max_extension_percent=directional_max_extension_percent,
@@ -600,6 +629,13 @@ class MarketDataFreshness:
             or self.bar_age_seconds > MARKET_DATA_MAX_AGE_SECONDS
         )
 
+    @property
+    def has_live_trade_or_quote(self) -> bool:
+        return any(
+            age is not None and age <= MARKET_DATA_MAX_AGE_SECONDS
+            for age in (self.trade_age_seconds, self.quote_age_seconds)
+        )
+
 
 @dataclass(frozen=True)
 class RegimeSignal:
@@ -633,6 +669,9 @@ class EdgeWalkerStatus:
     buying_power: str | None
     portfolio_value: str | None
     cash: str | None
+    position_sizing_mode: str
+    position_allocation_percent: str
+    effective_position_notional: str | None
     day_pl: str | None
     day_pl_percent: str | None
     source_symbol: str
@@ -760,9 +799,23 @@ class BotStateStore:
         bot_entries[symbol] = timestamp.astimezone(timezone.utc).isoformat()
         self._write(data)
 
+    def get_regime_state(self) -> dict[str, Any]:
+        data = self._read()
+        regime_state = data.get("regime", {})
+        return regime_state if isinstance(regime_state, dict) else {}
+
+    def set_regime_state(self, regime: str, gap_percent: Decimal) -> None:
+        data = self._read()
+        data["regime"] = {
+            "regime": regime,
+            "gap_percent": format_decimal(gap_percent),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._write(data)
+
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"trailing": {}, "entries": {}}
+            return {"trailing": {}, "entries": {}, "regime": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -771,6 +824,7 @@ class BotStateStore:
             raise BotError(f"Invalid bot state file {self.path}")
         data.setdefault("trailing", {})
         data.setdefault("entries", {})
+        data.setdefault("regime", {})
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -887,6 +941,7 @@ class TrailingStopBot:
         symbol: str,
         position: dict[str, Any],
         symbol_orders: list[dict[str, Any]],
+        require_live_mark: bool = False,
     ) -> None:
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(f"{symbol}: sell order already open; waiting for it to resolve.")
@@ -897,7 +952,7 @@ class TrailingStopBot:
             print(f"{symbol}: non-long position qty={qty}; no trailing stop submitted.")
             return
 
-        current_price = self._latest_price(symbol)
+        current_price = self._latest_price(symbol, require_live_mark=require_live_mark)
         if current_price is None:
             print(f"{symbol}: no recent price available; trailing stop not evaluated.")
             return
@@ -929,10 +984,18 @@ class TrailingStopBot:
         else:
             print(f"[RISK] {symbol}: trailing stop holding.")
 
-    def _latest_price(self, symbol: str) -> Decimal | None:
-        current_mark = self._latest_market_mark(symbol)
+    def _latest_price(
+        self,
+        symbol: str,
+        require_live_mark: bool = False,
+    ) -> Decimal | None:
+        max_age_seconds = MARKET_DATA_MAX_AGE_SECONDS if require_live_mark else None
+        current_mark = self._latest_market_mark(symbol, max_age_seconds=max_age_seconds)
         if current_mark is not None:
             return current_mark
+
+        if require_live_mark:
+            return None
 
         bars = self._recent_bars(symbol, 1)
         prices = latest_close_prices(bars)
@@ -982,22 +1045,36 @@ class TrailingStopBot:
             return self.market_data.get_recent_bars(symbol, minutes)
         return self.client.get_recent_bars(symbol, minutes)
 
-    def _latest_market_mark(self, symbol: str) -> Decimal | None:
-        if self.market_data is None:
-            return None
+    def _latest_market_mark(
+        self,
+        symbol: str,
+        max_age_seconds: int | None = None,
+    ) -> Decimal | None:
+        data_source = self.market_data or self.client
 
-        quote = self.market_data.get_latest_quote(symbol)
-        if quote:
+        quote = data_source.get_latest_quote(symbol)
+        if quote and self._market_timestamp_is_recent(quote.get("t"), max_age_seconds):
             bid = optional_decimal_from_api(quote.get("bp"), "latest quote bid")
             ask = optional_decimal_from_api(quote.get("ap"), "latest quote ask")
             if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
                 return (bid + ask) / Decimal("2")
 
-        trade = self.market_data.get_latest_trade(symbol)
-        if trade:
+        trade = data_source.get_latest_trade(symbol)
+        if trade and self._market_timestamp_is_recent(trade.get("t"), max_age_seconds):
             return optional_decimal_from_api(trade.get("p"), "latest trade price")
 
         return None
+
+    def _market_timestamp_is_recent(
+        self,
+        value: Any,
+        max_age_seconds: int | None,
+    ) -> bool:
+        if max_age_seconds is None:
+            return True
+        timestamp = parse_market_timestamp(value)
+        current_age = age_seconds(timestamp)
+        return current_age is not None and current_age <= max_age_seconds
 
     def _maybe_enter(self, symbol: str) -> None:
         asset = self.client.get_asset(symbol)
@@ -1162,6 +1239,7 @@ class EdgeWalkerBot:
                 regime_override=WARMUP,
             )
 
+        signal = self._apply_regime_hysteresis(signal)
         route = RegimeRouter().route(signal.regime)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
@@ -1169,6 +1247,7 @@ class EdgeWalkerBot:
             f"[REGIME] {SOXL} regime check: price={signal.price:.4f} "
             f"fast_sma={signal.fast_sma:.4f} slow_sma={signal.slow_sma:.4f} "
             f"gap={signal.gap_percent:.2f}% threshold={self.config.regime_gap_threshold}% "
+            f"exit_threshold={self._regime_exit_threshold()}% "
             f"strength={strength}"
         )
         print(
@@ -1214,6 +1293,45 @@ class EdgeWalkerBot:
                 "no_entry",
             )
 
+        market_data_blocks_entries = freshness.is_stale or self._market_data_blocks_trading(
+            SOXL
+        )
+        if market_data_blocks_entries:
+            active_symbol, active_position = self._active_position(positions)
+            if active_symbol and active_position:
+                symbol_orders = [
+                    order for order in orders if order.get("symbol") == active_symbol
+                ]
+                print(
+                    "[DATA] bar data is not fresh enough for entries; "
+                    "regime exits paused, live risk management remains active."
+                )
+                risk_bot = TrailingStopBot(
+                    config_for_symbol(self.config, active_symbol),
+                    self.client,
+                    self.state_store,
+                    self.market_data,
+                )
+                risk_bot._manage_trailing_stop(
+                    active_symbol,
+                    active_position,
+                    symbol_orders,
+                    require_live_mark=True,
+                )
+                print("entry_signal=False action_taken=manage_open_position_stale_bars")
+                return self._build_status(
+                    checked_at,
+                    market_open,
+                    next_open,
+                    next_close,
+                    account,
+                    signal,
+                    route,
+                    positions,
+                    False,
+                    "manage_open_position_stale_bars",
+                )
+
         if freshness.is_stale:
             print(
                 "[DATA] stale market data; "
@@ -1251,6 +1369,8 @@ class EdgeWalkerBot:
                 False,
                 "wait_stream_market_data",
             )
+
+        self.state_store.set_regime_state(signal.regime, signal.gap_percent)
 
         stale_symbol = self._stale_symbol(route, positions)
         if stale_symbol:
@@ -1409,11 +1529,48 @@ class EdgeWalkerBot:
             f"symbol={route.routed_symbol} reason={entry_decision.reason} "
             f"mode={self._directional_mode_for_route(route)}"
         )
+        effective_notional, requested_notional, buying_power = (
+            self._effective_position_notional(account)
+        )
+        if effective_notional is None or effective_notional <= 0:
+            print(
+                "[ENTRY] BLOCKED reason=insufficient_buying_power "
+                f"buying_power={format_decimal(buying_power) if buying_power is not None else 'unknown'}"
+            )
+            print("entry_signal=False action_taken=insufficient_buying_power")
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                "insufficient_buying_power",
+            )
+
+        allocation_text = (
+            f" allocation={format_decimal(self.config.position_allocation_percent)}%"
+            if self.config.position_sizing_mode == POSITION_SIZING_DYNAMIC
+            else ""
+        )
+        requested_text = (
+            format_decimal(requested_notional) if requested_notional is not None else "unknown"
+        )
+        buying_power_text = format_decimal(buying_power) if buying_power is not None else "unknown"
         print(
-            f"[TRADE] {route.active_bot}: submitting ${self.config.position_notional} "
+            "[RISK] position sizing: "
+            f"mode={self.config.position_sizing_mode}{allocation_text} "
+            f"buying_power={buying_power_text} requested=${requested_text} "
+            f"effective=${format_decimal(effective_notional)}"
+        )
+        print(
+            f"[TRADE] {route.active_bot}: submitting ${format_decimal(effective_notional)} "
             f"market buy for {route.routed_symbol}."
         )
-        self.client.submit_market_buy(route.routed_symbol, self.config.position_notional)
+        self.client.submit_market_buy(route.routed_symbol, effective_notional)
         if not self.config.dry_run:
             self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
             self.state_store.set_last_entry_at(route.active_bot, route.routed_symbol)
@@ -1461,6 +1618,7 @@ class EdgeWalkerBot:
         day_pl, day_pl_percent = self._account_day_pl(account)
         data_status = self._market_data_status(SOXL)
         freshness = self._latest_freshness
+        effective_notional, _, _ = self._effective_position_notional(account)
 
         return EdgeWalkerStatus(
             checked_at=checked_at,
@@ -1470,6 +1628,11 @@ class EdgeWalkerBot:
             buying_power=self._raw_text(account.get("buying_power")),
             portfolio_value=self._raw_text(account.get("portfolio_value") or account.get("equity")),
             cash=self._raw_text(account.get("cash")),
+            position_sizing_mode=self.config.position_sizing_mode,
+            position_allocation_percent=format_decimal(
+                self.config.position_allocation_percent
+            ),
+            effective_position_notional=self._decimal_text(effective_notional),
             day_pl=self._decimal_text(day_pl),
             day_pl_percent=self._decimal_text(day_pl_percent),
             source_symbol=SOXL,
@@ -1550,6 +1713,77 @@ class EdgeWalkerBot:
             if self._position_qty(position) > 0:
                 return str(position.get("symbol") or symbol), position
         return None, None
+
+    def _effective_position_notional(
+        self,
+        account: dict[str, Any],
+    ) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+        buying_power = optional_decimal_from_api(
+            account.get("buying_power"),
+            "buying power",
+        )
+        if self.config.position_sizing_mode == POSITION_SIZING_DYNAMIC:
+            if buying_power is None:
+                return None, None, buying_power
+            requested = buying_power * (
+                self.config.position_allocation_percent / Decimal("100")
+            )
+        else:
+            requested = self.config.position_notional
+
+        effective = requested
+        if buying_power is not None:
+            max_notional = buying_power * (
+                (Decimal("100") - BUYING_POWER_ORDER_BUFFER_PERCENT) / Decimal("100")
+            )
+            effective = min(requested, max_notional)
+
+        return (
+            effective.quantize(MONEY_STEP, rounding=ROUND_DOWN),
+            requested.quantize(MONEY_STEP, rounding=ROUND_DOWN),
+            buying_power,
+        )
+
+    def _apply_regime_hysteresis(self, signal: RegimeSignal) -> RegimeSignal:
+        raw_regime = signal.regime
+        previous_regime = str(
+            self.state_store.get_regime_state().get("regime") or ""
+        ).upper()
+        directional_regime = self._directional_regime_for_signal(signal)
+        exit_threshold = self._regime_exit_threshold()
+
+        if (
+            raw_regime == SIDEWAYS
+            and previous_regime in {UPTREND, DOWNTREND}
+            and directional_regime == previous_regime
+            and signal.gap_percent >= exit_threshold
+        ):
+            print(
+                "[REGIME] hysteresis hold: "
+                f"raw={raw_regime} previous={previous_regime} "
+                f"gap={signal.gap_percent:.2f}% "
+                f"exit_threshold={exit_threshold}%"
+            )
+            return RegimeSignal(
+                source_symbol=signal.source_symbol,
+                price=signal.price,
+                fast_sma=signal.fast_sma,
+                slow_sma=signal.slow_sma,
+                gap_percent=signal.gap_percent,
+                regime=previous_regime,
+            )
+
+        return signal
+
+    def _directional_regime_for_signal(self, signal: RegimeSignal) -> str:
+        if signal.fast_sma > signal.slow_sma:
+            return UPTREND
+        if signal.fast_sma < signal.slow_sma:
+            return DOWNTREND
+        return SIDEWAYS
+
+    def _regime_exit_threshold(self) -> Decimal:
+        return min(self.config.regime_exit_gap_threshold, self.config.regime_gap_threshold)
 
     def _account_day_pl(self, account: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
         equity = optional_decimal_from_api(
