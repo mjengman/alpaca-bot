@@ -65,6 +65,17 @@ foundation for future work.
 - Stale-bar entry protection
 - Open-position live risk management during stale-bar conditions
 - Structured decision logs and daily JSONL records
+- Position lifecycle JSONL foundation for entry/exit intent, order
+  submission/rejection, broker acceptance/fill reconciliation,
+  position opened/closed transitions, and trailing-risk management events
+- Broker constraint classifier and dashboard state for rejected orders
+- Lifecycle-derived session realized P/L summary and closed-trade count in the
+  dashboard
+- Bot-level realized P/L, trade count, wins/losses, and last trade result in
+  the dashboard
+- Daily cycle JSONL performance snapshots with session P/L, bot-level
+  performance, pending-order counts, and order-flow state
+- Pending-order and recent order/fill lifecycle visibility in the dashboard
 
 ## Priority 0: Operational Truth
 
@@ -85,8 +96,13 @@ Goal: make realized and unrealized performance painfully obvious.
 
 Notes:
 
-- Realized P/L should come from fills/trade lifecycle records, not inferred only
-  from account-level equity changes.
+- Foundation implemented: session realized P/L, closed-trade count, and
+  bot-level realized performance are calculated from lifecycle fill records and
+  shown in the dashboard.
+- Foundation implemented: cycle logs now persist the same lifecycle-derived
+  performance snapshot for post-session metric analysis and tuning.
+- Remaining P/L work should add realized P/L per closed trade, richer history,
+  and exportable journal records.
 - UI should separate account-level daily P/L from strategy/session P/L.
 
 ### Broker Constraint State
@@ -110,6 +126,14 @@ Goal: broker failures should be first-class operational state, not just log text
 - Failed exits should become high-priority state.
 - Repeated rejected entries should cool down until account or broker state changes.
 
+Notes:
+
+- Foundation implemented: rejected orders are classified into broker constraint
+  state and exposed in the API/dashboard.
+- Remaining broker-state work should persist restrictions across restarts,
+  classify pending orders directly from open-order state, and add rejection
+  cooldown behavior.
+
 ### Position Lifecycle Ledger
 
 Goal: define one canonical lifecycle model that every metric and UI surface can
@@ -129,8 +153,16 @@ trust.
 
 Notes:
 
+- Foundation implemented: intent events, submitted/rejected order events,
+  position-managed trailing-risk events, broker acceptance/fill reconciliation,
+  and position opened/closed transitions are written to
+  `logs/position_lifecycle.jsonl`.
 - This is a prerequisite for trustworthy P/L, metrics, trade journal export,
   scale-in mode, replay, and arena work.
+- Remaining lifecycle work should persist realized-result records per closed
+  trade instead of deriving them only as a dashboard read model.
+- Foundation implemented: pending orders and recent same-session order/fill
+  lifecycle events are exposed as dashboard order flow.
 
 ### Effective Notional Visibility
 
@@ -226,6 +258,8 @@ Metrics should be built from the lifecycle ledger, not from loose log scraping.
 - Worst trade
 - Regime participation breakdown
 - Bot-level performance by MomentumBot, ChopBot, and InverseBot
+  - Foundation implemented for realized P/L, trade count, wins/losses, win
+    rate, last trade result, and daily cycle-log snapshots.
 
 ### System Health Telemetry
 
@@ -310,8 +344,8 @@ Notes:
 
 ## Suggested Next Sprint
 
-1. Build the position lifecycle ledger.
-2. Add realized and unrealized P/L cards to the UI.
-3. Add broker constraint state and rejection classification.
-4. Expose effective notional and buying-power clamp in the UI.
+1. Add realized trade detail/history from lifecycle fill records.
+2. Persist realized-result lifecycle records per closed trade.
+3. Add rejection cooldown behavior for repeated broker failures.
+4. Add average hold duration and best/worst trade metrics.
 5. Improve log styling around trade open, trade close, P/L, and rejection events.

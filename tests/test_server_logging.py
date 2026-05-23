@@ -10,16 +10,34 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from bot import BotConfig
+from bot import (
+    BotConfig,
+    CHOP_BOT,
+    INVERSE_BOT,
+    LIFECYCLE_FULL_FILL,
+    LIFECYCLE_ORDER_ACCEPTED,
+    LIFECYCLE_ORDER_SUBMITTED,
+    LIFECYCLE_PARTIAL_FILL,
+    MOMENTUM_BOT,
+    broker_constraint_ok,
+    broker_constraint_payload,
+)
 from server import (
     BotRunner,
     NY_TZ,
     _append_daily_jsonl,
+    _build_summary_prompt,
     _current_ny_activity,
     _cycle_log_record,
     _daily_log_path,
+    _extract_session_context,
     _format_regime_transition,
+    _is_allowed_ui_origin,
+    _most_recent_log_date,
+    build_summary_prompt,
     config_from_payload,
+    lifecycle_performance_summary,
+    order_visibility_summary,
 )
 
 
@@ -63,6 +81,33 @@ class ServerLoggingTest(unittest.TestCase):
             "action_taken": "no_entry_signal",
         }
         transition = {"from": "SIDEWAYS", "to": "UPTREND", "gap_percent": "0.28"}
+        performance = {
+            "source": "position_lifecycle",
+            "session_date": "2026-05-21",
+            "session_realized_pl": "5",
+            "session_trade_count": 1,
+            "bot_performance": [
+                {
+                    "bot": MOMENTUM_BOT,
+                    "realized_pl": "5",
+                    "trade_count": 1,
+                    "wins": 1,
+                    "losses": 0,
+                    "win_rate_percent": "100",
+                    "last_trade_realized_pl": "5",
+                    "last_trade_symbol": "SOXL",
+                    "last_trade_closed_at": "2026-05-22T01:00:00+00:00",
+                }
+            ],
+        }
+        order_state = {
+            "source": "position_lifecycle",
+            "session_date": "2026-05-21",
+            "pending_count": 1,
+            "pending_orders": [{"order_id": "order-1"}],
+            "recent_events": [],
+            "latest_fill": None,
+        }
 
         record = _cycle_log_record(
             config=config(),
@@ -71,7 +116,10 @@ class ServerLoggingTest(unittest.TestCase):
             console_lines=["SOXL regime check", "entry_signal=False"],
             error=None,
             edgewalker_status=status,
+            broker_state=broker_constraint_payload(broker_constraint_ok()),
             regime_transition=transition,
+            performance=performance,
+            order_state=order_state,
         )
 
         self.assertEqual(record["timestamp"], "2026-05-22T01:05:00Z")
@@ -80,8 +128,15 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(record["regime"], "UPTREND")
         self.assertEqual(record["price"], "170.42")
         self.assertEqual(record["account_value"], "50.09")
+        self.assertEqual(record["broker_state"]["state"], "OK")
         self.assertEqual(record["console_lines"], ["SOXL regime check", "entry_signal=False"])
         self.assertEqual(record["regime_transition"], transition)
+        self.assertEqual(record["performance"], performance)
+        self.assertEqual(record["bot_performance"], performance["bot_performance"])
+        self.assertEqual(record["session_realized_pl"], "5")
+        self.assertEqual(record["session_trade_count"], 1)
+        self.assertEqual(record["order_state"], order_state)
+        self.assertEqual(record["pending_order_count"], 1)
         self.assertNotIn("api_secret_key", record["config"])
         self.assertNotIn("api_key_id", record["config"])
 
@@ -130,6 +185,317 @@ class ServerLoggingTest(unittest.TestCase):
             _format_regime_transition(transition),
             "[REGIME] REGIME CHANGE: SIDEWAYS -> DOWNTREND gap=0.28%",
         )
+
+    def test_lifecycle_performance_summary_calculates_realized_pl(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "MomentumBot",
+                "order_id": "buy-1",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": "MomentumBot",
+                "order_id": "sell-1",
+                "reason": "trailing_stop_breached",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "103",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+
+        self.assertEqual(summary["session_date"], "2026-05-22")
+        self.assertEqual(summary["session_realized_pl"], "6")
+        self.assertEqual(summary["session_trade_count"], 1)
+        self.assertEqual(summary["session_wins"], 1)
+        self.assertEqual(summary["session_losses"], 0)
+        self.assertEqual(summary["last_trade_realized_pl"], "6")
+        self.assertEqual(summary["last_trade"]["realized_pl_percent"], "3")
+        self.assertEqual(summary["open_lot_qty"], "0")
+        self.assertEqual(summary["unmatched_exit_qty"], "0")
+
+    def test_lifecycle_performance_summary_handles_empty_session(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+
+        summary = lifecycle_performance_summary([], now)
+
+        self.assertEqual(summary["session_realized_pl"], "0")
+        self.assertEqual(summary["session_trade_count"], 0)
+        self.assertEqual(summary["last_trade"], None)
+        self.assertEqual(summary["open_lot_qty"], "0")
+
+    def test_lifecycle_performance_summary_handles_partial_open_lot(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_PARTIAL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "ChopBot",
+                "order_id": "buy-1",
+                "fill_delta_qty": "3",
+                "filled_avg_price": "10",
+            },
+            {
+                "event_type": LIFECYCLE_PARTIAL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": "ChopBot",
+                "order_id": "sell-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "9",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+
+        self.assertEqual(summary["session_realized_pl"], "-1")
+        self.assertEqual(summary["session_trade_count"], 1)
+        self.assertEqual(summary["session_wins"], 0)
+        self.assertEqual(summary["session_losses"], 1)
+        self.assertEqual(summary["open_lot_qty"], "2")
+        self.assertEqual(summary["open_lot_cost_basis"], "20")
+
+    def test_lifecycle_performance_summary_groups_realized_pl_by_bot(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": MOMENTUM_BOT,
+                "order_id": "buy-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:40:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": MOMENTUM_BOT,
+                "order_id": "sell-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "105",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:00:00+00:00",
+                "symbol": "SOXS",
+                "side": "buy",
+                "bot": INVERSE_BOT,
+                "order_id": "buy-2",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "10",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXS",
+                "side": "sell",
+                "bot": INVERSE_BOT,
+                "order_id": "sell-2",
+                "fill_delta_qty": "2",
+                "filled_avg_price": "9",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+        by_bot = {item["bot"]: item for item in summary["bot_performance"]}
+
+        self.assertEqual(by_bot[MOMENTUM_BOT]["realized_pl"], "5")
+        self.assertEqual(by_bot[MOMENTUM_BOT]["trade_count"], 1)
+        self.assertEqual(by_bot[MOMENTUM_BOT]["wins"], 1)
+        self.assertEqual(by_bot[MOMENTUM_BOT]["win_rate_percent"], "100")
+        self.assertEqual(by_bot[INVERSE_BOT]["realized_pl"], "-2")
+        self.assertEqual(by_bot[INVERSE_BOT]["losses"], 1)
+        self.assertEqual(by_bot[CHOP_BOT]["realized_pl"], "0")
+        self.assertEqual(by_bot[CHOP_BOT]["trade_count"], 0)
+
+    def test_order_visibility_summary_lists_pending_and_recent_events(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        pending_orders = {
+            "buy-1": {
+                "bot": "ChopBot",
+                "reason": "discount_confirmed",
+                "symbol": "SOXL",
+                "side": "buy",
+                "last_status": "partially_filled",
+                "last_filled_qty": "0.25",
+                "submitted_at": "2026-05-22T14:30:00+00:00",
+                "updated_at": "2026-05-22T14:31:00+00:00",
+            }
+        }
+        records = [
+            {
+                "event_type": LIFECYCLE_ORDER_ACCEPTED,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "ChopBot",
+                "order_id": "buy-1",
+                "status": "new",
+                "reason": "discount_confirmed",
+            },
+            {
+                "event_type": LIFECYCLE_PARTIAL_FILL,
+                "created_at": "2026-05-22T14:31:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": "ChopBot",
+                "order_id": "buy-1",
+                "status": "partially_filled",
+                "fill_delta_qty": "0.25",
+                "filled_qty": "0.25",
+                "filled_avg_price": "99.5",
+                "reason": "discount_confirmed",
+            },
+        ]
+
+        summary = order_visibility_summary(records, pending_orders, now)
+
+        self.assertEqual(summary["pending_count"], 1)
+        self.assertEqual(summary["pending_orders"][0]["order_id"], "buy-1")
+        self.assertEqual(summary["pending_orders"][0]["status"], "partially_filled")
+        self.assertEqual(summary["pending_orders"][0]["filled_qty"], "0.25")
+        self.assertEqual(summary["recent_events"][0]["event_type"], LIFECYCLE_PARTIAL_FILL)
+        self.assertEqual(summary["latest_fill"]["filled_avg_price"], "99.5")
+
+    def test_summary_default_prefers_recent_market_open_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_root = Path(tmpdir) / "logs"
+            logs_root.mkdir()
+            (logs_root / "edgewalker-2026-05-22.jsonl").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-22T14:30:00Z",
+                        "market_open": True,
+                        "regime": "UPTREND",
+                        "source_price": "101",
+                        "config": {"dry_run": False},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (logs_root / "edgewalker-2026-05-23.jsonl").write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-05-23T14:30:00Z",
+                        "market_open": False,
+                        "regime": "WARMUP",
+                        "config": {"dry_run": False},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _most_recent_log_date(logs_root=logs_root),
+                "2026-05-23",
+            )
+            self.assertEqual(
+                _most_recent_log_date(logs_root=logs_root, market_open_only=True),
+                "2026-05-22",
+            )
+            with patch("server.LOGS_ROOT", logs_root):
+                prompt = build_summary_prompt()
+
+        self.assertEqual(prompt["date"], "2026-05-22")
+        self.assertIn("MARKET: OPEN", prompt["prompt"])
+
+    def test_session_context_uses_lifecycle_order_actions(self) -> None:
+        records = [
+            {
+                "timestamp": "2026-05-22T14:30:00Z",
+                "market_open": True,
+                "regime": "UPTREND",
+                "action_taken": "no_entry_signal",
+                "source_price": "100",
+                "config": {"dry_run": False},
+            }
+        ]
+        lifecycle_records = [
+            {
+                "event_type": LIFECYCLE_ORDER_SUBMITTED,
+                "created_at": "2026-05-22T14:35:00+00:00",
+                "bot": MOMENTUM_BOT,
+                "symbol": "SOXL",
+                "side": "buy",
+                "notional": "100",
+                "reason": "trend_continuation_allowed",
+            },
+            {
+                "event_type": LIFECYCLE_ORDER_SUBMITTED,
+                "created_at": "2026-05-22T15:10:00+00:00",
+                "bot": MOMENTUM_BOT,
+                "symbol": "SOXL",
+                "side": "sell",
+                "qty": "1",
+                "reason": "trailing_stop_breached",
+            },
+        ]
+
+        context = _extract_session_context(records, "2026-05-22", lifecycle_records)
+        prompt = _build_summary_prompt(context)
+
+        self.assertEqual([trade["action"] for trade in context["trades"]], ["BUY", "SELL"])
+        self.assertIn("TRADE ACTIONS — 1 entries, 1 exits:", prompt)
+        self.assertIn("reason=trailing_stop_breached", prompt)
+
+    def test_session_context_falls_back_to_cycle_exit_actions(self) -> None:
+        records = [
+            {
+                "timestamp": "2026-05-22T14:30:00Z",
+                "market_open": True,
+                "regime": "UPTREND",
+                "action_taken": "market_buy",
+                "active_bot": MOMENTUM_BOT,
+                "routed_symbol": "SOXL",
+                "source_price": "100",
+                "effective_position_notional": "100",
+                "config": {"dry_run": False},
+            },
+            {
+                "timestamp": "2026-05-22T15:10:00Z",
+                "market_open": True,
+                "regime": "SIDEWAYS",
+                "action_taken": "close_stale_position_no_same_cycle_reversal",
+                "position_owner": MOMENTUM_BOT,
+                "position_symbol": "SOXL",
+                "position_qty": "1",
+                "position_current_price": "99",
+                "config": {"dry_run": False},
+                "console_lines": [
+                    "[RISK] SOXL: stale exposure under regime=SIDEWAYS; "
+                    "owner=MomentumBot active_bot=ChopBot; selling qty=1.",
+                ],
+            },
+        ]
+
+        context = _extract_session_context(records, "2026-05-22", [])
+
+        self.assertEqual([trade["action"] for trade in context["trades"]], ["BUY", "SELL"])
+        self.assertEqual(context["trades"][1]["bot"], MOMENTUM_BOT)
+
+    def test_ai_origin_guard_allows_only_local_ui_origins(self) -> None:
+        self.assertTrue(_is_allowed_ui_origin("http://127.0.0.1:8765"))
+        self.assertTrue(_is_allowed_ui_origin("http://localhost:8765"))
+        self.assertFalse(_is_allowed_ui_origin("https://example.com"))
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

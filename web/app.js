@@ -6,6 +6,15 @@ const state = {
   logExpanded: false,
   logText: "",
   busy: false,
+  fixedNotionalValue: "25",
+  latestBuyingPower: null,
+  lastSizingValue: "FIXED",
+  activeTab: "activity",
+  narrativeTimeframe: "1D",
+  narrativeText: null,
+  narrativeDate: null,
+  narrativeCycles: null,
+  narrativeLoading: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -39,6 +48,11 @@ const els = {
   toggle: document.querySelector("#toggleButton"),
   mode: document.querySelector("#modeValue"),
   dataStatus: document.querySelector("#dataStatusValue"),
+  brokerState: document.querySelector("#brokerStateValue"),
+  sessionRealizedPl: document.querySelector("#sessionRealizedPlValue"),
+  sessionTrades: document.querySelector("#sessionTradesValue"),
+  botPerformanceSummary: document.querySelector("#botPerformanceSummaryValue"),
+  botPerformanceGrid: document.querySelector("#botPerformanceGrid"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   cycles: document.querySelector("#cycleValue"),
@@ -54,11 +68,19 @@ const els = {
   position: document.querySelector("#positionValue"),
   positionPl: document.querySelector("#positionPlValue"),
   trailExit: document.querySelector("#trailExitValue"),
+  orderSummary: document.querySelector("#orderSummaryValue"),
+  pendingOrders: document.querySelector("#pendingOrdersList"),
+  orderEvents: document.querySelector("#orderEventsList"),
   error: document.querySelector("#errorText"),
   activityPanel: document.querySelector("#activityPanel"),
+  activityTab: document.querySelector("#activityTab"),
+  narrativeTab: document.querySelector("#narrativeTab"),
   activityCopy: document.querySelector("#activityCopy"),
   activityExpand: document.querySelector("#activityExpand"),
   activityToggle: document.querySelector("#activityToggle"),
+  narrativeGenerate: document.querySelector("#narrativeGenerate"),
+  narrativeOutput: document.querySelector("#narrativeOutput"),
+  narrativeContent: document.querySelector("#narrativeContent"),
   log: document.querySelector("#logOutput"),
 };
 
@@ -96,7 +118,10 @@ function payloadFromForm() {
     sizingValue === "FIXED" ? "25" : sizingValue;
   return {
     symbol: els.symbol ? els.symbol.value.trim().toUpperCase() : "SOXL",
-    positionNotional: els.notional.value,
+    positionNotional:
+      positionSizingMode === "FIXED"
+        ? els.notional.value
+        : state.fixedNotionalValue,
     positionSizingMode,
     positionAllocationPercent,
     trailPercent: els.trail.value,
@@ -206,11 +231,51 @@ function sizingValueFromData(data) {
   return "25";
 }
 
+function buyingPowerFromData(data) {
+  const value = data.edgewalker_status?.buying_power ?? null;
+  return numberOrNull(value);
+}
+
+function dynamicNotionalPreview() {
+  if (!els.positionSizing || els.positionSizing.value === "FIXED") {
+    return null;
+  }
+  const buyingPower = state.latestBuyingPower;
+  const allocation = numberOrNull(els.positionSizing.value);
+  if (buyingPower === null || allocation === null) {
+    return null;
+  }
+
+  const requested = buyingPower * (allocation / 100);
+  const maxNotional = buyingPower * 0.95;
+  return Math.floor(Math.min(requested, maxNotional) * 100) / 100;
+}
+
+function formatNotionalInput(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "";
+  }
+  return parsed.toFixed(2);
+}
+
 function syncSizingControls() {
   if (!els.positionSizing || !els.notional) {
     return;
   }
   const dynamicSizing = els.positionSizing.value !== "FIXED";
+  if (dynamicSizing) {
+    const preview = dynamicNotionalPreview();
+    els.notional.value = preview === null ? "" : formatNotionalInput(preview);
+    els.notional.placeholder = preview === null ? "--" : "";
+    els.notional.setAttribute(
+      "aria-label",
+      "Estimated dynamic position dollars",
+    );
+  } else {
+    els.notional.placeholder = "";
+    els.notional.setAttribute("aria-label", "Position dollars");
+  }
   els.notional.disabled = state.running || state.busy || dynamicSizing;
   els.notional.closest(".field")?.classList.toggle("is-disabled", dynamicSizing);
 }
@@ -225,9 +290,11 @@ function hydrateForm(data) {
   if (els.symbol) {
     els.symbol.value = data.symbol || "SOXL";
   }
-  els.notional.value = data.position_notional || "25";
+  state.fixedNotionalValue = data.position_notional || state.fixedNotionalValue || "25";
+  els.notional.value = state.fixedNotionalValue;
   if (els.positionSizing) {
     els.positionSizing.value = sizingValueFromData(data);
+    state.lastSizingValue = els.positionSizing.value;
   }
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
@@ -317,6 +384,110 @@ function renderDataHealth(status) {
   } else {
     els.dataStatus.classList.add("data-warn");
   }
+}
+
+function renderBrokerState(brokerState) {
+  if (!els.brokerState) {
+    return;
+  }
+
+  els.brokerState.classList.remove("data-live", "data-warn", "data-danger");
+  const stateValue = brokerState?.state || "OK";
+  const labels = {
+    OK: "OK",
+    RESTRICTED: "Restricted",
+    EXIT_BLOCKED: "Exit Blocked",
+    BUYING_POWER_LIMITED: "Buying Power",
+    ORDER_PENDING: "Order Pending",
+  };
+  els.brokerState.textContent = labels[stateValue] || formatLabel(stateValue);
+
+  if (brokerState?.message) {
+    const category = brokerState.category
+      ? `${formatLabel(brokerState.category)}: `
+      : "";
+    els.brokerState.dataset.tooltip = `${category}${brokerState.message}`;
+  } else {
+    els.brokerState.dataset.tooltip = "No broker constraint is currently active.";
+  }
+
+  if (stateValue === "OK") {
+    els.brokerState.classList.add("data-live");
+  } else if (stateValue === "ORDER_PENDING" || stateValue === "BUYING_POWER_LIMITED") {
+    els.brokerState.classList.add("data-warn");
+  } else {
+    els.brokerState.classList.add("data-danger");
+  }
+}
+
+function renderPerformance(performance) {
+  const realizedPl = performance?.session_realized_pl ?? null;
+  const tradeCount = performance?.session_trade_count ?? 0;
+  const lastTradePl = performance?.last_trade_realized_pl ?? null;
+
+  els.sessionRealizedPl.textContent =
+    realizedPl === null ? "--" : formatMoney(realizedPl);
+  setTone(els.sessionRealizedPl, realizedPl);
+
+  if (tradeCount > 0 && lastTradePl !== null) {
+    els.sessionTrades.textContent = `${tradeCount} / last ${formatMoney(lastTradePl)}`;
+    setTone(els.sessionTrades, lastTradePl);
+  } else {
+    els.sessionTrades.textContent = String(tradeCount || 0);
+    setTone(els.sessionTrades, 0);
+  }
+
+  renderBotPerformance(performance?.bot_performance || []);
+}
+
+function renderBotPerformance(botPerformance) {
+  const rows = Array.isArray(botPerformance) ? botPerformance : [];
+  const totalTrades = rows.reduce(
+    (sum, row) => sum + (numberOrNull(row.trade_count) || 0),
+    0,
+  );
+  els.botPerformanceSummary.textContent =
+    totalTrades > 0 ? `${totalTrades} closed trades` : "No closed trades";
+  els.botPerformanceSummary.classList.remove(
+    "is-positive",
+    "is-negative",
+    "is-neutral",
+  );
+  els.botPerformanceSummary.classList.add("is-neutral");
+
+  els.botPerformanceGrid.innerHTML = rows.length
+    ? rows.map(renderBotPerformanceCard).join("")
+    : '<div class="bot-performance-empty">No closed trades yet.</div>';
+}
+
+function renderBotPerformanceCard(row) {
+  const realized = row.realized_pl ?? "0";
+  const trades = numberOrNull(row.trade_count) || 0;
+  const winRate = row.win_rate_percent === null ? "--" : formatPercent(row.win_rate_percent);
+  const lastTrade =
+    row.last_trade_realized_pl === null
+      ? "No trade"
+      : `${formatMoney(row.last_trade_realized_pl)} ${
+          row.last_trade_symbol || ""
+        }`.trim();
+  const toneClass =
+    numberOrNull(realized) === null || numberOrNull(realized) === 0
+      ? "is-neutral"
+      : numberOrNull(realized) > 0
+      ? "is-positive"
+      : "is-negative";
+  return `
+    <div class="bot-performance-card">
+      <span>${escapeHtml(formatLabel(row.bot || "Bot"))}</span>
+      <strong class="${toneClass}">${escapeHtml(formatMoney(realized))}</strong>
+      <div class="bot-performance-stats">
+        <span>${escapeHtml(String(trades))} trades</span>
+        <span>${escapeHtml(String(row.wins || 0))}W/${escapeHtml(String(row.losses || 0))}L</span>
+        <span>${escapeHtml(winRate)}</span>
+      </div>
+      <small>${escapeHtml(lastTrade)}</small>
+    </div>
+  `;
 }
 
 function savedTheme() {
@@ -429,13 +600,18 @@ async function copyActivityLog() {
     return;
   }
 
-  const text = state.logText || els.log?.textContent || "";
+  const isNarrative = state.activeTab === "narrative";
+  const text = isNarrative
+    ? (state.narrativeText || "")
+    : (state.logText || els.log?.textContent || "");
   const originalText = els.activityCopy.textContent;
   const originalTooltip = els.activityCopy.dataset.tooltip;
 
   if (!text.trim()) {
     els.activityCopy.textContent = "Empty";
-    els.activityCopy.dataset.tooltip = "There is no activity log text to copy yet.";
+    els.activityCopy.dataset.tooltip = isNarrative
+      ? "There is no narrative to copy yet."
+      : "There is no activity log text to copy yet.";
     window.setTimeout(() => {
       els.activityCopy.textContent = originalText;
       els.activityCopy.dataset.tooltip = originalTooltip;
@@ -458,15 +634,88 @@ async function copyActivityLog() {
       textarea.remove();
     }
     els.activityCopy.textContent = "Copied";
-    els.activityCopy.dataset.tooltip = "Activity log copied.";
+    els.activityCopy.dataset.tooltip = isNarrative
+      ? "Narrative copied."
+      : "Activity log copied.";
   } catch {
     els.activityCopy.textContent = "Failed";
-    els.activityCopy.dataset.tooltip = "Could not copy the activity log.";
+    els.activityCopy.dataset.tooltip = "Could not copy.";
   } finally {
     window.setTimeout(() => {
       els.activityCopy.textContent = originalText;
       els.activityCopy.dataset.tooltip = originalTooltip;
     }, 1400);
+  }
+}
+
+function switchTab(tab) {
+  state.activeTab = tab;
+  const isActivity = tab === "activity";
+
+  if (els.activityTab) {
+    els.activityTab.classList.toggle("is-active", isActivity);
+    els.activityTab.setAttribute("aria-selected", String(isActivity));
+  }
+  if (els.narrativeTab) {
+    els.narrativeTab.classList.toggle("is-active", !isActivity);
+    els.narrativeTab.setAttribute("aria-selected", String(!isActivity));
+  }
+  if (els.log) els.log.hidden = !isActivity;
+  if (els.narrativeOutput) els.narrativeOutput.hidden = isActivity;
+  if (els.activityExpand) {
+    els.activityExpand.disabled = state.logCollapsed;
+  }
+}
+
+function renderNarrative() {
+  if (!els.narrativeContent) return;
+  if (!state.narrativeText) {
+    els.narrativeContent.innerHTML =
+      '<p class="narrative-empty">Hit Generate to create an AI debrief of the most recent session.</p>';
+    return;
+  }
+  const meta = state.narrativeDate
+    ? `<p class="narrative-meta">${escapeHtml(state.narrativeDate)} · ${state.narrativeCycles || "?"} cycles</p>`
+    : "";
+  const body = state.narrativeText
+    .split(/\n\n+/)
+    .map((p) => `<p>${escapeHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+  els.narrativeContent.innerHTML = meta + body;
+}
+
+async function generateNarrative() {
+  if (state.narrativeLoading) return;
+  state.narrativeLoading = true;
+  if (els.narrativeGenerate) {
+    els.narrativeGenerate.textContent = "Generating…";
+    els.narrativeGenerate.disabled = true;
+  }
+  if (els.narrativeContent) {
+    els.narrativeContent.innerHTML =
+      '<p class="narrative-loading">Generating session debrief…</p>';
+  }
+  try {
+    const data = await request("/api/summary", {
+      method: "POST",
+      body: JSON.stringify({ timeframe: state.narrativeTimeframe }),
+    });
+    state.narrativeText = data.summary;
+    state.narrativeDate = data.date;
+    state.narrativeCycles = data.cycle_count;
+    renderNarrative();
+  } catch (error) {
+    if (els.narrativeContent) {
+      els.narrativeContent.innerHTML = `<p class="narrative-empty">Error: ${escapeHtml(error.message)}</p>`;
+    }
+  } finally {
+    state.narrativeLoading = false;
+    if (els.narrativeGenerate) {
+      els.narrativeGenerate.textContent = state.narrativeText
+        ? "Regenerate"
+        : "Generate";
+      els.narrativeGenerate.disabled = false;
+    }
   }
 }
 
@@ -486,6 +735,34 @@ function setupActivityLog() {
       setLogExpanded(!state.logExpanded);
     });
   }
+  if (els.activityTab) {
+    els.activityTab.addEventListener("click", () => switchTab("activity"));
+  }
+  if (els.narrativeTab) {
+    els.narrativeTab.addEventListener("click", () => switchTab("narrative"));
+  }
+  if (els.narrativeGenerate) {
+    els.narrativeGenerate.addEventListener("click", generateNarrative);
+  }
+
+  document.querySelectorAll(".timeframe-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tf = btn.dataset.timeframe;
+      if (!tf || tf === state.narrativeTimeframe) return;
+      state.narrativeTimeframe = tf;
+      // Clear stale narrative so the placeholder re-appears
+      state.narrativeText = null;
+      state.narrativeDate = null;
+      state.narrativeCycles = null;
+      renderNarrative();
+      if (els.narrativeGenerate) {
+        els.narrativeGenerate.textContent = "Generate";
+      }
+      document.querySelectorAll(".timeframe-btn").forEach((b) => {
+        b.classList.toggle("is-active", b.dataset.timeframe === tf);
+      });
+    });
+  });
 }
 
 function numberOrNull(value) {
@@ -644,6 +921,100 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
+function formatOrderEventType(value) {
+  const labels = {
+    ORDER_ACCEPTED: "Accepted",
+    ORDER_REJECTED: "Rejected",
+    PARTIAL_FILL: "Partial Fill",
+    FULL_FILL: "Full Fill",
+  };
+  return labels[value] || formatLabel(value || "event");
+}
+
+function formatOrderQty(value) {
+  return formatQty(value) || value || "--";
+}
+
+function renderPendingOrder(order) {
+  const side = order.side ? order.side.toUpperCase() : "--";
+  const symbol = order.symbol || "--";
+  const bot = order.bot ? formatLabel(order.bot) : "Unassigned";
+  const reason = order.reason ? formatLabel(order.reason) : "Pending";
+  const status = order.status ? formatLabel(order.status) : "Submitted";
+  const filled = formatOrderQty(order.filled_qty);
+  const updated = formatTime(order.updated_at || order.submitted_at, "--");
+  return `
+    <div class="order-row">
+      <div>
+        <strong>${escapeHtml(symbol)} ${escapeHtml(side)}</strong>
+        <span>${escapeHtml(bot)} · ${escapeHtml(reason)}</span>
+      </div>
+      <div>
+        <strong>${escapeHtml(status)}</strong>
+        <span>${escapeHtml(filled)} filled · ${escapeHtml(updated)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderOrderEvent(event) {
+  const side = event.side ? event.side.toUpperCase() : "--";
+  const symbol = event.symbol || "--";
+  const eventLabel = formatOrderEventType(event.event_type);
+  const time = formatTime(event.created_at, "--");
+  const qty = formatOrderQty(event.fill_delta_qty || event.filled_qty);
+  const price = event.filled_avg_price ? ` @ ${formatPrice(event.filled_avg_price)}` : "";
+  const reason = event.reason ? formatLabel(event.reason) : event.status || "Lifecycle";
+  const detail =
+    event.error ||
+    `${qty}${price} · ${formatLabel(reason)}`;
+  return `
+    <div class="order-row">
+      <div>
+        <strong>${escapeHtml(eventLabel)}</strong>
+        <span>${escapeHtml(symbol)} ${escapeHtml(side)} · ${escapeHtml(time)}</span>
+      </div>
+      <div>
+        <strong>${escapeHtml(event.order_id || "--")}</strong>
+        <span>${escapeHtml(detail)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderOrderState(orderState) {
+  const pending = Array.isArray(orderState?.pending_orders)
+    ? orderState.pending_orders
+    : [];
+  const events = Array.isArray(orderState?.recent_events)
+    ? orderState.recent_events
+    : [];
+  const latestFill = orderState?.latest_fill || null;
+
+  if (pending.length > 0) {
+    els.orderSummary.textContent = `${pending.length} pending`;
+    els.orderSummary.classList.remove("is-positive", "is-negative", "is-neutral");
+    els.orderSummary.classList.add("data-warn");
+  } else if (latestFill) {
+    els.orderSummary.textContent = `Last fill ${formatOrderQty(
+      latestFill.fill_delta_qty || latestFill.filled_qty,
+    )}`;
+    els.orderSummary.classList.remove("data-warn");
+    els.orderSummary.classList.add("is-neutral");
+  } else {
+    els.orderSummary.textContent = "No pending orders";
+    els.orderSummary.classList.remove("data-warn");
+    els.orderSummary.classList.add("is-neutral");
+  }
+
+  els.pendingOrders.innerHTML = pending.length
+    ? pending.map(renderPendingOrder).join("")
+    : '<div class="order-empty">None</div>';
+  els.orderEvents.innerHTML = events.length
+    ? events.map(renderOrderEvent).join("")
+    : '<div class="order-empty">No events</div>';
+}
+
 function logToneForLine(line) {
   const lower = line.toLowerCase();
   if (lower.includes("regime change")) {
@@ -768,6 +1139,10 @@ function renderLog(data) {
 
 function render(data) {
   state.running = Boolean(data.running);
+  const latestBuyingPower = buyingPowerFromData(data);
+  if (latestBuyingPower !== null) {
+    state.latestBuyingPower = latestBuyingPower;
+  }
   hydrateForm(data);
 
   const waitingForOpen =
@@ -799,6 +1174,9 @@ function render(data) {
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
   renderMode(isDryRun);
   renderDataHealth(data.edgewalker_status || data.market_data_status);
+  renderBrokerState(data.broker_state);
+  renderPerformance(data.performance);
+  renderOrderState(data.order_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.cycles.textContent = String(data.cycle_count || 0);
@@ -889,7 +1267,24 @@ if (els.symbol) {
 }
 
 if (els.positionSizing) {
-  els.positionSizing.addEventListener("change", syncSizingControls);
+  els.positionSizing.addEventListener("change", () => {
+    if (state.lastSizingValue === "FIXED" && els.notional.value) {
+      state.fixedNotionalValue = els.notional.value;
+    }
+    state.lastSizingValue = els.positionSizing.value;
+    if (els.positionSizing.value === "FIXED") {
+      els.notional.value = state.fixedNotionalValue || "25";
+    }
+    syncSizingControls();
+  });
+}
+
+if (els.notional) {
+  els.notional.addEventListener("input", () => {
+    if (!els.positionSizing || els.positionSizing.value === "FIXED") {
+      state.fixedNotionalValue = els.notional.value;
+    }
+  });
 }
 
 els.dryRun.addEventListener("change", () => {
