@@ -6,6 +6,9 @@ const state = {
   logExpanded: false,
   logText: "",
   busy: false,
+  fixedNotionalValue: "25",
+  latestBuyingPower: null,
+  lastSizingValue: "FIXED",
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -97,7 +100,10 @@ function payloadFromForm() {
     sizingValue === "FIXED" ? "25" : sizingValue;
   return {
     symbol: els.symbol ? els.symbol.value.trim().toUpperCase() : "SOXL",
-    positionNotional: els.notional.value,
+    positionNotional:
+      positionSizingMode === "FIXED"
+        ? els.notional.value
+        : state.fixedNotionalValue,
     positionSizingMode,
     positionAllocationPercent,
     trailPercent: els.trail.value,
@@ -207,11 +213,51 @@ function sizingValueFromData(data) {
   return "25";
 }
 
+function buyingPowerFromData(data) {
+  const value = data.edgewalker_status?.buying_power ?? null;
+  return numberOrNull(value);
+}
+
+function dynamicNotionalPreview() {
+  if (!els.positionSizing || els.positionSizing.value === "FIXED") {
+    return null;
+  }
+  const buyingPower = state.latestBuyingPower;
+  const allocation = numberOrNull(els.positionSizing.value);
+  if (buyingPower === null || allocation === null) {
+    return null;
+  }
+
+  const requested = buyingPower * (allocation / 100);
+  const maxNotional = buyingPower * 0.95;
+  return Math.floor(Math.min(requested, maxNotional) * 100) / 100;
+}
+
+function formatNotionalInput(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "";
+  }
+  return parsed.toFixed(2);
+}
+
 function syncSizingControls() {
   if (!els.positionSizing || !els.notional) {
     return;
   }
   const dynamicSizing = els.positionSizing.value !== "FIXED";
+  if (dynamicSizing) {
+    const preview = dynamicNotionalPreview();
+    els.notional.value = preview === null ? "" : formatNotionalInput(preview);
+    els.notional.placeholder = preview === null ? "--" : "";
+    els.notional.setAttribute(
+      "aria-label",
+      "Estimated dynamic position dollars",
+    );
+  } else {
+    els.notional.placeholder = "";
+    els.notional.setAttribute("aria-label", "Position dollars");
+  }
   els.notional.disabled = state.running || state.busy || dynamicSizing;
   els.notional.closest(".field")?.classList.toggle("is-disabled", dynamicSizing);
 }
@@ -226,9 +272,11 @@ function hydrateForm(data) {
   if (els.symbol) {
     els.symbol.value = data.symbol || "SOXL";
   }
-  els.notional.value = data.position_notional || "25";
+  state.fixedNotionalValue = data.position_notional || state.fixedNotionalValue || "25";
+  els.notional.value = state.fixedNotionalValue;
   if (els.positionSizing) {
     els.positionSizing.value = sizingValueFromData(data);
+    state.lastSizingValue = els.positionSizing.value;
   }
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
@@ -803,6 +851,10 @@ function renderLog(data) {
 
 function render(data) {
   state.running = Boolean(data.running);
+  const latestBuyingPower = buyingPowerFromData(data);
+  if (latestBuyingPower !== null) {
+    state.latestBuyingPower = latestBuyingPower;
+  }
   hydrateForm(data);
 
   const waitingForOpen =
@@ -925,7 +977,24 @@ if (els.symbol) {
 }
 
 if (els.positionSizing) {
-  els.positionSizing.addEventListener("change", syncSizingControls);
+  els.positionSizing.addEventListener("change", () => {
+    if (state.lastSizingValue === "FIXED" && els.notional.value) {
+      state.fixedNotionalValue = els.notional.value;
+    }
+    state.lastSizingValue = els.positionSizing.value;
+    if (els.positionSizing.value === "FIXED") {
+      els.notional.value = state.fixedNotionalValue || "25";
+    }
+    syncSizingControls();
+  });
+}
+
+if (els.notional) {
+  els.notional.addEventListener("input", () => {
+    if (!els.positionSizing || els.positionSizing.value === "FIXED") {
+      state.fixedNotionalValue = els.notional.value;
+    }
+  });
 }
 
 els.dryRun.addEventListener("change", () => {
