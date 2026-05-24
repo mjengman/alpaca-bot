@@ -31,6 +31,7 @@ Omit `--edgewalker` to run the original single-symbol trailing stop bot.
 For live EdgeWalker testing, prefer the browser server because it owns the WebSocket stream and warmup cache. The CLI path is still useful for manual order tests and diagnostics.
 
 The checked-in `.env.example` shows the settings. The local `.env` file is ignored by git.
+The browser UI also has a Settings modal for paper/live Alpaca credentials, connection tests, active environment selection, and live-trading arming/disarming.
 The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
 
 ## Strategy
@@ -40,7 +41,7 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 - Router: `MomentumBot` trades `SOXL`, `InverseBot` trades `SOXS`, `ChopBot` trades SOXL mean reversion
 - Directional mode: `CONSERVATIVE` requires a fresh cross, `BALANCED` also allows reasonable continuation entries, and `AGGRESSIVE` can chase strong trends within the configured extension cap
 - Entry: MomentumBot and InverseBot use the configured directional mode; ChopBot buys SOXL when SIDEWAYS price is discounted below the slow SMA
-- Position size: market buy by `POSITION_NOTIONAL`, which supports fractional shares through Alpaca notional orders
+- Position size: fixed notional or dynamic allocation modes, clamped to the safe buying-power threshold and submitted through Alpaca notional orders
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
 - Regime flip guard: stale opposite exposure is sold first, with no same-cycle reversal
 - Poll interval: `POLL_SECONDS`, default 60 seconds
@@ -51,7 +52,9 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 - Market-hours guard: no fresh entry orders are submitted while Alpaca reports the market is closed
 - Market-close behavior: the repeating browser runner switches itself off after Alpaca reports the regular market is closed
 
-The bot defaults to `DRY_RUN=true`, so it will show what it would do without placing orders. Set `DRY_RUN=false` in `.env` when you want the paper account to place orders.
+The bot defaults to `ALPACA_ENVIRONMENT=paper` and `DRY_RUN=true`, so it will show what it would do without placing orders. Turn off Dry run in the UI when you want the paper account to place orders.
+
+Live trading uses separate live credentials and the live Alpaca trading URL. Real live-order submission is blocked unless `LIVE_TRADING_ARMED=true`, which the Settings modal only enables after live credentials are configured and a typed `LIVE` confirmation is entered. The same modal can disarm live trading. Keep paper trading as the default workflow until live-readiness checks are complete.
 
 ## Useful Commands
 

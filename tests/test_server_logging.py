@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 from bot import (
     BotConfig,
+    BotError,
     CHOP_BOT,
     INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
@@ -36,10 +38,14 @@ from server import (
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
+    alpaca_environment_settings,
     build_summary_prompt,
     config_from_payload,
     lifecycle_performance_summary,
     order_visibility_summary,
+    save_alpaca_environment_settings,
+    set_live_trading_armed,
+    set_live_trading_disarmed,
 )
 
 
@@ -577,6 +583,111 @@ class ServerLoggingTest(unittest.TestCase):
 
         self.assertEqual(parsed["tldr"], "Brief read.")
         self.assertEqual(parsed["bottom_line"], "Useful session.")
+
+    def test_environment_settings_round_trip_masks_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            payload = {
+                "active_environment": "live",
+                "data_base_url": "https://data.alpaca.markets/v2",
+                "data_feed": "iex",
+                "paper": {
+                    "trading_base_url": "https://paper-api.alpaca.markets/v2",
+                    "api_key_id": "paper-key-1234",
+                    "api_secret_key": "paper-secret-5678",
+                },
+                "live": {
+                    "trading_base_url": "https://api.alpaca.markets/v2",
+                    "api_key_id": "live-key-1234",
+                    "api_secret_key": "live-secret-5678",
+                },
+            }
+
+            with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
+                settings = save_alpaca_environment_settings(payload)
+                loaded = alpaca_environment_settings()
+                env_text = env_path.read_text()
+
+        self.assertEqual(settings["active_environment"], "live")
+        self.assertEqual(loaded["active_environment"], "live")
+        self.assertEqual(settings["paper"]["api_key_id_masked"], "********1234")
+        self.assertEqual(settings["live"]["api_secret_key_masked"], "********5678")
+        self.assertNotIn("paper-secret-5678", json.dumps(settings))
+        self.assertIn("ALPACA_LIVE_API_KEY_ID=live-key-1234", env_text)
+
+    def test_live_trading_arm_and_disarm_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            payload = {
+                "active_environment": "paper",
+                "data_base_url": "https://data.alpaca.markets/v2",
+                "data_feed": "iex",
+                "live": {
+                    "trading_base_url": "https://api.alpaca.markets/v2",
+                    "api_key_id": "live-key-1234",
+                    "api_secret_key": "live-secret-5678",
+                },
+            }
+
+            with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
+                save_alpaca_environment_settings(payload)
+                armed = set_live_trading_armed("LIVE")
+                disarmed = set_live_trading_disarmed()
+
+        self.assertTrue(armed["live_trading_armed"])
+        self.assertFalse(disarmed["live_trading_armed"])
+
+    def test_live_trading_arm_requires_live_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(BotError):
+                    set_live_trading_armed("LIVE")
+
+    def test_live_trading_armed_is_ignored_without_live_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            env_path.write_text("LIVE_TRADING_ARMED=true\n", encoding="utf-8")
+            with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
+                settings = alpaca_environment_settings()
+
+        self.assertFalse(settings["live_trading_armed"])
+
+    def test_config_payload_blocks_unarmed_live_orders(self) -> None:
+        payload = {"dryRun": False}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            with patch("server.ENV_PATH", env_path), patch.dict(
+                os.environ,
+                {
+                    "ALPACA_ENVIRONMENT": "live",
+                    "ALPACA_LIVE_API_KEY_ID": "key",
+                    "ALPACA_LIVE_API_SECRET_KEY": "secret",
+                    "LIVE_TRADING_ARMED": "false",
+                },
+                clear=True,
+            ):
+                with self.assertRaises(BotError):
+                    config_from_payload(payload)
+
+    def test_runner_initial_config_falls_back_to_paper_when_live_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            with patch("server.ENV_PATH", env_path), patch.dict(
+                os.environ,
+                {
+                    "ALPACA_ENVIRONMENT": "live",
+                    "ALPACA_PAPER_API_KEY_ID": "paper-key",
+                    "ALPACA_PAPER_API_SECRET_KEY": "paper-secret",
+                },
+                clear=True,
+            ):
+                config_value, error = BotRunner.__new__(BotRunner)._initial_config()
+                environment_after = os.environ.get("ALPACA_ENVIRONMENT")
+
+        self.assertEqual(config_value.api_key_id, "paper-key")
+        self.assertIn("Live environment incomplete", error or "")
+        self.assertEqual(environment_after, "live")
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

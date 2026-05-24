@@ -17,6 +17,7 @@ from typing import Any
 
 
 TRADING_BASE_URL_DEFAULT = "https://paper-api.alpaca.markets/v2"
+LIVE_TRADING_BASE_URL_DEFAULT = "https://api.alpaca.markets/v2"
 DATA_BASE_URL_DEFAULT = "https://data.alpaca.markets/v2"
 STATE_PATH_DEFAULT = Path(__file__).resolve().with_name(".bot_state.json")
 LIFECYCLE_PATH_DEFAULT = (
@@ -167,10 +168,35 @@ class BotConfig:
 
     @classmethod
     def from_env(cls) -> "BotConfig":
-        api_key_id = os.environ.get("ALPACA_API_KEY_ID", "").strip()
-        api_secret_key = os.environ.get("ALPACA_API_SECRET_KEY", "").strip()
+        alpaca_environment = os.environ.get("ALPACA_ENVIRONMENT", "paper").strip().lower()
+        if alpaca_environment not in {"paper", "live"}:
+            raise BotError("ALPACA_ENVIRONMENT must be paper or live")
+
+        if alpaca_environment == "live":
+            api_key_id = os.environ.get("ALPACA_LIVE_API_KEY_ID", "").strip()
+            api_secret_key = os.environ.get("ALPACA_LIVE_API_SECRET_KEY", "").strip()
+            trading_base_url = os.environ.get(
+                "ALPACA_LIVE_TRADING_BASE_URL",
+                LIVE_TRADING_BASE_URL_DEFAULT,
+            )
+        else:
+            api_key_id = (
+                os.environ.get("ALPACA_PAPER_API_KEY_ID")
+                or os.environ.get("ALPACA_API_KEY_ID", "")
+            ).strip()
+            api_secret_key = (
+                os.environ.get("ALPACA_PAPER_API_SECRET_KEY")
+                or os.environ.get("ALPACA_API_SECRET_KEY", "")
+            ).strip()
+            trading_base_url = (
+                os.environ.get("ALPACA_PAPER_TRADING_BASE_URL")
+                or os.environ.get("ALPACA_TRADING_BASE_URL")
+                or TRADING_BASE_URL_DEFAULT
+            )
         if not api_key_id or not api_secret_key:
-            raise BotError("Set ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY in .env")
+            raise BotError(
+                "Set Alpaca API key and secret for the selected environment in .env"
+            )
 
         fast_sma = env_int("FAST_SMA_MINUTES", 5)
         slow_sma = env_int("SLOW_SMA_MINUTES", 20)
@@ -258,9 +284,7 @@ class BotConfig:
             raise BotError("DIRECTIONAL_COOLDOWN_MINUTES must be at least 0")
 
         return cls(
-            trading_base_url=os.environ.get(
-                "ALPACA_TRADING_BASE_URL", TRADING_BASE_URL_DEFAULT
-            ).rstrip("/"),
+            trading_base_url=trading_base_url.rstrip("/"),
             data_base_url=os.environ.get(
                 "ALPACA_DATA_BASE_URL", DATA_BASE_URL_DEFAULT
             ).rstrip("/"),

@@ -20,6 +20,9 @@ const state = {
   narrativeDisplayDate: null,
   narrativeCycles: null,
   narrativeLoading: false,
+  activeEnvironment: "paper",
+  liveTradingArmed: false,
+  liveCredentialsReady: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -30,6 +33,26 @@ const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
 const els = {
+  settingsOpen: document.querySelector("#settingsOpen"),
+  settingsDialog: document.querySelector("#settingsDialog"),
+  settingsClose: document.querySelector("#settingsClose"),
+  settingsMessage: document.querySelector("#settingsMessage"),
+  settingsSave: document.querySelector("#settingsSave"),
+  activeEnvironment: document.querySelector("#activeEnvironmentInput"),
+  dataBaseUrl: document.querySelector("#dataBaseUrlInput"),
+  dataFeed: document.querySelector("#dataFeedInput"),
+  paperTradingUrl: document.querySelector("#paperTradingUrlInput"),
+  paperApiKey: document.querySelector("#paperApiKeyInput"),
+  paperApiSecret: document.querySelector("#paperApiSecretInput"),
+  liveTradingUrl: document.querySelector("#liveTradingUrlInput"),
+  liveApiKey: document.querySelector("#liveApiKeyInput"),
+  liveApiSecret: document.querySelector("#liveApiSecretInput"),
+  testPaperConnection: document.querySelector("#testPaperConnection"),
+  testLiveConnection: document.querySelector("#testLiveConnection"),
+  liveArmStatus: document.querySelector("#liveArmStatus"),
+  liveArmInput: document.querySelector("#liveArmInput"),
+  liveArmButton: document.querySelector("#liveArmButton"),
+  liveDisarmButton: document.querySelector("#liveDisarmButton"),
   operatorGuideOpen: document.querySelector("#operatorGuideOpen"),
   operatorGuideDialog: document.querySelector("#operatorGuideDialog"),
   operatorGuideClose: document.querySelector("#operatorGuideClose"),
@@ -333,9 +356,38 @@ function hydrateForm(data) {
   state.hydrated = true;
 }
 
-function renderMode(isDryRun) {
+function renderMode(
+  isDryRun,
+  environment = state.activeEnvironment,
+  liveArmed = state.liveTradingArmed,
+  liveCredentialsReady = state.liveCredentialsReady,
+) {
   document.body.classList.toggle("live-paper", !isDryRun);
-  els.mode.textContent = isDryRun ? "Dry run" : "Paper live";
+  let label = "Dry run";
+  let tooltip = "Orders are simulated and not sent to Alpaca.";
+  if (isDryRun) {
+    label = environment === "live" ? "Live dry run" : "Dry run";
+    tooltip =
+      environment === "live"
+        ? "Live credentials/environment selected, but orders are still simulated."
+        : "Orders are simulated and not sent to Alpaca.";
+  } else if (environment === "live") {
+    if (!liveCredentialsReady) {
+      label = "Live incomplete";
+      tooltip = "Live environment is selected, but live API credentials are not configured.";
+    } else if (!liveArmed) {
+      label = "Live blocked";
+      tooltip = 'Live environment is selected, but live trading is not armed. Type "LIVE" in Settings to arm it.';
+    } else {
+      label = "Live orders";
+      tooltip = "Live environment is armed. Orders can be sent to the live Alpaca account.";
+    }
+  } else {
+    label = "Paper orders";
+    tooltip = "Dry run is off. Orders can be sent to the Alpaca paper account.";
+  }
+  els.mode.textContent = label;
+  els.mode.dataset.tooltip = tooltip;
 }
 
 function formatAgeSeconds(value) {
@@ -569,6 +621,216 @@ function setupOperatorGuide() {
       closeGuide();
     }
   });
+}
+
+function setSettingsMessage(message, tone = "neutral") {
+  if (!els.settingsMessage) return;
+  els.settingsMessage.textContent = message || "";
+  els.settingsMessage.classList.remove("is-success", "is-danger", "is-warning");
+  if (tone !== "neutral") {
+    els.settingsMessage.classList.add(`is-${tone}`);
+  }
+}
+
+function applySettings(settings) {
+  if (!settings) return;
+  state.activeEnvironment = settings.active_environment || "paper";
+  state.liveTradingArmed = Boolean(settings.live_trading_armed);
+  state.liveCredentialsReady = Boolean(
+    settings.live?.has_api_key_id && settings.live?.has_api_secret_key,
+  );
+  if (els.activeEnvironment) {
+    els.activeEnvironment.value = state.activeEnvironment;
+  }
+  if (els.dataBaseUrl) {
+    els.dataBaseUrl.value = settings.data_base_url || "";
+  }
+  if (els.dataFeed) {
+    els.dataFeed.value = settings.data_feed || "";
+  }
+  if (els.paperTradingUrl) {
+    els.paperTradingUrl.value = settings.paper?.trading_base_url || "";
+  }
+  if (els.liveTradingUrl) {
+    els.liveTradingUrl.value = settings.live?.trading_base_url || "";
+  }
+
+  const secretFields = [
+    [els.paperApiKey, settings.paper?.api_key_id_masked],
+    [els.paperApiSecret, settings.paper?.api_secret_key_masked],
+    [els.liveApiKey, settings.live?.api_key_id_masked],
+    [els.liveApiSecret, settings.live?.api_secret_key_masked],
+  ];
+  secretFields.forEach(([input, masked]) => {
+    if (!input) return;
+    input.value = "";
+    input.placeholder = masked || "Not configured";
+  });
+  if (els.liveArmStatus) {
+    els.liveArmStatus.textContent = state.liveTradingArmed
+      ? "Live trading armed"
+      : "Live trading not armed";
+    els.liveArmStatus.classList.toggle("is-armed", state.liveTradingArmed);
+  }
+  renderMode(
+    els.dryRun?.checked ?? true,
+    state.activeEnvironment,
+    state.liveTradingArmed,
+    state.liveCredentialsReady,
+  );
+}
+
+async function loadSettings() {
+  const settings = await request("/api/settings");
+  applySettings(settings);
+  return settings;
+}
+
+function settingsPayloadFromForm() {
+  return {
+    active_environment: els.activeEnvironment?.value || "paper",
+    data_base_url: els.dataBaseUrl?.value || "",
+    data_feed: els.dataFeed?.value || "iex",
+    paper: {
+      trading_base_url: els.paperTradingUrl?.value || "",
+      api_key_id: els.paperApiKey?.value || "",
+      api_secret_key: els.paperApiSecret?.value || "",
+    },
+    live: {
+      trading_base_url: els.liveTradingUrl?.value || "",
+      api_key_id: els.liveApiKey?.value || "",
+      api_secret_key: els.liveApiSecret?.value || "",
+    },
+  };
+}
+
+async function saveSettings({ rethrow = false } = {}) {
+  if (!els.settingsSave) return;
+  els.settingsSave.disabled = true;
+  setSettingsMessage("Saving settings...");
+  try {
+    const settings = await request("/api/settings", {
+      method: "POST",
+      body: JSON.stringify(settingsPayloadFromForm()),
+    });
+    applySettings(settings);
+    setSettingsMessage("Settings saved.", "success");
+  } catch (error) {
+    setSettingsMessage(error.message, "danger");
+    if (rethrow) {
+      throw error;
+    }
+  } finally {
+    els.settingsSave.disabled = false;
+  }
+}
+
+async function testConnection(environment) {
+  const button =
+    environment === "live" ? els.testLiveConnection : els.testPaperConnection;
+  if (button) button.disabled = true;
+  setSettingsMessage(`Testing ${environment} connection...`);
+  try {
+    await saveSettings({ rethrow: true });
+    const result = await request("/api/settings/test", {
+      method: "POST",
+      body: JSON.stringify({ environment }),
+    });
+    const value = result.portfolio_value
+      ? ` Portfolio ${formatMoney(result.portfolio_value)}.`
+      : "";
+    setSettingsMessage(
+      `${environment === "live" ? "Live" : "Paper"} connection OK.${value}`,
+      "success",
+    );
+  } catch (error) {
+    setSettingsMessage(error.message, "danger");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function armLiveTrading() {
+  const confirmation = els.liveArmInput?.value || "";
+  if (els.liveArmButton) els.liveArmButton.disabled = true;
+  setSettingsMessage("Arming live trading...");
+  try {
+    const settings = await request("/api/live-arm", {
+      method: "POST",
+      body: JSON.stringify({ confirmation }),
+    });
+    applySettings(settings);
+    if (els.liveArmInput) els.liveArmInput.value = "";
+    setSettingsMessage("Live trading armed. Keep Dry run on until go-live.", "warning");
+  } catch (error) {
+    setSettingsMessage(error.message, "danger");
+  } finally {
+    if (els.liveArmButton) els.liveArmButton.disabled = false;
+  }
+}
+
+async function disarmLiveTrading() {
+  if (els.liveDisarmButton) els.liveDisarmButton.disabled = true;
+  setSettingsMessage("Disarming live trading...");
+  try {
+    const settings = await request("/api/live-disarm", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    applySettings(settings);
+    setSettingsMessage("Live trading disarmed.", "success");
+  } catch (error) {
+    setSettingsMessage(error.message, "danger");
+  } finally {
+    if (els.liveDisarmButton) els.liveDisarmButton.disabled = false;
+  }
+}
+
+function setupSettingsModal() {
+  if (!els.settingsDialog || !els.settingsOpen) return;
+  const closeSettings = () => {
+    if (els.settingsDialog.open) {
+      els.settingsDialog.close();
+    }
+  };
+  els.settingsOpen.addEventListener("click", async () => {
+    hideTooltip();
+    setSettingsMessage("Loading settings...");
+    if (typeof els.settingsDialog.showModal === "function") {
+      els.settingsDialog.showModal();
+    } else {
+      els.settingsDialog.setAttribute("open", "");
+    }
+    try {
+      await loadSettings();
+      setSettingsMessage("");
+    } catch (error) {
+      setSettingsMessage(error.message, "danger");
+    }
+  });
+  if (els.settingsClose) {
+    els.settingsClose.addEventListener("click", closeSettings);
+  }
+  els.settingsDialog.addEventListener("click", (event) => {
+    if (event.target === els.settingsDialog) {
+      closeSettings();
+    }
+  });
+  if (els.settingsSave) {
+    els.settingsSave.addEventListener("click", saveSettings);
+  }
+  if (els.testPaperConnection) {
+    els.testPaperConnection.addEventListener("click", () => testConnection("paper"));
+  }
+  if (els.testLiveConnection) {
+    els.testLiveConnection.addEventListener("click", () => testConnection("live"));
+  }
+  if (els.liveArmButton) {
+    els.liveArmButton.addEventListener("click", armLiveTrading);
+  }
+  if (els.liveDisarmButton) {
+    els.liveDisarmButton.addEventListener("click", disarmLiveTrading);
+  }
 }
 
 function saveLogCollapsed(collapsed) {
@@ -1413,6 +1675,9 @@ function renderLog(data) {
 
 function render(data) {
   state.running = Boolean(data.running);
+  state.activeEnvironment = data.active_environment || state.activeEnvironment;
+  state.liveTradingArmed = Boolean(data.live_trading_armed);
+  state.liveCredentialsReady = Boolean(data.live_credentials_ready);
   const latestBuyingPower = buyingPowerFromData(data);
   if (latestBuyingPower !== null) {
     state.latestBuyingPower = latestBuyingPower;
@@ -1446,7 +1711,12 @@ function render(data) {
   syncSizingControls();
 
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
-  renderMode(isDryRun);
+  renderMode(
+    isDryRun,
+    state.activeEnvironment,
+    state.liveTradingArmed,
+    state.liveCredentialsReady,
+  );
   renderDataHealth(data.edgewalker_status || data.market_data_status);
   renderBrokerState(data.broker_state);
   renderPerformance(data.performance);
@@ -1562,7 +1832,12 @@ if (els.notional) {
 }
 
 els.dryRun.addEventListener("change", () => {
-  renderMode(els.dryRun.checked);
+  renderMode(
+    els.dryRun.checked,
+    state.activeEnvironment,
+    state.liveTradingArmed,
+    state.liveCredentialsReady,
+  );
 });
 
 if (els.themeToggle) {
@@ -1570,6 +1845,7 @@ if (els.themeToggle) {
 }
 
 setupTheme();
+setupSettingsModal();
 setupOperatorGuide();
 setupActivityLog();
 setupTooltips();

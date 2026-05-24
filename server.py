@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -23,6 +24,7 @@ from bot import (
     BotError,
     BotStateStore,
     CHOP_BOT,
+    DATA_BASE_URL_DEFAULT,
     EdgeWalkerBot,
     INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
@@ -31,12 +33,14 @@ from bot import (
     LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
     LifecycleLedger,
+    LIVE_TRADING_BASE_URL_DEFAULT,
     MOMENTUM_BOT,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
     REGIME_STRENGTHS,
     SOXL,
     SOXS,
+    TRADING_BASE_URL_DEFAULT,
     broker_constraint_ok,
     broker_constraint_payload,
     classify_broker_error,
@@ -52,6 +56,7 @@ WEB_ROOT = PROJECT_ROOT / "web"
 HOST = "127.0.0.1"
 PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
+ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
@@ -77,6 +82,8 @@ MONTH_NAMES = (
     "December",
 )
 NARRATIVE_BOTS = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
+ENV_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+SECRET_PLACEHOLDER = "__EDGEWALKER_KEEP_SECRET__"
 
 
 @dataclass
@@ -84,6 +91,9 @@ class RunnerSnapshot:
     running: bool
     symbol: str
     dry_run: bool
+    active_environment: str
+    live_trading_armed: bool
+    live_credentials_ready: bool
     poll_seconds: int
     close_liquidate_minutes: int
     regime_gap_threshold: str
@@ -122,7 +132,7 @@ class BotRunner:
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
         LOGS_ROOT.mkdir(parents=True, exist_ok=True)
-        self._config = BotConfig.from_env()
+        self._config, startup_error = self._initial_config()
         self._market_data = StreamingMarketDataService(self._config, symbols=(SOXL, SOXS))
         self._market_data.ensure_running(self._config)
         self._running = False
@@ -138,9 +148,31 @@ class BotRunner:
         self._broker_state: dict[str, Any] = broker_constraint_payload(
             broker_constraint_ok()
         )
-        self._last_error: str | None = None
+        self._last_error: str | None = startup_error
         self._market_idle_logged_for: str | None = None
         self._last_regime: str | None = None
+
+    def _initial_config(self) -> tuple[BotConfig, str | None]:
+        try:
+            return BotConfig.from_env(), None
+        except BotError as exc:
+            if current_alpaca_environment() != "live":
+                raise
+            previous_environment = os.environ.get("ALPACA_ENVIRONMENT")
+            os.environ["ALPACA_ENVIRONMENT"] = "paper"
+            try:
+                fallback = BotConfig.from_env()
+            except BotError:
+                if previous_environment is None:
+                    os.environ.pop("ALPACA_ENVIRONMENT", None)
+                else:
+                    os.environ["ALPACA_ENVIRONMENT"] = previous_environment
+                raise exc
+            if previous_environment is None:
+                os.environ.pop("ALPACA_ENVIRONMENT", None)
+            else:
+                os.environ["ALPACA_ENVIRONMENT"] = previous_environment
+            return fallback, f"Live environment incomplete: {exc}"
 
     def snapshot(self) -> RunnerSnapshot:
         with self._lock:
@@ -485,6 +517,7 @@ class BotRunner:
 
     def _snapshot_locked(self) -> RunnerSnapshot:
         self._activity_log = _current_ny_activity(self._activity_log)
+        environment_settings = alpaca_environment_settings()
         market_data_status = self._market_data.status(
             SOXL,
             required_bars=self._config.slow_sma_minutes,
@@ -494,6 +527,12 @@ class BotRunner:
             running=self._running,
             symbol=self._config.symbol,
             dry_run=self._config.dry_run,
+            active_environment=environment_settings["active_environment"],
+            live_trading_armed=environment_settings["live_trading_armed"],
+            live_credentials_ready=bool(
+                environment_settings["live"]["has_api_key_id"]
+                and environment_settings["live"]["has_api_secret_key"]
+            ),
             poll_seconds=self._config.poll_seconds,
             close_liquidate_minutes=self._config.close_liquidate_minutes,
             regime_gap_threshold=str(self._config.regime_gap_threshold),
@@ -825,6 +864,276 @@ def _optional_text(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _env_bool_text(value: str | None) -> bool:
+    return bool(value and value.strip().lower() in {"1", "true", "yes", "on"})
+
+
+def _is_secret_placeholder(value: str | None) -> bool:
+    return value in (None, "", SECRET_PLACEHOLDER)
+
+
+def _mask_secret(value: str | None) -> str:
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "********"
+    return f"********{value[-4:]}"
+
+
+def _read_env_values(path: Path | None = None) -> dict[str, str]:
+    path = path or ENV_PATH
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        match = ENV_KEY_RE.match(raw_line)
+        if not match:
+            continue
+        key = match.group(1)
+        _, raw_value = raw_line.split("=", 1)
+        value = raw_value.strip().strip('"').strip("'")
+        values[key] = value
+    return values
+
+
+def _quote_env_value(value: str) -> str:
+    if value == "" or any(char.isspace() or char in value for char in "\"'#"):
+        return json.dumps(value)
+    return value
+
+
+def _write_env_updates(updates: dict[str, str], path: Path | None = None) -> None:
+    path = path or ENV_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    updated_lines: list[str] = []
+    for line in lines:
+        match = ENV_KEY_RE.match(line)
+        if match and match.group(1) in updates:
+            key = match.group(1)
+            updated_lines.append(f"{key}={_quote_env_value(updates[key])}")
+            seen.add(key)
+        else:
+            updated_lines.append(line)
+
+    if updates:
+        if updated_lines and updated_lines[-1].strip():
+            updated_lines.append("")
+        for key, value in updates.items():
+            if key not in seen:
+                updated_lines.append(f"{key}={_quote_env_value(value)}")
+    path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
+    for key, value in updates.items():
+        os.environ[key] = value
+
+
+def _env_first(values: dict[str, str], *keys: str, default: str = "") -> str:
+    for key in keys:
+        if values.get(key):
+            return values[key]
+    return default
+
+
+def _live_credentials_ready(values: dict[str, str] | None = None) -> bool:
+    values = values if values is not None else _read_env_values()
+    live_key = values.get("ALPACA_LIVE_API_KEY_ID") or os.environ.get(
+        "ALPACA_LIVE_API_KEY_ID",
+        "",
+    )
+    live_secret = values.get("ALPACA_LIVE_API_SECRET_KEY") or os.environ.get(
+        "ALPACA_LIVE_API_SECRET_KEY",
+        "",
+    )
+    return bool(live_key and live_secret)
+
+
+def live_trading_armed() -> bool:
+    values = _read_env_values()
+    raw_armed = _env_bool_text(
+        os.environ.get("LIVE_TRADING_ARMED") or values.get("LIVE_TRADING_ARMED")
+    )
+    return raw_armed and _live_credentials_ready(values)
+
+
+def _is_live_trading_url(url: str) -> bool:
+    normalized = url.rstrip("/").lower()
+    return "paper-api" not in normalized and "api.alpaca.markets" in normalized
+
+
+def current_alpaca_environment() -> str:
+    values = _read_env_values()
+    environment = (
+        os.environ.get("ALPACA_ENVIRONMENT")
+        or values.get("ALPACA_ENVIRONMENT")
+        or "paper"
+    ).strip().lower()
+    return environment if environment in {"paper", "live"} else "paper"
+
+
+def _live_trading_guard_required(url: str) -> bool:
+    return current_alpaca_environment() == "live" or _is_live_trading_url(url)
+
+
+def alpaca_environment_settings() -> dict[str, Any]:
+    values = _read_env_values()
+    active_environment = current_alpaca_environment()
+
+    paper_key = _env_first(values, "ALPACA_PAPER_API_KEY_ID", "ALPACA_API_KEY_ID")
+    paper_secret = _env_first(
+        values,
+        "ALPACA_PAPER_API_SECRET_KEY",
+        "ALPACA_API_SECRET_KEY",
+    )
+    live_key = _env_first(values, "ALPACA_LIVE_API_KEY_ID")
+    live_secret = _env_first(values, "ALPACA_LIVE_API_SECRET_KEY")
+
+    return {
+        "active_environment": active_environment,
+        "live_trading_armed": live_trading_armed(),
+        "data_base_url": _env_first(
+            values,
+            "ALPACA_DATA_BASE_URL",
+            default=DATA_BASE_URL_DEFAULT,
+        ),
+        "data_feed": _env_first(values, "DATA_FEED", default="iex"),
+        "paper": {
+            "trading_base_url": _env_first(
+                values,
+                "ALPACA_PAPER_TRADING_BASE_URL",
+                "ALPACA_TRADING_BASE_URL",
+                default=TRADING_BASE_URL_DEFAULT,
+            ),
+            "api_key_id_masked": _mask_secret(paper_key),
+            "api_secret_key_masked": _mask_secret(paper_secret),
+            "has_api_key_id": bool(paper_key),
+            "has_api_secret_key": bool(paper_secret),
+        },
+        "live": {
+            "trading_base_url": _env_first(
+                values,
+                "ALPACA_LIVE_TRADING_BASE_URL",
+                default=LIVE_TRADING_BASE_URL_DEFAULT,
+            ),
+            "api_key_id_masked": _mask_secret(live_key),
+            "api_secret_key_masked": _mask_secret(live_secret),
+            "has_api_key_id": bool(live_key),
+            "has_api_secret_key": bool(live_secret),
+        },
+    }
+
+
+def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+    active_environment = str(
+        payload.get("active_environment")
+        or payload.get("activeEnvironment")
+        or "paper"
+    ).strip().lower()
+    if active_environment not in {"paper", "live"}:
+        raise BotError("Active environment must be paper or live.")
+
+    updates = {
+        "ALPACA_ENVIRONMENT": active_environment,
+        "ALPACA_DATA_BASE_URL": str(
+            payload.get("data_base_url")
+            or payload.get("dataBaseUrl")
+            or DATA_BASE_URL_DEFAULT
+        ).strip().rstrip("/"),
+        "DATA_FEED": str(
+            payload.get("data_feed") or payload.get("dataFeed") or "iex"
+        ).strip(),
+    }
+
+    for env_name, prefix in (("paper", "ALPACA_PAPER"), ("live", "ALPACA_LIVE")):
+        section = payload.get(env_name)
+        if not isinstance(section, dict):
+            section = {}
+        trading_url = _optional_text(
+            section.get("trading_base_url") or section.get("tradingBaseUrl")
+        )
+        if trading_url:
+            updates[f"{prefix}_TRADING_BASE_URL"] = trading_url.rstrip("/")
+        key_id = _optional_text(section.get("api_key_id") or section.get("apiKeyId"))
+        secret = _optional_text(
+            section.get("api_secret_key") or section.get("apiSecretKey")
+        )
+        if not _is_secret_placeholder(key_id):
+            updates[f"{prefix}_API_KEY_ID"] = key_id.strip()
+        if not _is_secret_placeholder(secret):
+            updates[f"{prefix}_API_SECRET_KEY"] = secret.strip()
+    return updates
+
+
+def save_alpaca_environment_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    updates = _settings_updates_from_payload(payload)
+    live_section = payload.get("live")
+    if not isinstance(live_section, dict):
+        live_section = {}
+    live_credentials_changed = not _is_secret_placeholder(
+        _optional_text(live_section.get("api_key_id") or live_section.get("apiKeyId"))
+    ) or not _is_secret_placeholder(
+        _optional_text(
+            live_section.get("api_secret_key") or live_section.get("apiSecretKey")
+        )
+    )
+    _write_env_updates(updates)
+    settings = alpaca_environment_settings()
+    if live_credentials_changed or not (
+        settings["live"]["has_api_key_id"] and settings["live"]["has_api_secret_key"]
+    ):
+        _write_env_updates({"LIVE_TRADING_ARMED": "false"})
+        settings = alpaca_environment_settings()
+    return settings
+
+
+def _config_for_alpaca_environment(environment: str) -> BotConfig:
+    environment = environment.strip().lower()
+    if environment not in {"paper", "live"}:
+        raise BotError("Environment must be paper or live.")
+    previous = os.environ.get("ALPACA_ENVIRONMENT")
+    os.environ["ALPACA_ENVIRONMENT"] = environment
+    try:
+        return replace(BotConfig.from_env(), dry_run=True)
+    finally:
+        if previous is None:
+            os.environ.pop("ALPACA_ENVIRONMENT", None)
+        else:
+            os.environ["ALPACA_ENVIRONMENT"] = previous
+
+
+def test_alpaca_connection(environment: str) -> dict[str, Any]:
+    config = _config_for_alpaca_environment(environment)
+    account = AlpacaClient(config).get_account()
+    return {
+        "environment": environment.strip().lower(),
+        "status": "ok",
+        "account_status": account.get("status"),
+        "account_number": _mask_secret(_optional_text(account.get("account_number"))),
+        "portfolio_value": _optional_text(account.get("portfolio_value")),
+        "buying_power": _optional_text(account.get("buying_power")),
+        "trading_blocked": bool(account.get("trading_blocked")),
+        "account_blocked": bool(account.get("account_blocked")),
+    }
+
+
+def set_live_trading_armed(confirmation: str) -> dict[str, Any]:
+    if confirmation != "LIVE":
+        raise BotError('Type "LIVE" to arm live trading.')
+    settings = alpaca_environment_settings()
+    if not (
+        settings["live"]["has_api_key_id"]
+        and settings["live"]["has_api_secret_key"]
+    ):
+        raise BotError("Add live API key and secret before arming live trading.")
+    _write_env_updates({"LIVE_TRADING_ARMED": "true"})
+    return alpaca_environment_settings()
+
+
+def set_live_trading_disarmed() -> dict[str, Any]:
+    _write_env_updates({"LIVE_TRADING_ARMED": "false"})
+    return alpaca_environment_settings()
+
+
 def _dominant_bot(matched_lot_bots: list[tuple[str | None, Decimal]]) -> str | None:
     totals: dict[str, Decimal] = {}
     for bot, qty in matched_lot_bots:
@@ -1129,6 +1438,11 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
     if position_allocation_percent > 100:
         raise BotError("positionAllocationPercent must be at most 100")
     dry_run = bool(payload.get("dryRun", base.dry_run))
+    if not dry_run and _live_trading_guard_required(base.trading_base_url):
+        if not live_trading_armed():
+            raise BotError(
+                'Live trading is not armed. Open Settings and type "LIVE" first.'
+            )
 
     return replace(
         base,
@@ -2033,14 +2347,36 @@ class AppHandler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self.send_json(asdict(self.runner.snapshot()))
             return
+        if self.path == "/api/settings":
+            self.require_local_ui_request()
+            self.send_json(alpaca_environment_settings())
+            return
 
         self.serve_static()
 
     def do_POST(self) -> None:
         try:
             payload = self.read_json()
+            if self.path == "/api/settings":
+                self.require_local_ui_request()
+                self.send_json(save_alpaca_environment_settings(payload))
+                return
+            if self.path == "/api/settings/test":
+                self.require_local_ui_request()
+                environment = str(payload.get("environment", "paper"))
+                self.send_json(test_alpaca_connection(environment))
+                return
+            if self.path == "/api/live-arm":
+                self.require_local_ui_request()
+                confirmation = str(payload.get("confirmation", ""))
+                self.send_json(set_live_trading_armed(confirmation))
+                return
+            if self.path == "/api/live-disarm":
+                self.require_local_ui_request()
+                self.send_json(set_live_trading_disarmed())
+                return
             if self.path == "/api/summary":
-                self.require_local_ai_request()
+                self.require_local_ui_request("AI narrative requests")
                 date_str = _optional_text(payload.get("date"))
                 timeframe = str(payload.get("timeframe", "1D")).strip().upper()
                 start_date = _optional_text(
@@ -2059,7 +2395,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/api/prompt":
-                self.require_local_ai_request()
+                self.require_local_ui_request("AI narrative requests")
                 date_str = _optional_text(payload.get("date"))
                 timeframe = str(payload.get("timeframe", "1D")).strip().upper()
                 start_date = _optional_text(
@@ -2102,13 +2438,13 @@ class AppHandler(BaseHTTPRequestHandler):
             raise BotError("JSON body must be an object")
         return data
 
-    def require_local_ai_request(self) -> None:
+    def require_local_ui_request(self, label: str = "Local app requests") -> None:
         origin = self.headers.get("Origin")
         referer = self.headers.get("Referer")
         if origin and not _is_allowed_ui_origin(origin):
-            raise BotError("AI narrative requests must come from the local EdgeWalker UI.")
+            raise BotError(f"{label} must come from the local EdgeWalker UI.")
         if not origin and not _is_allowed_ui_referer(referer):
-            raise BotError("AI narrative requests must come from the local EdgeWalker UI.")
+            raise BotError(f"{label} must come from the local EdgeWalker UI.")
 
     def serve_static(self) -> None:
         route = self.path.split("?", 1)[0]

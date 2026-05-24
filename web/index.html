@@ -15,6 +15,15 @@
         </div>
         <div class="top-actions">
           <button
+            id="settingsOpen"
+            type="button"
+            class="settings-toggle has-tooltip"
+            aria-label="Open settings"
+            data-tooltip="Configure paper and live broker connections."
+          >
+            <span aria-hidden="true">⚙</span>
+          </button>
+          <button
             id="operatorGuideOpen"
             type="button"
             class="info-toggle has-tooltip"
@@ -744,6 +753,167 @@
               supervision, and trading risk.
             </p>
           </details>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="settingsDialog"
+      class="settings-modal"
+      aria-labelledby="settingsTitle"
+    >
+      <div class="settings-card">
+        <div class="guide-head">
+          <div>
+            <p class="eyebrow">CONNECTION SETTINGS</p>
+            <h2 id="settingsTitle">Broker Readiness</h2>
+          </div>
+          <button
+            id="settingsClose"
+            type="button"
+            class="log-toggle"
+            aria-label="Close settings"
+          >
+            Close
+          </button>
+        </div>
+
+        <div class="settings-body">
+          <p id="settingsMessage" class="settings-message" role="status"></p>
+
+          <label class="settings-field">
+            <span>Active Environment</span>
+            <select id="activeEnvironmentInput" aria-label="Active broker environment">
+              <option value="paper">Paper</option>
+              <option value="live">Live</option>
+            </select>
+          </label>
+
+          <label class="settings-field">
+            <span>Market Data URL</span>
+            <input
+              id="dataBaseUrlInput"
+              type="url"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Market data base URL"
+            />
+          </label>
+
+          <label class="settings-field">
+            <span>Data Feed</span>
+            <input
+              id="dataFeedInput"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Data feed"
+            />
+          </label>
+
+          <section class="settings-group">
+            <div class="settings-group-head">
+              <h3>Paper Account</h3>
+              <button id="testPaperConnection" type="button" class="log-toggle">
+                Test Paper
+              </button>
+            </div>
+            <label class="settings-field">
+              <span>Trading URL</span>
+              <input
+                id="paperTradingUrlInput"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Paper trading base URL"
+              />
+            </label>
+            <label class="settings-field">
+              <span>API Key</span>
+              <input
+                id="paperApiKeyInput"
+                type="password"
+                autocomplete="off"
+                aria-label="Paper API key"
+              />
+            </label>
+            <label class="settings-field">
+              <span>API Secret</span>
+              <input
+                id="paperApiSecretInput"
+                type="password"
+                autocomplete="off"
+                aria-label="Paper API secret"
+              />
+            </label>
+          </section>
+
+          <section class="settings-group live-settings-group">
+            <div class="settings-group-head">
+              <h3>Live Account</h3>
+              <button id="testLiveConnection" type="button" class="log-toggle">
+                Test Live
+              </button>
+            </div>
+            <label class="settings-field">
+              <span>Trading URL</span>
+              <input
+                id="liveTradingUrlInput"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Live trading base URL"
+              />
+            </label>
+            <label class="settings-field">
+              <span>API Key</span>
+              <input
+                id="liveApiKeyInput"
+                type="password"
+                autocomplete="off"
+                aria-label="Live API key"
+              />
+            </label>
+            <label class="settings-field">
+              <span>API Secret</span>
+              <input
+                id="liveApiSecretInput"
+                type="password"
+                autocomplete="off"
+                aria-label="Live API secret"
+              />
+            </label>
+
+            <div class="live-arm-box">
+              <strong id="liveArmStatus">Live trading not armed</strong>
+              <p>
+                Live credentials may be configured early, but real live orders
+                remain blocked until this app is explicitly armed.
+              </p>
+              <div class="live-arm-row">
+                <input
+                  id="liveArmInput"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="Type LIVE"
+                  aria-label="Live arming confirmation"
+                />
+                <button id="liveArmButton" type="button" class="log-toggle">
+                  Arm Live
+                </button>
+                <button id="liveDisarmButton" type="button" class="log-toggle">
+                  Disarm
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <div class="settings-actions">
+            <button id="settingsSave" type="button" class="primary">
+              Save Settings
+            </button>
+          </div>
         </div>
       </div>
     </dialog>

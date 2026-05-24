@@ -76,6 +76,9 @@ foundation for future work.
 - Daily cycle JSONL performance snapshots with session P/L, bot-level
   performance, pending-order counts, and order-flow state
 - Pending-order and recent order/fill lifecycle visibility in the dashboard
+- Operator Guide modal for in-app usage reference
+- Settings modal foundation for paper/live broker credentials, connection tests,
+  and explicit live-trading arming
 
 ## Priority 0: Operational Truth
 
@@ -227,6 +230,26 @@ system.
   safety notes
 - Keep copy concise and operator-facing
 - Expand later with diagrams or contextual links if the UI grows more complex
+
+### Live Trading Readiness
+
+Goal: make real-money readiness explicit and guarded before the June 4, 2026
+go-live milestone.
+
+- Configure paper and live Alpaca credentials without hand-editing `.env`
+- Test broker connection for each environment
+- Show active environment clearly
+- Keep dry run and paper operation as the default path
+- Require explicit typed confirmation before live trading can be armed
+- Require live credentials before live trading can be armed
+- Provide a visible disarm control for live trading
+- Block live real-order submission unless the app is armed
+- Add future hard live guardrails:
+  - Max live order notional
+  - Max daily realized loss halt
+  - Max open exposure
+  - Closeout required before live start
+  - Session-level kill switch
 
 ### Narrative Panel
 
