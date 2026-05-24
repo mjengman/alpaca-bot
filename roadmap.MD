@@ -216,6 +216,18 @@ Optional toggle. Disabled by default until the cue set feels useful.
 - Trailing stop hit
 - Exit blocked
 
+### Operator Guide
+
+Goal: provide a lightweight in-app reference for people who did not build the
+system.
+
+- Header info button
+- Modal reference layer, not a separate manual
+- Explain bot roles, core controls, status metrics, narrative summaries, and
+  safety notes
+- Keep copy concise and operator-facing
+- Expand later with diagrams or contextual links if the UI grows more complex
+
 ### Narrative Panel
 
 Goal: turn logs into readable operating summaries without replacing raw logs.

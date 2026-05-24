@@ -30,6 +30,9 @@ const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
 const els = {
+  operatorGuideOpen: document.querySelector("#operatorGuideOpen"),
+  operatorGuideDialog: document.querySelector("#operatorGuideDialog"),
+  operatorGuideClose: document.querySelector("#operatorGuideClose"),
   themeToggle: document.querySelector("#themeToggle"),
   statusPill: document.querySelector("#statusPill"),
   statusText: document.querySelector("#statusText"),
@@ -539,6 +542,33 @@ function toggleTheme() {
     : "dark";
   applyTheme(nextTheme);
   saveTheme(nextTheme);
+}
+
+function setupOperatorGuide() {
+  if (!els.operatorGuideDialog || !els.operatorGuideOpen) return;
+  const closeGuide = () => {
+    if (els.operatorGuideDialog.open) {
+      els.operatorGuideDialog.close();
+    }
+  };
+
+  els.operatorGuideOpen.addEventListener("click", () => {
+    hideTooltip();
+    if (typeof els.operatorGuideDialog.showModal === "function") {
+      els.operatorGuideDialog.showModal();
+    } else {
+      els.operatorGuideDialog.setAttribute("open", "");
+    }
+  });
+
+  if (els.operatorGuideClose) {
+    els.operatorGuideClose.addEventListener("click", closeGuide);
+  }
+  els.operatorGuideDialog.addEventListener("click", (event) => {
+    if (event.target === els.operatorGuideDialog) {
+      closeGuide();
+    }
+  });
 }
 
 function saveLogCollapsed(collapsed) {
@@ -1540,6 +1570,7 @@ if (els.themeToggle) {
 }
 
 setupTheme();
+setupOperatorGuide();
 setupActivityLog();
 setupTooltips();
 refresh();

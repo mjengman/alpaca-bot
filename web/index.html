@@ -15,6 +15,15 @@
         </div>
         <div class="top-actions">
           <button
+            id="operatorGuideOpen"
+            type="button"
+            class="info-toggle has-tooltip"
+            aria-label="Open operator guide"
+            data-tooltip="Open the EdgeWalker operator guide."
+          >
+            <span aria-hidden="true">i</span>
+          </button>
+          <button
             id="themeToggle"
             type="button"
             class="theme-toggle has-tooltip"
@@ -653,6 +662,91 @@
         </div>
       </section>
     </main>
+
+    <dialog
+      id="operatorGuideDialog"
+      class="guide-modal"
+      aria-labelledby="operatorGuideTitle"
+    >
+      <div class="guide-card">
+        <div class="guide-head">
+          <div>
+            <p class="eyebrow">OPERATOR GUIDE</p>
+            <h2 id="operatorGuideTitle">EdgeWalker Reference</h2>
+          </div>
+          <button
+            id="operatorGuideClose"
+            type="button"
+            class="log-toggle"
+            aria-label="Close operator guide"
+          >
+            Close
+          </button>
+        </div>
+
+        <div class="guide-body">
+          <details open>
+            <summary>What EdgeWalker Does</summary>
+            <p>
+              EdgeWalker watches SOXL, classifies the market as uptrend,
+              sideways, or downtrend, and routes the decision to a specialist
+              bot. It can enter, manage a trailing exit, close stale exposures,
+              and stop taking new entries near the closeout window.
+            </p>
+          </details>
+
+          <details>
+            <summary>Bot Roles</summary>
+            <p>
+              MomentumBot buys SOXL when the trend is up. ChopBot buys SOXL
+              only when a sideways market offers enough discount to the slow
+              SMA. InverseBot buys SOXS when SOXL is in a downtrend.
+            </p>
+          </details>
+
+          <details>
+            <summary>Key Controls</summary>
+            <p>
+              Directional mode controls how selective trend entries are.
+              Position sizing chooses fixed dollars or a percent of buying
+              power. Trail percent controls the protective trailing exit.
+              Regime gap and regime exit tune trend routing and hysteresis.
+              Chop discount controls how deep a sideways pullback must be.
+            </p>
+          </details>
+
+          <details>
+            <summary>Status And Metrics</summary>
+            <p>
+              Regime, Active bot, Routed, and Action explain the current
+              decision path. Broker state and Order Flow show execution
+              constraints. Session P/L, Position P/L, and Bot Performance
+              separate account movement from strategy behavior.
+            </p>
+          </details>
+
+          <details>
+            <summary>Narrative And Analysis</summary>
+            <p>
+              Narrative turns selected logs into a readable debrief. Analysis
+              is advisory: it can suggest what to watch or test next, but it
+              should not be treated as automatic tuning or a profitability
+              claim.
+            </p>
+          </details>
+
+          <details>
+            <summary>Safety Notes</summary>
+            <p>
+              EdgeWalker is an operator tool, not financial advice. Leveraged
+              ETFs can move quickly, paper results do not guarantee live
+              outcomes, and the operator remains responsible for configuration,
+              supervision, and trading risk.
+            </p>
+          </details>
+        </div>
+      </div>
+    </dialog>
 
     <script src="app.js"></script>
   </body>
