@@ -30,10 +30,12 @@ from server import (
     _current_ny_activity,
     _cycle_log_record,
     _daily_log_path,
+    _display_date_label,
     _extract_session_context,
     _format_regime_transition,
     _is_allowed_ui_origin,
     _most_recent_log_date,
+    _parse_narrative_response,
     build_summary_prompt,
     config_from_payload,
     lifecycle_performance_summary,
@@ -416,7 +418,41 @@ class ServerLoggingTest(unittest.TestCase):
                 prompt = build_summary_prompt()
 
         self.assertEqual(prompt["date"], "2026-05-22")
+        self.assertEqual(prompt["display_date"], "May 22 2026")
         self.assertIn("MARKET: OPEN", prompt["prompt"])
+        self.assertIn('"tldr"', prompt["prompt"])
+
+    def test_custom_summary_prompt_uses_inclusive_log_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_root = Path(tmpdir) / "logs"
+            logs_root.mkdir()
+            for day in ("2026-05-22", "2026-05-24"):
+                (logs_root / f"edgewalker-{day}.jsonl").write_text(
+                    json.dumps(
+                        {
+                            "timestamp": f"{day}T14:30:00Z",
+                            "market_open": True,
+                            "regime": "SIDEWAYS",
+                            "source_price": "101",
+                            "config": {"dry_run": False},
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+            with patch("server.LOGS_ROOT", logs_root):
+                prompt = build_summary_prompt(
+                    timeframe="CUSTOM",
+                    start_date="2026-05-22",
+                    end_date="2026-05-24",
+                )
+
+        self.assertEqual(prompt["date"], "2026-05-22 to 2026-05-24")
+        self.assertEqual(prompt["display_date"], "May 22 2026 to May 24 2026")
+        self.assertIn("PERIOD: 2026-05-22 to 2026-05-24 (CUSTOM)", prompt["prompt"])
+        self.assertIn("2026-05-22 [PAPER LIVE]", prompt["prompt"])
+        self.assertIn("2026-05-24 [PAPER LIVE]", prompt["prompt"])
 
     def test_session_context_uses_lifecycle_order_actions(self) -> None:
         records = [
@@ -496,6 +532,51 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertTrue(_is_allowed_ui_origin("http://127.0.0.1:8765"))
         self.assertTrue(_is_allowed_ui_origin("http://localhost:8765"))
         self.assertFalse(_is_allowed_ui_origin("https://example.com"))
+
+    def test_display_date_label_formats_period_dates(self) -> None:
+        self.assertEqual(_display_date_label("2026-05-22"), "May 22 2026")
+        self.assertEqual(
+            _display_date_label("2026-05-22 to 2026-05-24"),
+            "May 22 2026 to May 24 2026",
+        )
+
+    def test_parse_narrative_response_normalizes_json(self) -> None:
+        parsed = _parse_narrative_response(
+            json.dumps(
+                {
+                    "tldr": "Brief read.",
+                    "highlight": "Churn stood out.",
+                    "bot_performance": {
+                        "MomentumBot": "Caught uptrends.",
+                        "ChopBot": "Handled ranges.",
+                    },
+                    "market_conditions": "Mixed.",
+                    "operational_issues": "One rejection.",
+                    "analysis": "Watch hysteresis before changing thresholds.",
+                    "bottom_line": "Useful session.",
+                }
+            )
+        )
+
+        self.assertEqual(parsed["tldr"], "Brief read.")
+        self.assertEqual(parsed["bot_performance"][MOMENTUM_BOT], "Caught uptrends.")
+        self.assertEqual(parsed["bot_performance"][INVERSE_BOT], "")
+        self.assertEqual(parsed["analysis"], "Watch hysteresis before changing thresholds.")
+        self.assertEqual(parsed["bottom_line"], "Useful session.")
+
+    def test_parse_narrative_response_preserves_plain_text_as_bottom_line(self) -> None:
+        parsed = _parse_narrative_response("Plain debrief text.")
+
+        self.assertEqual(parsed["tldr"], "")
+        self.assertEqual(parsed["bottom_line"], "Plain debrief text.")
+
+    def test_parse_narrative_response_accepts_fenced_json(self) -> None:
+        parsed = _parse_narrative_response(
+            '```json\n{"tldr": "Brief read.", "bottom_line": "Useful session."}\n```'
+        )
+
+        self.assertEqual(parsed["tldr"], "Brief read.")
+        self.assertEqual(parsed["bottom_line"], "Useful session.")
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

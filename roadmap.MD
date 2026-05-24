@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -232,6 +232,7 @@ Goal: turn logs into readable operating summaries without replacing raw logs.
   - User-triggered log summary request
   - Structured prompt over selected logs
   - Render returned narrative in-app
+  - Include a cautious Analysis section with operator-facing tuning ideas
 - Later:
   - Archived debrief history
   - Notable event extraction
@@ -320,6 +321,17 @@ Basic hysteresis exists. Future controls may include:
 - Separate uptrend and downtrend thresholds
 - Volatility-adjusted thresholds
 
+### Strategy Lab / Tuning Console
+
+Future optional workspace for turning debrief analysis into experiments, not
+automatic production changes.
+
+- Compare candidate parameter sets against replay/simulation results
+- Track AI-generated tuning ideas as advisory hypotheses
+- Link recommendations to supporting evidence from logs and lifecycle metrics
+- Mark ideas as watch, test, accepted, rejected, or deferred
+- Keep production parameter changes explicit and operator-approved
+
 ## Future Architecture
 
 These are important, but should follow the operational truth phase.
@@ -328,6 +340,7 @@ These are important, but should follow the operational truth phase.
 - Trade journal export
 - Replay and simulation engine
 - Session replay and timeline scrubbing
+- Lab / tuning console for parameter experiments
 - Multi-position support
 - Multi-symbol routing
 - Arena / competing bots

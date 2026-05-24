@@ -626,6 +626,17 @@
               <button class="timeframe-btn" data-timeframe="3M">3M</button>
               <button class="timeframe-btn" data-timeframe="YTD">YTD</button>
               <button class="timeframe-btn" data-timeframe="MAX">MAX</button>
+              <button class="timeframe-btn" data-timeframe="CUSTOM">Custom</button>
+            </div>
+            <div id="customRange" class="custom-range" hidden>
+              <label>
+                <span>From</span>
+                <input id="customStartDate" type="date" aria-label="Custom start date" />
+              </label>
+              <label>
+                <span>To</span>
+                <input id="customEndDate" type="date" aria-label="Custom end date" />
+              </label>
             </div>
             <button
               id="narrativeGenerate"

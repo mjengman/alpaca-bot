@@ -57,11 +57,26 @@ NY_TZ = ZoneInfo("America/New_York")
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
-VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX"}
+VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
 ALLOWED_UI_ORIGINS = {
     f"http://{HOST}:{PORT}",
     f"http://localhost:{PORT}",
 }
+MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+NARRATIVE_BOTS = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 
 
 @dataclass
@@ -1454,6 +1469,119 @@ def _trade_price_text(trade: dict[str, Any]) -> str:
     return f" @ ${price}" if price else ""
 
 
+def _display_date_text(date_text: str) -> str:
+    try:
+        parsed = datetime.strptime(date_text, "%Y-%m-%d")
+    except ValueError:
+        return date_text
+    return f"{MONTH_NAMES[parsed.month - 1]} {parsed.day} {parsed.year}"
+
+
+def _display_date_label(date_label: str) -> str:
+    if " to " not in date_label:
+        return _display_date_text(date_label)
+    start, end = date_label.split(" to ", 1)
+    return f"{_display_date_text(start)} to {_display_date_text(end)}"
+
+
+def _narrative_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _narrative_bot_performance(value: Any) -> dict[str, str]:
+    result = {bot: "" for bot in NARRATIVE_BOTS}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            bot = str(key)
+            result[bot] = _narrative_text(item)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                bot = _narrative_text(item.get("bot") or item.get("name"))
+                summary = _narrative_text(
+                    item.get("summary")
+                    or item.get("blurb")
+                    or item.get("performance")
+                    or item.get("text")
+                )
+                if bot:
+                    result[bot] = summary
+            elif item:
+                result.setdefault("Overall", "")
+                result["Overall"] = " ".join(
+                    part for part in (result["Overall"], _narrative_text(item)) if part
+                )
+    elif value:
+        result["Overall"] = _narrative_text(value)
+    return {bot: summary for bot, summary in result.items() if summary or bot in NARRATIVE_BOTS}
+
+
+def _extract_json_object_text(raw: str) -> str:
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        return stripped[start : end + 1]
+    return stripped
+
+
+def _empty_narrative_sections() -> dict[str, Any]:
+    return {
+        "tldr": "",
+        "highlight": "",
+        "bot_performance": {bot: "" for bot in NARRATIVE_BOTS},
+        "market_conditions": "",
+        "operational_issues": "",
+        "analysis": "",
+        "bottom_line": "",
+    }
+
+
+def _parse_narrative_response(raw: str) -> dict[str, Any]:
+    cleaned = _extract_json_object_text(raw)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        sections = _empty_narrative_sections()
+        sections["bottom_line"] = cleaned.strip()
+        return sections
+    if not isinstance(parsed, dict):
+        sections = _empty_narrative_sections()
+        sections["bottom_line"] = raw.strip()
+        return sections
+
+    sections = _empty_narrative_sections()
+    sections["tldr"] = _narrative_text(parsed.get("tldr") or parsed.get("tl_dr"))
+    sections["highlight"] = _narrative_text(parsed.get("highlight"))
+    sections["bot_performance"] = _narrative_bot_performance(
+        parsed.get("bot_performance") or parsed.get("botPerformance")
+    )
+    sections["market_conditions"] = _narrative_text(
+        parsed.get("market_conditions") or parsed.get("marketConditions")
+    )
+    sections["operational_issues"] = _narrative_text(
+        parsed.get("operational_issues") or parsed.get("operationalIssues")
+    )
+    sections["analysis"] = _narrative_text(parsed.get("analysis"))
+    sections["bottom_line"] = _narrative_text(
+        parsed.get("bottom_line") or parsed.get("bottomLine")
+    )
+    return sections
+
+
 def _build_summary_prompt(context: dict[str, Any]) -> str:
     session = context.get("session", {})
     config = context.get("config", {})
@@ -1544,13 +1672,24 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
 
     parts += [
         "---",
-        "Write a concise trading debrief for the operator. 3–4 short paragraphs covering:",
-        "  1. Market conditions — how did SOXL trend? What regimes dominated?",
-        "  2. Bot decisions — what entries/exits happened, and what was blocked?",
-        "  3. Operational issues — any errors, rejections, or data problems worth noting?",
-        "  4. Bottom line — how did the session go overall?",
+        "Return valid JSON only. Do not use markdown. Do not include any text outside the JSON object.",
+        "Use exactly these keys:",
+        "{",
+        '  "tldr": "One very brief one-sentence summary.",',
+        '  "highlight": "What was especially noteworthy for this session.",',
+        '  "bot_performance": {',
+        '    "MomentumBot": "Short behavior/performance blurb.",',
+        '    "ChopBot": "Short behavior/performance blurb.",',
+        '    "InverseBot": "Short behavior/performance blurb."',
+        "  },",
+        '  "market_conditions": "How the market behaved: trend/range, price action, regime churn.",',
+        '  "operational_issues": "Errors, rejections, stale data, missing data, or none noted.",',
+        '  "analysis": "Cautious operator-facing tuning ideas, or say evidence is too thin to recommend changes.",',
+        '  "bottom_line": "Plain-English judgment of how the session went overall."',
+        "}",
         "",
-        "Style: plain prose, operator-facing, direct. No bullet lists. No headers. No markdown formatting. No fluff.",
+        "Be direct and operator-facing. If exact bot-level P/L is not available, say what can be inferred from behavior and do not invent profitability.",
+        "For analysis, do not claim optimal settings. Recommend parameter changes only when repeated evidence supports them; otherwise suggest what to watch next session.",
     ]
 
     return "\n".join(parts)
@@ -1597,6 +1736,31 @@ def _date_range_for_timeframe(timeframe: str) -> tuple[str, str]:
     else:  # MAX
         start = _date(2000, 1, 1)
     return start.isoformat(), today.isoformat()
+
+
+def _validate_log_date(value: str, field_name: str) -> str:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise BotError(f"{field_name} must use YYYY-MM-DD format.") from exc
+    return value
+
+
+def _resolve_custom_date_range(
+    start_date: str | None,
+    end_date: str | None,
+) -> tuple[str, str]:
+    start = _optional_text(start_date)
+    end = _optional_text(end_date)
+    if not start and not end:
+        raise BotError("Custom summaries require a start date or end date.")
+    start = start or end
+    end = end or start
+    start = _validate_log_date(start, "Start date")
+    end = _validate_log_date(end, "End date")
+    if start > end:
+        raise BotError("Start date must be on or before end date.")
+    return start, end
 
 
 def _find_log_files_in_range(start_date: str, end_date: str) -> list[Path]:
@@ -1652,7 +1816,7 @@ def _build_period_prompt(
         "  InverseBot — buys SOXS when the trend is down",
         "  ChopBot — buys SOXL at a discount to the slow SMA when the market is sideways",
         "",
-        f"PERIOD: {period_label} ({timeframe}) | {context['day_count']} trading day(s) with data",
+        f"PERIOD: {period_label} ({timeframe}) | {context['day_count']} day(s) with log data",
         f"TOTAL CYCLES: {context['total_cycles']} | TOTAL TRADES: {context['total_trades']}"
         f" | TOTAL ERRORS: {context['total_errors']}",
         "",
@@ -1698,14 +1862,24 @@ def _build_period_prompt(
     parts += [
         "",
         "---",
-        f"Write a concise trading debrief for the {timeframe} period. 3–5 short paragraphs covering:",
-        "  1. Overall market conditions — what regimes dominated and how did SOXL move?",
-        "  2. Bot behavior — what trades happened, what patterns or tendencies emerged?",
-        "  3. Operational issues — any recurring errors, rejections, or anomalies worth noting?",
-        "  4. Bottom line — how did the period go overall? Any trends the operator should watch?",
+        "Return valid JSON only. Do not use markdown. Do not include any text outside the JSON object.",
+        "Use exactly these keys:",
+        "{",
+        '  "tldr": "One very brief one-sentence summary.",',
+        '  "highlight": "What was especially noteworthy for this period.",',
+        '  "bot_performance": {',
+        '    "MomentumBot": "Short behavior/performance blurb.",',
+        '    "ChopBot": "Short behavior/performance blurb.",',
+        '    "InverseBot": "Short behavior/performance blurb."',
+        "  },",
+        '  "market_conditions": "How the market behaved across the period.",',
+        '  "operational_issues": "Errors, rejections, stale data, missing data, or none noted.",',
+        '  "analysis": "Cautious operator-facing tuning ideas, or say evidence is too thin to recommend changes.",',
+        '  "bottom_line": "Plain-English judgment of how the period went overall."',
+        "}",
         "",
-        "Style: plain prose, operator-facing, direct. No bullet lists. No headers."
-        " No markdown formatting. No fluff.",
+        "Be direct and operator-facing. If exact bot-level P/L is not available, say what can be inferred from behavior and do not invent profitability.",
+        "For analysis, do not claim optimal settings. Recommend parameter changes only when repeated evidence supports them; otherwise suggest what to watch next session.",
     ]
     return "\n".join(parts)
 
@@ -1713,6 +1887,8 @@ def _build_period_prompt(
 def generate_session_summary(
     date: str | None = None,
     timeframe: str = "1D",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -1736,16 +1912,21 @@ def generate_session_summary(
             LifecycleLedger().read_all(),
         )
         prompt = _build_summary_prompt(context)
-        narrative = _call_openai(prompt, api_key)
+        raw_narrative = _call_openai(prompt, api_key)
         return {
-            "summary": narrative,
+            "summary": raw_narrative,
+            "narrative": _parse_narrative_response(raw_narrative),
             "date": target_date,
+            "display_date": _display_date_label(target_date),
             "cycle_count": len(records),
             "generated_at": now_iso(),
         }
 
-    # Multi-day timeframes
-    start_date, end_date = _date_range_for_timeframe(timeframe)
+    # Multi-day and custom timeframes
+    if timeframe == "CUSTOM":
+        start_date, end_date = _resolve_custom_date_range(start_date, end_date)
+    else:
+        start_date, end_date = _date_range_for_timeframe(timeframe)
     log_files = _find_log_files_in_range(start_date, end_date)
     if not log_files:
         raise BotError(
@@ -1755,15 +1936,17 @@ def generate_session_summary(
     if not context["days"]:
         raise BotError(f"No usable session data found for {timeframe}.")
     prompt = _build_period_prompt(context, timeframe, (start_date, end_date))
-    narrative = _call_openai(prompt, api_key)
+    raw_narrative = _call_openai(prompt, api_key)
     actual_start = context["days"][0]["session"]["date"]
     actual_end = context["days"][-1]["session"]["date"]
     date_label = (
         f"{actual_start} to {actual_end}" if actual_start != actual_end else actual_start
     )
     return {
-        "summary": narrative,
+        "summary": raw_narrative,
+        "narrative": _parse_narrative_response(raw_narrative),
         "date": date_label,
+        "display_date": _display_date_label(date_label),
         "cycle_count": context["total_cycles"],
         "generated_at": now_iso(),
     }
@@ -1772,6 +1955,8 @@ def generate_session_summary(
 def build_summary_prompt(
     date: str | None = None,
     timeframe: str = "1D",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     """Return the raw prompt that would be sent to OpenAI, without calling it."""
     if timeframe not in VALID_TIMEFRAMES:
@@ -1790,9 +1975,17 @@ def build_summary_prompt(
             LifecycleLedger().read_all(),
         )
         prompt = _build_summary_prompt(context)
-        return {"timeframe": timeframe, "date": target_date, "prompt": prompt}
+        return {
+            "timeframe": timeframe,
+            "date": target_date,
+            "display_date": _display_date_label(target_date),
+            "prompt": prompt,
+        }
 
-    start_date, end_date = _date_range_for_timeframe(timeframe)
+    if timeframe == "CUSTOM":
+        start_date, end_date = _resolve_custom_date_range(start_date, end_date)
+    else:
+        start_date, end_date = _date_range_for_timeframe(timeframe)
     log_files = _find_log_files_in_range(start_date, end_date)
     if not log_files:
         raise BotError(
@@ -1807,7 +2000,12 @@ def build_summary_prompt(
     date_label = (
         f"{actual_start} to {actual_end}" if actual_start != actual_end else actual_start
     )
-    return {"timeframe": timeframe, "date": date_label, "prompt": prompt}
+    return {
+        "timeframe": timeframe,
+        "date": date_label,
+        "display_date": _display_date_label(date_label),
+        "prompt": prompt,
+    }
 
 
 def _is_allowed_ui_origin(origin: str | None) -> bool:
@@ -1845,13 +2043,39 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.require_local_ai_request()
                 date_str = _optional_text(payload.get("date"))
                 timeframe = str(payload.get("timeframe", "1D")).strip().upper()
-                self.send_json(generate_session_summary(date_str, timeframe))
+                start_date = _optional_text(
+                    payload.get("start_date") or payload.get("startDate")
+                )
+                end_date = _optional_text(
+                    payload.get("end_date") or payload.get("endDate")
+                )
+                self.send_json(
+                    generate_session_summary(
+                        date_str,
+                        timeframe,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                )
                 return
             if self.path == "/api/prompt":
                 self.require_local_ai_request()
                 date_str = _optional_text(payload.get("date"))
                 timeframe = str(payload.get("timeframe", "1D")).strip().upper()
-                self.send_json(build_summary_prompt(date_str, timeframe))
+                start_date = _optional_text(
+                    payload.get("start_date") or payload.get("startDate")
+                )
+                end_date = _optional_text(
+                    payload.get("end_date") or payload.get("endDate")
+                )
+                self.send_json(
+                    build_summary_prompt(
+                        date_str,
+                        timeframe,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                )
                 return
             if self.path == "/api/start":
                 snapshot = self.runner.start(config_from_payload(payload))

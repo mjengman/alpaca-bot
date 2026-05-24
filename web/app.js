@@ -11,8 +11,13 @@ const state = {
   lastSizingValue: "FIXED",
   activeTab: "activity",
   narrativeTimeframe: "1D",
+  narrativeCustomStart: "",
+  narrativeCustomEnd: "",
+  narrativeCache: {},
   narrativeText: null,
+  narrativeSections: null,
   narrativeDate: null,
+  narrativeDisplayDate: null,
   narrativeCycles: null,
   narrativeLoading: false,
 };
@@ -20,6 +25,7 @@ const state = {
 const THEME_KEY = "edgewalker-theme";
 const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
+const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v1";
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
@@ -81,6 +87,9 @@ const els = {
   narrativeGenerate: document.querySelector("#narrativeGenerate"),
   narrativeOutput: document.querySelector("#narrativeOutput"),
   narrativeContent: document.querySelector("#narrativeContent"),
+  customRange: document.querySelector("#customRange"),
+  customStartDate: document.querySelector("#customStartDate"),
+  customEndDate: document.querySelector("#customEndDate"),
   log: document.querySelector("#logOutput"),
 };
 
@@ -667,21 +676,233 @@ function switchTab(tab) {
   }
 }
 
-function renderNarrative() {
-  if (!els.narrativeContent) return;
-  if (!state.narrativeText) {
-    els.narrativeContent.innerHTML =
-      '<p class="narrative-empty">Hit Generate to create an AI debrief of the most recent session.</p>';
+function localDateInputValue(date = new Date()) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function loadNarrativeCache() {
+  try {
+    const raw = window.sessionStorage.getItem(NARRATIVE_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    state.narrativeCache = parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    state.narrativeCache = {};
+  }
+}
+
+function persistNarrativeCache() {
+  try {
+    window.sessionStorage.setItem(
+      NARRATIVE_CACHE_KEY,
+      JSON.stringify(state.narrativeCache),
+    );
+  } catch {
+    // Session storage is a convenience cache; losing it should not block use.
+  }
+}
+
+function ensureCustomDateDefaults() {
+  const today = localDateInputValue();
+  if (!state.narrativeCustomStart) {
+    state.narrativeCustomStart = today;
+  }
+  if (!state.narrativeCustomEnd) {
+    state.narrativeCustomEnd = state.narrativeCustomStart;
+  }
+  if (els.customStartDate) {
+    els.customStartDate.value = state.narrativeCustomStart;
+  }
+  if (els.customEndDate) {
+    els.customEndDate.value = state.narrativeCustomEnd;
+  }
+}
+
+function narrativeSelectionKey() {
+  if (state.narrativeTimeframe === "CUSTOM") {
+    return `CUSTOM:${state.narrativeCustomStart || ""}:${state.narrativeCustomEnd || ""}`;
+  }
+  return state.narrativeTimeframe;
+}
+
+function clearNarrativeState() {
+  state.narrativeText = null;
+  state.narrativeSections = null;
+  state.narrativeDate = null;
+  state.narrativeDisplayDate = null;
+  state.narrativeCycles = null;
+}
+
+function applyNarrativeSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    clearNarrativeState();
     return;
   }
-  const meta = state.narrativeDate
-    ? `<p class="narrative-meta">${escapeHtml(state.narrativeDate)} · ${state.narrativeCycles || "?"} cycles</p>`
+  state.narrativeSections = normalizeNarrativeSections(snapshot.sections);
+  state.narrativeDate = snapshot.date || null;
+  state.narrativeDisplayDate = snapshot.displayDate || null;
+  state.narrativeCycles = snapshot.cycles || null;
+  state.narrativeText = state.narrativeSections
+    ? narrativeCopyText()
+    : legacyNarrativeText(snapshot.text);
+}
+
+function currentNarrativeSnapshot() {
+  return {
+    text: state.narrativeText,
+    sections: state.narrativeSections,
+    date: state.narrativeDate,
+    displayDate: state.narrativeDisplayDate,
+    cycles: state.narrativeCycles,
+    savedAt: new Date().toISOString(),
+  };
+}
+
+function saveCurrentNarrativeToCache() {
+  if (!state.narrativeText && !state.narrativeSections) return;
+  state.narrativeCache[narrativeSelectionKey()] = currentNarrativeSnapshot();
+  persistNarrativeCache();
+}
+
+function updateNarrativeGenerateButton() {
+  if (!els.narrativeGenerate || state.narrativeLoading) return;
+  els.narrativeGenerate.textContent =
+    state.narrativeText || state.narrativeSections ? "Regenerate" : "Generate";
+}
+
+function renderNarrativeControls() {
+  const isCustom = state.narrativeTimeframe === "CUSTOM";
+  if (isCustom) {
+    ensureCustomDateDefaults();
+  }
+  if (els.customRange) {
+    els.customRange.hidden = !isCustom;
+  }
+  document.querySelectorAll(".timeframe-btn").forEach((btn) => {
+    btn.classList.toggle(
+      "is-active",
+      btn.dataset.timeframe === state.narrativeTimeframe,
+    );
+  });
+}
+
+function restoreNarrativeForSelection() {
+  const snapshot = state.narrativeCache[narrativeSelectionKey()];
+  if (snapshot) {
+    applyNarrativeSnapshot(snapshot);
+  } else {
+    clearNarrativeState();
+  }
+  renderNarrative();
+  updateNarrativeGenerateButton();
+}
+
+function renderNarrative() {
+  if (!els.narrativeContent) return;
+  if (!state.narrativeText && !state.narrativeSections) {
+    els.narrativeContent.innerHTML =
+      '<p class="narrative-empty">No narrative generated yet.</p>';
+    return;
+  }
+  const metaLabel = state.narrativeDisplayDate || state.narrativeDate;
+  const meta = metaLabel
+    ? `<p class="narrative-meta">${escapeHtml(metaLabel)} · ${state.narrativeCycles || "?"} cycles</p>`
     : "";
-  const body = state.narrativeText
-    .split(/\n\n+/)
-    .map((p) => `<p>${escapeHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
+  if (!state.narrativeSections) {
+    const body = (state.narrativeText || "")
+      .split(/\n\n+/)
+      .map((p) => `<p>${escapeHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
+      .join("");
+    els.narrativeContent.innerHTML = meta + body;
+    return;
+  }
+
+  const sections = state.narrativeSections;
+  const botPerformance = renderNarrativeBotPerformance(sections.bot_performance);
+  const html = [
+    meta,
+    sections.tldr
+      ? `<section class="narrative-tldr"><strong>TL;DR:</strong> ${escapeHtml(sections.tldr)}</section>`
+      : "",
+    narrativeSectionHtml("Highlight", sections.highlight),
+    botPerformance
+      ? `<section class="narrative-section"><h3>Bot Performance</h3>${botPerformance}</section>`
+      : "",
+    narrativeSectionHtml("Market Conditions", sections.market_conditions),
+    narrativeSectionHtml("Operational Issues", sections.operational_issues),
+    narrativeSectionHtml("Analysis", sections.analysis),
+    narrativeSectionHtml("Bottom Line", sections.bottom_line),
+  ].join("");
+  els.narrativeContent.innerHTML = html || meta;
+}
+
+function narrativeSectionHtml(title, text) {
+  if (!text) return "";
+  return `<section class="narrative-section"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text).replace(/\n/g, "<br>")}</p></section>`;
+}
+
+function renderNarrativeBotPerformance(botPerformance) {
+  if (!botPerformance) return "";
+  if (typeof botPerformance === "string") {
+    return `<p>${escapeHtml(botPerformance)}</p>`;
+  }
+  return Object.entries(botPerformance)
+    .filter(([, text]) => text)
+    .map(
+      ([bot, text]) =>
+        `<div class="narrative-bot-row"><strong>${escapeHtml(bot)}</strong><span>${escapeHtml(String(text))}</span></div>`,
+    )
     .join("");
-  els.narrativeContent.innerHTML = meta + body;
+}
+
+function narrativeCopyText() {
+  const metaLabel = state.narrativeDisplayDate || state.narrativeDate;
+  const meta = metaLabel
+    ? `${metaLabel} · ${state.narrativeCycles || "?"} cycles`
+    : "";
+  if (!state.narrativeSections) {
+    return [meta, state.narrativeText || ""].filter(Boolean).join("\n\n");
+  }
+  const sections = state.narrativeSections;
+  const botLines = sections.bot_performance && typeof sections.bot_performance === "object"
+    ? Object.entries(sections.bot_performance)
+        .filter(([, text]) => text)
+        .map(([bot, text]) => `${bot}: ${text}`)
+        .join("\n")
+    : (sections.bot_performance || "");
+  return [
+    meta,
+    sections.tldr ? `TL;DR: ${sections.tldr}` : "",
+    sections.highlight ? `Highlight: ${sections.highlight}` : "",
+    botLines ? `Bot Performance:\n${botLines}` : "",
+    sections.market_conditions ? `Market Conditions: ${sections.market_conditions}` : "",
+    sections.operational_issues ? `Operational Issues: ${sections.operational_issues}` : "",
+    sections.analysis ? `Analysis: ${sections.analysis}` : "",
+    sections.bottom_line ? `Bottom Line: ${sections.bottom_line}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function normalizeNarrativeSections(sections) {
+  if (!sections || typeof sections !== "object") return null;
+  return {
+    tldr: sections.tldr || "",
+    highlight: sections.highlight || "",
+    bot_performance: sections.bot_performance || null,
+    market_conditions: sections.market_conditions || "",
+    operational_issues: sections.operational_issues || "",
+    analysis: sections.analysis || "",
+    bottom_line: sections.bottom_line || "",
+  };
+}
+
+function legacyNarrativeText(text) {
+  return (text || "")
+    .split(/\n\n+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 async function generateNarrative() {
@@ -696,13 +917,27 @@ async function generateNarrative() {
       '<p class="narrative-loading">Generating session debrief…</p>';
   }
   try {
+    const payload = { timeframe: state.narrativeTimeframe };
+    if (state.narrativeTimeframe === "CUSTOM") {
+      state.narrativeCustomStart =
+        els.customStartDate?.value || state.narrativeCustomStart;
+      state.narrativeCustomEnd =
+        els.customEndDate?.value || state.narrativeCustomEnd;
+      payload.start_date = state.narrativeCustomStart;
+      payload.end_date = state.narrativeCustomEnd;
+    }
     const data = await request("/api/summary", {
       method: "POST",
-      body: JSON.stringify({ timeframe: state.narrativeTimeframe }),
+      body: JSON.stringify(payload),
     });
-    state.narrativeText = data.summary;
+    state.narrativeSections = normalizeNarrativeSections(data.narrative);
     state.narrativeDate = data.date;
+    state.narrativeDisplayDate = data.display_date;
     state.narrativeCycles = data.cycle_count;
+    state.narrativeText = state.narrativeSections
+      ? narrativeCopyText()
+      : legacyNarrativeText(data.summary);
+    saveCurrentNarrativeToCache();
     renderNarrative();
   } catch (error) {
     if (els.narrativeContent) {
@@ -710,16 +945,15 @@ async function generateNarrative() {
     }
   } finally {
     state.narrativeLoading = false;
+    updateNarrativeGenerateButton();
     if (els.narrativeGenerate) {
-      els.narrativeGenerate.textContent = state.narrativeText
-        ? "Regenerate"
-        : "Generate";
       els.narrativeGenerate.disabled = false;
     }
   }
 }
 
 function setupActivityLog() {
+  loadNarrativeCache();
   setLogExpanded(loadLogExpanded());
   setLogCollapsed(loadLogCollapsed());
   if (els.activityCopy) {
@@ -750,19 +984,29 @@ function setupActivityLog() {
       const tf = btn.dataset.timeframe;
       if (!tf || tf === state.narrativeTimeframe) return;
       state.narrativeTimeframe = tf;
-      // Clear stale narrative so the placeholder re-appears
-      state.narrativeText = null;
-      state.narrativeDate = null;
-      state.narrativeCycles = null;
-      renderNarrative();
-      if (els.narrativeGenerate) {
-        els.narrativeGenerate.textContent = "Generate";
-      }
-      document.querySelectorAll(".timeframe-btn").forEach((b) => {
-        b.classList.toggle("is-active", b.dataset.timeframe === tf);
-      });
+      renderNarrativeControls();
+      restoreNarrativeForSelection();
     });
   });
+  const syncCustomDates = () => {
+    if (els.customStartDate) {
+      state.narrativeCustomStart = els.customStartDate.value;
+    }
+    if (els.customEndDate) {
+      state.narrativeCustomEnd = els.customEndDate.value;
+    }
+    restoreNarrativeForSelection();
+  };
+  if (els.customStartDate) {
+    els.customStartDate.addEventListener("input", syncCustomDates);
+    els.customStartDate.addEventListener("change", syncCustomDates);
+  }
+  if (els.customEndDate) {
+    els.customEndDate.addEventListener("input", syncCustomDates);
+    els.customEndDate.addEventListener("change", syncCustomDates);
+  }
+  renderNarrativeControls();
+  restoreNarrativeForSelection();
 }
 
 function numberOrNull(value) {
