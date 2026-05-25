@@ -31,6 +31,7 @@ from bot import (
     LIFECYCLE_POSITION_CLOSED,
     LIFECYCLE_POSITION_OPENED,
     LIFECYCLE_POSITION_MANAGED,
+    LIFECYCLE_ADAPTIVE_POSTURE_SELECTED,
     LifecycleLedger,
     _last_completed_bar_end,
     bar_end_age_seconds,
@@ -62,6 +63,7 @@ def config() -> BotConfig:
         directional_strong_chase_max_extension_percent=Decimal("1.00"),
         directional_min_strength="MODERATE",
         directional_cooldown_minutes=5,
+        adaptive_shadow_enabled=False,
         data_feed="iex",
         dry_run=True,
     )
@@ -807,6 +809,70 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "MomentumBot")
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_adaptive_directional_selects_aggressive_for_strong_clean_trend(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "102", "103.2")})
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            bot_config=replace(config(), directional_mode="ADAPTIVE"),
+        )
+
+        self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
+        self.assertIn("[ADAPTIVE] posture=AGGRESSIVE", output)
+        self.assertIn("scope=ACTIVE", output)
+        self.assertIn("mode=AGGRESSIVE", output)
+        self.assertEqual(status.directional_mode, "ADAPTIVE")
+        self.assertEqual(status.effective_directional_mode, "AGGRESSIVE")
+        self.assertEqual(status.adaptive_posture, "AGGRESSIVE")
+        self.assertEqual(status.adaptive_confidence, "HIGH")
+        adaptive_events = [
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_ADAPTIVE_POSTURE_SELECTED
+        ]
+        self.assertEqual(len(adaptive_events), 1)
+        self.assertEqual(adaptive_events[0]["selected_posture"], "AGGRESSIVE")
+        self.assertEqual(adaptive_events[0]["active"], True)
+
+    def test_adaptive_shadow_does_not_override_manual_directional_mode(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                directional_mode="CONSERVATIVE",
+                adaptive_shadow_enabled=True,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[ADAPTIVE] posture=BALANCED", output)
+        self.assertIn("scope=SHADOW", output)
+        self.assertIn("mode=CONSERVATIVE", output)
+        self.assertEqual(status.directional_mode, "CONSERVATIVE")
+        self.assertEqual(status.effective_directional_mode, "CONSERVATIVE")
+        self.assertEqual(status.adaptive_posture, "BALANCED")
+        self.assertEqual(status.adaptive_shadow, True)
+
+    def test_adaptive_posture_pauses_entry_choice_while_position_is_open(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "102")},
+            {"SOXL": {"qty": "0.25", "avg_entry_price": "100"}},
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), directional_mode="ADAPTIVE"),
+        )
+
+        self.assertIn("constraints=position_open", output)
+        self.assertIn("reasons=adaptive_entry_posture_paused", output)
+        self.assertEqual(status.adaptive_posture, "BALANCED")
+        self.assertEqual(status.adaptive_confidence, "HIGH")
+        self.assertIn("position_open", status.adaptive_constraints)
+        self.assertIn("adaptive_entry_posture_paused", status.adaptive_reasons)
 
     def test_chop_entry_buys_soxl_when_discounted_below_slow_sma(self) -> None:
         client = FakeClient({"SOXL": bars("100", "100", "101", "99")})

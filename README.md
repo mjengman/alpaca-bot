@@ -39,8 +39,9 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 - Regime source: `SOXL`
 - Regimes: `UPTREND`, `SIDEWAYS`, `DOWNTREND` from fast/slow SMA separation
 - Router: `MomentumBot` trades `SOXL`, `InverseBot` trades `SOXS`, `ChopBot` trades SOXL mean reversion
-- Directional mode: `CONSERVATIVE` requires a fresh cross, `BALANCED` also allows reasonable continuation entries, and `AGGRESSIVE` can chase strong trends within the configured extension cap
-- Entry: MomentumBot and InverseBot use the configured directional mode; ChopBot buys SOXL when SIDEWAYS price is discounted below the slow SMA
+- Directional mode: `CONSERVATIVE` requires a fresh cross, `BALANCED` also allows reasonable continuation entries, `AGGRESSIVE` can chase strong trends within the configured extension cap, and `ADAPTIVE` transparently selects one of those postures from runtime conditions without changing sizing
+- Adaptive shadow: when `ADAPTIVE_SHADOW_ENABLED=true`, EdgeWalker logs the posture Adaptive would choose while the manually selected directional mode remains in control
+- Entry: MomentumBot and InverseBot use the effective directional mode; ChopBot buys SOXL when SIDEWAYS price is discounted below the slow SMA
 - Position size: fixed notional or dynamic allocation modes, clamped to the safe buying-power threshold and submitted through Alpaca notional orders
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
 - Regime flip guard: stale opposite exposure is sold first, with no same-cycle reversal

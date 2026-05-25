@@ -33,6 +33,7 @@ def config() -> BotConfig:
         directional_strong_chase_max_extension_percent=Decimal("1.00"),
         directional_min_strength="MODERATE",
         directional_cooldown_minutes=5,
+        adaptive_shadow_enabled=False,
         data_feed="iex",
         dry_run=True,
     )

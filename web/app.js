@@ -73,6 +73,7 @@ const els = {
   directionalStrongChase: document.querySelector("#directionalStrongChaseInput"),
   directionalMinStrength: document.querySelector("#directionalMinStrengthInput"),
   directionalCooldown: document.querySelector("#directionalCooldownInput"),
+  adaptiveShadow: document.querySelector("#adaptiveShadowInput"),
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
@@ -81,6 +82,7 @@ const els = {
   mode: document.querySelector("#modeValue"),
   dataStatus: document.querySelector("#dataStatusValue"),
   brokerState: document.querySelector("#brokerStateValue"),
+  adaptive: document.querySelector("#adaptiveValue"),
   sessionRealizedPl: document.querySelector("#sessionRealizedPlValue"),
   sessionTrades: document.querySelector("#sessionTradesValue"),
   botPerformanceSummary: document.querySelector("#botPerformanceSummaryValue"),
@@ -133,6 +135,7 @@ const settingInputs = [
   els.directionalStrongChase,
   els.directionalMinStrength,
   els.directionalCooldown,
+  els.adaptiveShadow,
   els.fast,
   els.slow,
   els.dryRun,
@@ -170,6 +173,7 @@ function payloadFromForm() {
     directionalStrongChaseMaxExtensionPercent: els.directionalStrongChase.value,
     directionalMinStrength: els.directionalMinStrength.value,
     directionalCooldownMinutes: els.directionalCooldown.value,
+    adaptiveShadowEnabled: els.adaptiveShadow ? els.adaptiveShadow.checked : true,
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: els.dryRun.checked,
@@ -349,6 +353,9 @@ function hydrateForm(data) {
     data.directional_strong_chase_max_extension_percent || "1.00";
   els.directionalMinStrength.value = data.directional_min_strength || "MODERATE";
   els.directionalCooldown.value = data.directional_cooldown_minutes || "5";
+  if (els.adaptiveShadow) {
+    els.adaptiveShadow.checked = data.adaptive_shadow_enabled !== false;
+  }
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
   els.dryRun.checked = Boolean(data.dry_run);
@@ -481,6 +488,71 @@ function renderBrokerState(brokerState) {
     els.brokerState.classList.add("data-warn");
   } else {
     els.brokerState.classList.add("data-danger");
+  }
+}
+
+function renderAdaptiveStatus(status) {
+  if (!els.adaptive) {
+    return;
+  }
+
+  els.adaptive.classList.remove("data-live", "data-warn", "data-danger");
+
+  if (!status) {
+    els.adaptive.textContent = "Waiting";
+    els.adaptive.dataset.tooltip = "Adaptive posture has not evaluated yet.";
+    els.adaptive.classList.add("data-warn");
+    return;
+  }
+
+  const posture = status.adaptive_posture;
+  const configuredMode = status.directional_mode || "BALANCED";
+  const effectiveMode = status.effective_directional_mode || posture;
+  const confidence = status.adaptive_confidence
+    ? formatLabel(status.adaptive_confidence)
+    : null;
+  const reasons = Array.isArray(status.adaptive_reasons)
+    ? status.adaptive_reasons
+    : [];
+  const constraints = Array.isArray(status.adaptive_constraints)
+    ? status.adaptive_constraints
+    : [];
+
+  if (!posture) {
+    const shadowLabel = els.adaptiveShadow?.checked ? "Shadow armed" : "Off";
+    els.adaptive.textContent =
+      configuredMode === "ADAPTIVE" ? "Waiting" : shadowLabel;
+    els.adaptive.dataset.tooltip =
+      configuredMode === "ADAPTIVE"
+        ? "Adaptive is selected and will evaluate once market data is available."
+        : "Adaptive has not evaluated this cycle.";
+    els.adaptive.classList.add("data-warn");
+    return;
+  }
+
+  const active = configuredMode === "ADAPTIVE" && !status.adaptive_shadow;
+  els.adaptive.textContent = active
+    ? `${formatLabel(posture)}${confidence ? ` · ${confidence}` : ""}`
+    : `Shadow: ${formatLabel(posture)}`;
+  const tooltipParts = [
+    active
+      ? `Adaptive is actively using ${formatLabel(effectiveMode)} posture.`
+      : `Manual ${formatLabel(configuredMode)} remains in control; Adaptive would use ${formatLabel(posture)}.`,
+  ];
+  if (reasons.length) {
+    tooltipParts.push(`Reasons: ${reasons.map(formatLabel).join(", ")}`);
+  }
+  if (constraints.length) {
+    tooltipParts.push(`Constraints: ${constraints.map(formatLabel).join(", ")}`);
+  }
+  els.adaptive.dataset.tooltip = tooltipParts.join(" ");
+
+  if (posture === "AGGRESSIVE") {
+    els.adaptive.classList.add(active ? "data-live" : "data-warn");
+  } else if (posture === "CONSERVATIVE") {
+    els.adaptive.classList.add("data-warn");
+  } else {
+    els.adaptive.classList.add("data-live");
   }
 }
 
@@ -1575,6 +1647,12 @@ function logToneForLine(line) {
     }
     return "log-green";
   }
+  if (lower.includes("[adaptive]")) {
+    if (lower.includes("posture=conservative")) {
+      return "log-yellow";
+    }
+    return "log-green";
+  }
   if (
     lower.includes("[error]") ||
     lower.includes("[fatal]") ||
@@ -1719,6 +1797,7 @@ function render(data) {
   );
   renderDataHealth(data.edgewalker_status || data.market_data_status);
   renderBrokerState(data.broker_state);
+  renderAdaptiveStatus(data.edgewalker_status);
   renderPerformance(data.performance);
   renderOrderState(data.order_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");

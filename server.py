@@ -104,6 +104,7 @@ class RunnerSnapshot:
     directional_strong_chase_max_extension_percent: str
     directional_min_strength: str
     directional_cooldown_minutes: int
+    adaptive_shadow_enabled: bool
     position_notional: str
     position_sizing_mode: str
     position_allocation_percent: str
@@ -547,6 +548,7 @@ class BotRunner:
             ),
             directional_min_strength=self._config.directional_min_strength,
             directional_cooldown_minutes=self._config.directional_cooldown_minutes,
+            adaptive_shadow_enabled=self._config.adaptive_shadow_enabled,
             position_notional=str(self._config.position_notional),
             position_sizing_mode=self._config.position_sizing_mode,
             position_allocation_percent=str(self._config.position_allocation_percent),
@@ -1222,6 +1224,7 @@ def _config_log_payload(config: BotConfig) -> dict[str, Any]:
         ),
         "directional_min_strength": config.directional_min_strength,
         "directional_cooldown_minutes": config.directional_cooldown_minutes,
+        "adaptive_shadow_enabled": config.adaptive_shadow_enabled,
         "data_feed": config.data_feed,
     }
 
@@ -1424,6 +1427,9 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         0,
         aliases=("momentumCooldownMinutes",),
     )
+    adaptive_shadow_enabled = bool(
+        payload.get("adaptiveShadowEnabled", base.adaptive_shadow_enabled)
+    )
     position_sizing_mode = choice_from_payload(
         payload,
         "positionSizingMode",
@@ -1460,6 +1466,7 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         ),
         directional_min_strength=directional_min_strength,
         directional_cooldown_minutes=directional_cooldown_minutes,
+        adaptive_shadow_enabled=adaptive_shadow_enabled,
         position_sizing_mode=position_sizing_mode,
         position_allocation_percent=position_allocation_percent,
         position_notional=decimal_from_payload(

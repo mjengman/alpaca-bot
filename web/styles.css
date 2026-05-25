@@ -515,8 +515,8 @@ body.dark-theme .theme-icon {
 
 .segmented-control {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  width: min(100%, 520px);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: min(100%, 680px);
   min-height: 42px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -651,6 +651,25 @@ body.dark-theme .theme-icon {
   font-weight: 800;
 }
 
+.compact-switch {
+  align-self: end;
+  min-height: 42px;
+}
+
+.compact-switch .track {
+  width: 46px;
+  height: 26px;
+}
+
+.compact-switch .track::after {
+  width: 18px;
+  height: 18px;
+}
+
+.compact-switch input:checked + .track::after {
+  transform: translateX(20px);
+}
+
 .switch input {
   position: absolute;
   opacity: 0;
@@ -732,7 +751,7 @@ button:disabled {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 10px;
   margin: 10px 0;
 }

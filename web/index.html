@@ -100,6 +100,16 @@
                 />
                 <span>Aggressive</span>
               </label>
+              <label
+                data-tooltip="Transparent posture selector. Chooses Conservative, Balanced, or Aggressive from runtime conditions without changing sizing."
+              >
+                <input
+                  type="radio"
+                  name="directionalMode"
+                  value="ADAPTIVE"
+                />
+                <span>Adaptive</span>
+              </label>
             </div>
           </div>
 
@@ -321,6 +331,20 @@
                 aria-label="Directional cooldown minutes"
               />
             </label>
+            <label class="switch compact-switch">
+              <input
+                id="adaptiveShadowInput"
+                type="checkbox"
+                checked
+                aria-label="Adaptive shadow mode"
+              />
+              <span class="track"></span>
+              <span
+                class="switch-label has-tooltip"
+                data-tooltip="When enabled, Adaptive logs the posture it would select while manual directional modes remain in control."
+                >Adaptive shadow</span
+              >
+            </label>
           </div>
         </details>
 
@@ -493,6 +517,19 @@
             class="has-tooltip"
             data-tooltip="No broker constraint is currently active."
             >OK</strong
+          >
+        </div>
+        <div class="metric">
+          <span
+            class="has-tooltip"
+            data-tooltip="Adaptive posture selector output. Active only when Directional mode is Adaptive; otherwise it can run as shadow telemetry."
+            >Adaptive</span
+          >
+          <strong
+            id="adaptiveValue"
+            class="has-tooltip"
+            data-tooltip="Adaptive posture has not evaluated yet."
+            >Waiting</strong
           >
         </div>
         <div class="metric">

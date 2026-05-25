@@ -34,10 +34,12 @@ DOWNTREND = "DOWNTREND"
 DIRECTIONAL_MODE_CONSERVATIVE = "CONSERVATIVE"
 DIRECTIONAL_MODE_BALANCED = "BALANCED"
 DIRECTIONAL_MODE_AGGRESSIVE = "AGGRESSIVE"
+DIRECTIONAL_MODE_ADAPTIVE = "ADAPTIVE"
 DIRECTIONAL_MODES = {
     DIRECTIONAL_MODE_CONSERVATIVE,
     DIRECTIONAL_MODE_BALANCED,
     DIRECTIONAL_MODE_AGGRESSIVE,
+    DIRECTIONAL_MODE_ADAPTIVE,
 }
 REGIME_STRENGTH_RANGE = "RANGE"
 REGIME_STRENGTH_WEAK = "WEAK"
@@ -72,6 +74,7 @@ LIFECYCLE_FULL_FILL = "FULL_FILL"
 LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
 LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
+LIFECYCLE_ADAPTIVE_POSTURE_SELECTED = "ADAPTIVE_POSTURE_SELECTED"
 BROKER_STATE_OK = "OK"
 BROKER_STATE_RESTRICTED = "RESTRICTED"
 BROKER_STATE_EXIT_BLOCKED = "EXIT_BLOCKED"
@@ -163,6 +166,7 @@ class BotConfig:
     directional_strong_chase_max_extension_percent: Decimal
     directional_min_strength: str
     directional_cooldown_minutes: int
+    adaptive_shadow_enabled: bool
     data_feed: str
     dry_run: bool
 
@@ -250,7 +254,7 @@ class BotConfig:
         ).strip().upper()
         if directional_mode not in DIRECTIONAL_MODES:
             raise BotError(
-                "DIRECTIONAL_MODE must be CONSERVATIVE, BALANCED, or AGGRESSIVE"
+                "DIRECTIONAL_MODE must be CONSERVATIVE, BALANCED, AGGRESSIVE, or ADAPTIVE"
             )
 
         directional_max_extension_percent = env_decimal(
@@ -309,6 +313,7 @@ class BotConfig:
             ),
             directional_min_strength=directional_min_strength,
             directional_cooldown_minutes=directional_cooldown_minutes,
+            adaptive_shadow_enabled=env_bool("ADAPTIVE_SHADOW_ENABLED", True),
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", True),
         )
@@ -825,6 +830,16 @@ class EntryDecision:
 
 
 @dataclass(frozen=True)
+class AdaptivePosture:
+    selected_mode: str
+    confidence: str
+    reasons: tuple[str, ...]
+    constraints: tuple[str, ...]
+    active: bool
+    shadow: bool
+
+
+@dataclass(frozen=True)
 class EdgeWalkerStatus:
     checked_at: str
     market_open: bool
@@ -836,6 +851,13 @@ class EdgeWalkerStatus:
     position_sizing_mode: str
     position_allocation_percent: str
     effective_position_notional: str | None
+    directional_mode: str
+    effective_directional_mode: str | None
+    adaptive_posture: str | None
+    adaptive_confidence: str | None
+    adaptive_reasons: list[str]
+    adaptive_constraints: list[str]
+    adaptive_shadow: bool
     day_pl: str | None
     day_pl_percent: str | None
     source_symbol: str
@@ -1772,6 +1794,7 @@ class EdgeWalkerBot:
             self.config.dry_run,
         )
         self._latest_freshness: MarketDataFreshness | None = None
+        self._adaptive_posture: AdaptivePosture | None = None
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
         payload = {
@@ -1793,6 +1816,7 @@ class EdgeWalkerBot:
 
     def run_once(self) -> EdgeWalkerStatus:
         self._latest_freshness = None
+        self._adaptive_posture = None
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
@@ -1912,6 +1936,8 @@ class EdgeWalkerBot:
                 False,
                 "no_entry",
             )
+
+        self._maybe_update_adaptive_posture(signal, route, freshness, positions, account)
 
         market_data_blocks_entries = freshness.is_stale or self._market_data_blocks_trading(
             SOXL
@@ -2294,6 +2320,8 @@ class EdgeWalkerBot:
         data_status = self._market_data_status(SOXL)
         freshness = self._latest_freshness
         effective_notional, _, _ = self._effective_position_notional(account)
+        adaptive = self._adaptive_posture
+        effective_directional_mode = self._current_effective_directional_mode()
 
         return EdgeWalkerStatus(
             checked_at=checked_at,
@@ -2308,6 +2336,13 @@ class EdgeWalkerBot:
                 self.config.position_allocation_percent
             ),
             effective_position_notional=self._decimal_text(effective_notional),
+            directional_mode=self.config.directional_mode,
+            effective_directional_mode=effective_directional_mode,
+            adaptive_posture=adaptive.selected_mode if adaptive else None,
+            adaptive_confidence=adaptive.confidence if adaptive else None,
+            adaptive_reasons=list(adaptive.reasons) if adaptive else [],
+            adaptive_constraints=list(adaptive.constraints) if adaptive else [],
+            adaptive_shadow=bool(adaptive and adaptive.shadow),
             day_pl=self._decimal_text(day_pl),
             day_pl_percent=self._decimal_text(day_pl_percent),
             source_symbol=SOXL,
@@ -2379,6 +2414,13 @@ class EdgeWalkerBot:
             ),
         )
 
+    def _current_effective_directional_mode(self) -> str | None:
+        if self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE:
+            if self._adaptive_posture is None:
+                return None
+            return self._adaptive_posture.selected_mode
+        return self.config.directional_mode
+
     def _active_position(
         self,
         positions: dict[str, dict[str, Any] | None],
@@ -2417,6 +2459,141 @@ class EdgeWalkerBot:
             effective.quantize(MONEY_STEP, rounding=ROUND_DOWN),
             requested.quantize(MONEY_STEP, rounding=ROUND_DOWN),
             buying_power,
+        )
+
+    def _maybe_update_adaptive_posture(
+        self,
+        signal: RegimeSignal,
+        route: BotRoute,
+        freshness: MarketDataFreshness,
+        positions: dict[str, dict[str, Any] | None],
+        account: dict[str, Any],
+    ) -> None:
+        if not self._adaptive_should_evaluate():
+            return
+
+        posture = self._select_adaptive_posture(
+            signal,
+            route,
+            freshness,
+            positions,
+            account,
+        )
+        self._adaptive_posture = posture
+        scope = "ACTIVE" if posture.active else "SHADOW"
+        reasons = ",".join(posture.reasons) if posture.reasons else "none"
+        constraints = ",".join(posture.constraints) if posture.constraints else "none"
+        print(
+            f"[ADAPTIVE] posture={posture.selected_mode} "
+            f"confidence={posture.confidence} scope={scope} "
+            f"reasons={reasons} constraints={constraints}"
+        )
+        self._record_lifecycle(
+            LIFECYCLE_ADAPTIVE_POSTURE_SELECTED,
+            selected_posture=posture.selected_mode,
+            confidence=posture.confidence,
+            active=posture.active,
+            shadow=posture.shadow,
+            configured_directional_mode=self.config.directional_mode,
+            reasons=posture.reasons,
+            constraints=posture.constraints,
+            regime=signal.regime,
+            regime_strength=self._regime_strength(signal),
+            gap_percent=signal.gap_percent,
+            active_bot=route.active_bot,
+            routed_symbol=route.routed_symbol,
+            position_symbol=self._active_position(positions)[0],
+        )
+
+    def _adaptive_should_evaluate(self) -> bool:
+        return (
+            self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE
+            or self.config.adaptive_shadow_enabled
+        )
+
+    def _select_adaptive_posture(
+        self,
+        signal: RegimeSignal,
+        route: BotRoute,
+        freshness: MarketDataFreshness,
+        positions: dict[str, dict[str, Any] | None],
+        account: dict[str, Any],
+    ) -> AdaptivePosture:
+        active = self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE
+        shadow = not active
+        reasons: list[str] = []
+        constraints: list[str] = []
+        selected_mode = DIRECTIONAL_MODE_BALANCED
+        confidence = "MODERATE"
+
+        active_position_symbol, _active_position = self._active_position(positions)
+        stream_not_live = self._market_data_blocks_trading(SOXL)
+        effective_notional, _requested_notional, buying_power = (
+            self._effective_position_notional(account)
+        )
+
+        if active_position_symbol:
+            constraints.append("position_open")
+            reasons.append("adaptive_entry_posture_paused")
+            selected_mode = DIRECTIONAL_MODE_BALANCED
+            confidence = "HIGH"
+        elif freshness.is_stale:
+            constraints.append("bars_stale")
+            reasons.append("entries_require_fresh_bars")
+            selected_mode = DIRECTIONAL_MODE_CONSERVATIVE
+            confidence = "HIGH"
+        elif stream_not_live:
+            constraints.append("stream_not_live")
+            reasons.append("entries_require_live_stream")
+            selected_mode = DIRECTIONAL_MODE_CONSERVATIVE
+            confidence = "HIGH"
+        elif effective_notional is None or effective_notional <= 0:
+            constraints.append("buying_power_limited")
+            reasons.append("effective_notional_unavailable")
+            selected_mode = DIRECTIONAL_MODE_CONSERVATIVE
+            confidence = "HIGH"
+        elif route.active_bot == CHOP_BOT:
+            reasons.append("sideways_route_chopbot")
+            reasons.append("directional_posture_standby")
+            selected_mode = DIRECTIONAL_MODE_BALANCED
+            confidence = "LOW"
+        else:
+            strength = self._regime_strength(signal)
+            if strength == REGIME_STRENGTH_STRONG:
+                reasons.append("strong_directional_regime")
+                selected_mode = DIRECTIONAL_MODE_AGGRESSIVE
+                confidence = "HIGH"
+            elif strength == REGIME_STRENGTH_MODERATE:
+                reasons.append("moderate_directional_regime")
+                selected_mode = DIRECTIONAL_MODE_BALANCED
+                confidence = "MODERATE"
+            else:
+                reasons.append("weak_directional_regime")
+                selected_mode = DIRECTIONAL_MODE_CONSERVATIVE
+                confidence = "LOW"
+
+        previous_regime = str(
+            self.state_store.get_regime_state().get("regime") or ""
+        ).upper()
+        if previous_regime and previous_regime != signal.regime:
+            constraints.append("regime_shift_detected")
+            if selected_mode == DIRECTIONAL_MODE_AGGRESSIVE:
+                selected_mode = DIRECTIONAL_MODE_BALANCED
+                reasons.append("fresh_regime_shift_tempers_aggression")
+
+        if buying_power is None:
+            constraints.append("buying_power_unknown")
+
+        if not reasons:
+            reasons.append("default_balanced_posture")
+
+        return AdaptivePosture(
+            selected_mode=selected_mode,
+            confidence=confidence,
+            reasons=tuple(reasons),
+            constraints=tuple(constraints),
+            active=active,
+            shadow=shadow,
         )
 
     def _apply_regime_hysteresis(self, signal: RegimeSignal) -> RegimeSignal:
@@ -2684,8 +2861,19 @@ class EdgeWalkerBot:
 
     def _directional_mode_for_route(self, route: BotRoute) -> str:
         if route.active_bot in {MOMENTUM_BOT, INVERSE_BOT}:
-            return self.config.directional_mode
+            return self._effective_directional_mode_for_bot(route.active_bot)
         return "NA"
+
+    def _effective_directional_mode_for_bot(self, bot_name: str) -> str:
+        if (
+            bot_name in {MOMENTUM_BOT, INVERSE_BOT}
+            and self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE
+            and self._adaptive_posture is not None
+        ):
+            return self._adaptive_posture.selected_mode
+        if self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE:
+            return DIRECTIONAL_MODE_BALANCED
+        return self.config.directional_mode
 
     def _entry_decision_for_route(
         self,
@@ -2759,6 +2947,7 @@ class EdgeWalkerBot:
             bot_name,
             symbol,
         )
+        directional_mode = self._effective_directional_mode_for_bot(bot_name)
         extension_percent = self._extension_above_fast_sma(snapshot)
         symbol_strength = self._strength_for_gap(UPTREND, snapshot.gap_percent)
         print(
@@ -2770,7 +2959,7 @@ class EdgeWalkerBot:
             f"max_extension={self.config.directional_max_extension_percent}% "
             f"chase_max={self.config.directional_strong_chase_max_extension_percent}% "
             f"min_strength={self.config.directional_min_strength} "
-            f"mode={self.config.directional_mode} "
+            f"mode={directional_mode} "
             f"crossed_above={snapshot.crossed_above}"
         )
 
@@ -2781,7 +2970,7 @@ class EdgeWalkerBot:
             )
         if snapshot.crossed_above:
             return EntryDecision(True, "fresh_cross_confirmed")
-        if self.config.directional_mode == DIRECTIONAL_MODE_CONSERVATIVE:
+        if directional_mode == DIRECTIONAL_MODE_CONSERVATIVE:
             return EntryDecision(False, "mode_requires_fresh_cross")
         if not self._strength_meets_minimum(source_strength):
             return EntryDecision(False, "directional_strength_below_minimum")
@@ -2792,7 +2981,7 @@ class EdgeWalkerBot:
         if extension_percent <= self.config.directional_max_extension_percent:
             return EntryDecision(True, "trend_continuation_allowed")
         if (
-            self.config.directional_mode == DIRECTIONAL_MODE_AGGRESSIVE
+            directional_mode == DIRECTIONAL_MODE_AGGRESSIVE
             and source_strength == REGIME_STRENGTH_STRONG
             and extension_percent
             <= self.config.directional_strong_chase_max_extension_percent

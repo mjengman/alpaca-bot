@@ -167,6 +167,109 @@ Notes:
 - Foundation implemented: pending orders and recent same-session order/fill
   lifecycle events are exposed as dashboard order flow.
 
+### Runtime State Summary
+
+Goal: make the bot's current operating state explicit, inspectable, and
+eventually replayable without forcing all runtime conditions into one brittle
+enum.
+
+EdgeWalker already has several state models emerging across app lifecycle,
+market/data state, position lifecycle, broker constraints, and live-readiness.
+These should gradually converge into a read-only runtime state summary before
+any major state-machine refactor.
+
+Model runtime state as:
+
+- Primary state: what the system is mainly doing
+- Guards/flags: conditions that allow, block, or modify action
+- Interrupts: urgent abnormal states that require operator attention
+
+Initial primary states may include:
+
+- DISARMED
+- ARMED
+- WAITING_FOR_MARKET
+- ENTRY_READY
+- ENTRY_PENDING
+- POSITION_OPEN
+- EXIT_PENDING
+- COOLDOWN
+- CLOSEOUT
+- STOPPED
+
+Initial guards may include:
+
+- Bars stale
+- Stream disconnected
+- Market closed
+- Buying power limited
+- Live trading blocked
+- Entry blocked
+- Exit blocked
+
+Initial interrupts may include:
+
+- BROKER_RESTRICTED
+- STALE_DATA
+- FATAL_ERROR
+
+Notes:
+
+- Begin as a derived summary, not a giant refactor.
+- Some runtime conditions are not mutually exclusive; for example, a position
+  can be open while bars are stale.
+- Stale data should be a guard when entries are blocked but live risk
+  management can continue; it should become an interrupt only when essential
+  management data is unavailable.
+- The summary should eventually support dashboard display, replay, metrics,
+  live guardrails, multi-symbol routing, and arena work.
+
+### Foundational Replay / Timeline Reconstruction
+
+Goal: reconstruct what happened during a session from lifecycle events,
+decision logs, broker events, and market/data state without relying on fragile
+UI state or loose log interpretation.
+
+This is not backtesting or strategy optimization. Foundational replay is an
+operational truth feature: show the session as it unfolded, explain what state
+the system believed it was in, and make debugging and postmortems trustworthy.
+
+Initial scope:
+
+- Reconstruct session timeline from lifecycle JSONL and daily decision logs
+- Show position lifecycle events in chronological order
+- Reconstruct primary runtime state, guards, and interrupts over time
+- Show when entries were approved, blocked, submitted, rejected, filled, or
+  skipped
+- Show when exits were submitted, rejected, filled, or blocked
+- Show realized-result events once persisted
+- Support operator-facing postmortems after unusual sessions
+
+Initial UX direction:
+
+- Add a third log panel tab: Activity | Narrative | Timeline
+- Treat Timeline as a structured forensic view, not a simulator
+- Provide date/timeframe selection, bot filters, event filters, and a "show
+  important only" toggle
+- Render chronological cycle groups with regime, primary state, guards,
+  decision rationale, sizing, order events, broker outcomes, and P/L moments
+- Render open-position segments that summarize entry, management, exit, and
+  realized result
+- Add a compact session rail or mini-map later for regime changes, stale-data
+  spans, broker errors, open-position spans, and closeout windows
+
+Notes:
+
+- Replay is for truth first, optimization later.
+- Begin as deterministic timeline reconstruction, not alternate-parameter
+  simulation.
+- Activity remains the raw operational stream.
+- Narrative remains the AI/operator debrief.
+- Timeline becomes the structured flight recorder for "what happened, in what
+  order, and what did EdgeWalker believe at the time?"
+- Advanced simulation, backtesting, arena evaluation, and mutation testing
+  should remain future architecture until clean replay primitives exist.
+
 ### Effective Notional Visibility
 
 Goal: make sizing behavior obvious before an order is submitted.
@@ -356,6 +459,52 @@ Basic hysteresis exists. Future controls may include:
 - Separate uptrend and downtrend thresholds
 - Volatility-adjusted thresholds
 
+### Adaptive Posture Selector
+
+Goal: let EdgeWalker choose its current directional posture from observable
+runtime conditions instead of relying only on a globally fixed aggression mode.
+
+Adaptive should be a transparent selector/modulator that consumes operational
+truth. It should answer: what posture has the system earned right now?
+
+Adaptive v1 should choose among existing directional modes:
+
+- Conservative
+- Balanced
+- Aggressive
+
+Adaptive v1 should not change capital allocation, leverage, or hidden sizing
+math. Keep behavioral adaptation separate from capital amplification until the
+posture logic has earned trust through logs, replay, and operator review.
+
+Potential input signals:
+
+- Trend strength
+- Regime stability and recent regime churn
+- Data freshness and stream health
+- Broker state and recent order rejections
+- Session drawdown or realized P/L pressure
+- Time until closeout
+- Current runtime guards and interrupts
+
+Operator-facing readout:
+
+- Adaptive Posture
+- Confidence
+- Reasons
+- Active constraints
+- Recent posture shifts
+
+Notes:
+
+- Adaptive is a posture selector, not a new strategy.
+- Adaptive decisions should become first-class timeline/decision events.
+- Every posture selection or posture shift should be explainable and replayable.
+- Operator-defined envelopes should bound all adaptive behavior.
+- Sizing modulation may be a future version, but should not be part of v1.
+- Dependencies: Runtime State Summary, Broker Constraint State, Data Health,
+  Explainability Layer, Telemetry, and Foundational Replay.
+
 ### Strategy Lab / Tuning Console
 
 Future optional workspace for turning debrief analysis into experiments, not
@@ -373,9 +522,11 @@ These are important, but should follow the operational truth phase.
 
 - Persistent database layer
 - Trade journal export
-- Replay and simulation engine
-- Session replay and timeline scrubbing
 - Lab / tuning console for parameter experiments
+- Advanced simulation and backtesting engine
+- Alternate-parameter replay
+- Arena season evaluation
+- Mutation testing / strategy fitness replay
 - Multi-position support
 - Multi-symbol routing
 - Arena / competing bots
@@ -386,14 +537,24 @@ These are important, but should follow the operational truth phase.
 
 Notes:
 
-- AI-generated tuning should be advisory only until replay/simulation exists.
+- AI-generated tuning should be advisory only until foundational replay and
+  clean simulation primitives exist.
 - Arena work depends on clean lifecycle and metrics primitives.
 - Multi-symbol support depends on broker-state and allocation controls.
 
 ## Suggested Next Sprint
 
-1. Add realized trade detail/history from lifecycle fill records.
-2. Persist realized-result lifecycle records per closed trade.
-3. Add rejection cooldown behavior for repeated broker failures.
-4. Add average hold duration and best/worst trade metrics.
-5. Improve log styling around trade open, trade close, P/L, and rejection events.
+During the eight paper-trading qualification days before planned go-live, limit
+code changes to fire-fixes and low-risk observability/documentation updates.
+The goal is to collect clean behavior data across Conservative, Balanced,
+Aggressive, and Adaptive qualification days without moving the target every
+session.
+
+1. Fire-fix only during market sessions.
+2. Capture daily logs, lifecycle files, screenshots, and operator notes.
+3. After enough clean logs exist, add realized trade detail/history from
+   lifecycle fill records.
+4. Persist realized-result lifecycle records per closed trade.
+5. Add average hold duration and best/worst trade metrics.
+6. Start Foundational Replay / Timeline Reconstruction once the event stream is
+   representative enough to design against.
