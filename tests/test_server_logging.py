@@ -35,6 +35,7 @@ from server import (
     _display_date_label,
     _extract_session_context,
     _format_regime_transition,
+    _config_for_alpaca_environment,
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
@@ -725,6 +726,27 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(config_value.api_key_id, "paper-key")
         self.assertIn("Live environment incomplete", error or "")
         self.assertEqual(environment_after, "live")
+
+    def test_connection_config_environment_override_does_not_mutate_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            with patch("server.ENV_PATH", env_path), patch.dict(
+                os.environ,
+                {
+                    "ALPACA_ENVIRONMENT": "paper",
+                    "ALPACA_PAPER_API_KEY_ID": "paper-key",
+                    "ALPACA_PAPER_API_SECRET_KEY": "paper-secret",
+                    "ALPACA_LIVE_API_KEY_ID": "live-key",
+                    "ALPACA_LIVE_API_SECRET_KEY": "live-secret",
+                },
+                clear=True,
+            ):
+                config_value = _config_for_alpaca_environment("live")
+                environment_after = os.environ.get("ALPACA_ENVIRONMENT")
+
+        self.assertEqual(config_value.api_key_id, "live-key")
+        self.assertTrue(config_value.dry_run)
+        self.assertEqual(environment_after, "paper")
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

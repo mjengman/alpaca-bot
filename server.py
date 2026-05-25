@@ -160,20 +160,10 @@ class BotRunner:
         except BotError as exc:
             if current_alpaca_environment() != "live":
                 raise
-            previous_environment = os.environ.get("ALPACA_ENVIRONMENT")
-            os.environ["ALPACA_ENVIRONMENT"] = "paper"
             try:
-                fallback = BotConfig.from_env()
+                fallback = BotConfig.from_env(environment_override="paper")
             except BotError:
-                if previous_environment is None:
-                    os.environ.pop("ALPACA_ENVIRONMENT", None)
-                else:
-                    os.environ["ALPACA_ENVIRONMENT"] = previous_environment
                 raise exc
-            if previous_environment is None:
-                os.environ.pop("ALPACA_ENVIRONMENT", None)
-            else:
-                os.environ["ALPACA_ENVIRONMENT"] = previous_environment
             return fallback, f"Live environment incomplete: {exc}"
 
     def snapshot(self) -> RunnerSnapshot:
@@ -1103,15 +1093,7 @@ def _config_for_alpaca_environment(environment: str) -> BotConfig:
     environment = environment.strip().lower()
     if environment not in {"paper", "live"}:
         raise BotError("Environment must be paper or live.")
-    previous = os.environ.get("ALPACA_ENVIRONMENT")
-    os.environ["ALPACA_ENVIRONMENT"] = environment
-    try:
-        return replace(BotConfig.from_env(), dry_run=True)
-    finally:
-        if previous is None:
-            os.environ.pop("ALPACA_ENVIRONMENT", None)
-        else:
-            os.environ["ALPACA_ENVIRONMENT"] = previous
+    return replace(BotConfig.from_env(environment_override=environment), dry_run=True)
 
 
 def test_alpaca_connection(environment: str) -> dict[str, Any]:

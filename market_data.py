@@ -217,6 +217,7 @@ class StreamingMarketDataService:
 
     def _handle_messages_locked(self, messages: list[Any], ws: Any | None = None) -> None:
         self._last_message_at = datetime.now(timezone.utc)
+        bars_changed = False
         for message in messages:
             if not isinstance(message, dict):
                 continue
@@ -230,7 +231,7 @@ class StreamingMarketDataService:
             elif message_type == "error":
                 self._last_error = self._stream_error_text(message)
             elif message_type in {"b", "u"}:
-                self._record_bar_locked(message)
+                bars_changed = self._record_bar_locked(message) or bars_changed
             elif message_type == "t":
                 symbol = str(message.get("S", "")).upper()
                 if symbol in self.symbols:
@@ -240,8 +241,9 @@ class StreamingMarketDataService:
                 if symbol in self.symbols:
                     self._latest_quotes[symbol] = dict(message)
 
-        self._prune_current_trading_day_locked()
-        self._save_state_locked()
+        if bars_changed:
+            self._prune_current_trading_day_locked()
+            self._save_state_locked()
 
     def _handle_success_locked(self, message: dict[str, Any], ws: Any | None) -> None:
         msg = str(message.get("msg", "")).lower()
@@ -264,11 +266,11 @@ class StreamingMarketDataService:
                     )
                 )
 
-    def _record_bar_locked(self, message: dict[str, Any]) -> None:
+    def _record_bar_locked(self, message: dict[str, Any]) -> bool:
         symbol = str(message.get("S", "")).upper()
         timestamp = message.get("t")
         if symbol not in self.symbols or not isinstance(timestamp, str):
-            return
+            return False
 
         bar = {
             key: message[key]
@@ -280,6 +282,7 @@ class StreamingMarketDataService:
         bars.append(bar)
         bars.sort(key=lambda item: self._bar_sort_key(item))
         self._bars[symbol] = bars[-self.max_bars :]
+        return True
 
     def _bar_sort_key(self, bar: dict[str, Any]) -> str:
         timestamp = parse_market_timestamp(bar.get("t"))

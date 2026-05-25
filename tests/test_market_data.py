@@ -113,6 +113,37 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
             self.assertEqual(len(bars), 1)
             self.assertEqual(bars[0]["c"], 101)
 
+    def test_trade_quote_messages_do_not_persist_bar_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+            timestamp = (
+                datetime.now(timezone.utc)
+                .replace(second=0, microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            prune_calls: list[bool] = []
+            save_calls: list[bool] = []
+            service._prune_current_trading_day_locked = lambda: prune_calls.append(True)
+            service._save_state_locked = lambda force=False: save_calls.append(force)
+
+            with service._lock:
+                service._handle_messages_locked(
+                    [
+                        {"T": "t", "S": "SOXL", "p": 100.75, "t": timestamp},
+                        {"T": "q", "S": "SOXL", "bp": 100.7, "ap": 100.8, "t": timestamp},
+                    ]
+                )
+
+            self.assertEqual(prune_calls, [])
+            self.assertEqual(save_calls, [])
+            self.assertEqual(service.get_latest_trade("SOXL")["p"], 100.75)
+            self.assertEqual(service.get_latest_quote("SOXL")["bp"], 100.7)
+
 
 if __name__ == "__main__":
     unittest.main()

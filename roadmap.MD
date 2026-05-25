@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-05-24
+Last updated: 2026-05-25
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -55,7 +55,7 @@ These are implemented in the current app and should be treated as the
 foundation for future work.
 
 - Activity log copy button
-- Directional mode system: Conservative, Balanced, Aggressive
+- Directional mode system: Conservative, Balanced, Aggressive, Adaptive
 - Dynamic allocation sizing
 - Full Deployment mode using about 95% of buying power
 - Position sizing safety clamp at 95% of current buying power
@@ -78,7 +78,11 @@ foundation for future work.
 - Pending-order and recent order/fill lifecycle visibility in the dashboard
 - Operator Guide modal for in-app usage reference
 - Settings modal foundation for paper/live broker credentials, connection tests,
-  and explicit live-trading arming
+  explicit live-trading arming, and live-trading disarming
+- Adaptive posture selector v1 with active mode support, shadow-mode support,
+  status exposure, explainable reasons/constraints, and lifecycle posture events
+- Qualification-hardening pass for paper/live connection tests, non-overlapping
+  dashboard polling, and lower-noise stream bar persistence
 
 ## Priority 0: Operational Truth
 
@@ -550,11 +554,22 @@ The goal is to collect clean behavior data across Conservative, Balanced,
 Aggressive, and Adaptive qualification days without moving the target every
 session.
 
+Qualification protocol:
+
+- Days 1-2: Conservative
+- Days 3-4: Balanced
+- Days 5-6: Aggressive
+- Days 7-8: Adaptive
+
+Operating rules:
+
 1. Fire-fix only during market sessions.
-2. Capture daily logs, lifecycle files, screenshots, and operator notes.
-3. After enough clean logs exist, add realized trade detail/history from
+2. Keep non-critical strategy and UI changes parked until after the daily
+   session review.
+3. Capture daily logs, lifecycle files, screenshots, and operator notes.
+4. After enough clean logs exist, add realized trade detail/history from
    lifecycle fill records.
-4. Persist realized-result lifecycle records per closed trade.
-5. Add average hold duration and best/worst trade metrics.
-6. Start Foundational Replay / Timeline Reconstruction once the event stream is
+5. Persist realized-result lifecycle records per closed trade.
+6. Add average hold duration and best/worst trade metrics.
+7. Start Foundational Replay / Timeline Reconstruction once the event stream is
    representative enough to design against.

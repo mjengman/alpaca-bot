@@ -191,8 +191,12 @@ class BotConfig:
     dry_run: bool
 
     @classmethod
-    def from_env(cls) -> "BotConfig":
-        alpaca_environment = os.environ.get("ALPACA_ENVIRONMENT", "paper").strip().lower()
+    def from_env(cls, environment_override: str | None = None) -> "BotConfig":
+        alpaca_environment = (
+            environment_override
+            if environment_override is not None
+            else os.environ.get("ALPACA_ENVIRONMENT", "paper")
+        ).strip().lower()
         if alpaca_environment not in {"paper", "live"}:
             raise BotError("ALPACA_ENVIRONMENT must be paper or live")
 

@@ -29,6 +29,7 @@ const THEME_KEY = "edgewalker-theme";
 const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
 const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v1";
+const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 
@@ -1827,6 +1828,14 @@ async function refresh() {
   }
 }
 
+function startRefreshLoop() {
+  const run = async () => {
+    await refresh();
+    window.setTimeout(run, REFRESH_INTERVAL_MS);
+  };
+  run();
+}
+
 async function postAction(path) {
   state.busy = true;
   els.toggle.disabled = true;
@@ -1938,5 +1947,4 @@ setupSettingsModal();
 setupOperatorGuide();
 setupActivityLog();
 setupTooltips();
-refresh();
-setInterval(refresh, 2000);
+startRefreshLoop();
