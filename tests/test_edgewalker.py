@@ -269,6 +269,28 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "collecting_data")
 
+    def test_warmup_persists_regime_state_to_clear_old_hysteresis_memory(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "99")})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            state_store.set_regime_state("UPTREND", Decimal("0.30"))
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                EdgeWalkerBot(
+                    config(),
+                    client,
+                    state_store,
+                    None,
+                    lifecycle_ledger,
+                ).run_once()
+
+            regime_state = state_store.get_regime_state()
+
+        self.assertEqual(regime_state["regime"], "WARMUP")
+        self.assertEqual(regime_state["gap_percent"], "0")
+
     def test_market_timestamp_accepts_alpaca_nanosecond_precision(self) -> None:
         parsed = parse_market_timestamp("2026-05-21T14:56:53.123456789Z")
 
@@ -439,6 +461,35 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "wait_stale_market_data")
+
+    def test_stale_market_data_still_persists_hysteresis_adjusted_regime(self) -> None:
+        stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "101", latest_at=stale_latest_at)}
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            state_store.set_regime_state("UPTREND", Decimal("0.30"))
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = EdgeWalkerBot(
+                    config(),
+                    client,
+                    state_store,
+                    None,
+                    lifecycle_ledger,
+                ).run_once()
+
+            regime_state = state_store.get_regime_state()
+
+        self.assertIn("hysteresis hold", output.getvalue())
+        self.assertEqual(status.action_taken, "wait_stale_market_data")
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(regime_state["regime"], "UPTREND")
+        self.assertEqual(regime_state["gap_percent"], status.gap_percent)
 
     def test_stale_market_data_still_manages_open_position_with_live_marks(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)

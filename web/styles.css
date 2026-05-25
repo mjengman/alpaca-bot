@@ -651,6 +651,11 @@ body.dark-theme .theme-icon {
   font-weight: 800;
 }
 
+.switch.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .compact-switch {
   align-self: end;
   min-height: 42px;
@@ -702,8 +707,16 @@ body.dark-theme .theme-icon {
   background: var(--green);
 }
 
+.switch input:disabled + .track {
+  background: var(--input-disabled);
+}
+
 .switch input:checked + .track::after {
   transform: translateX(22px);
+}
+
+.switch input:checked:disabled + .track {
+  background: var(--line-strong);
 }
 
 .button-row {

@@ -118,6 +118,26 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def normalize_alpaca_base_url(value: str) -> str:
+    normalized = str(value).strip().rstrip("/")
+    if not normalized:
+        return normalized
+
+    parsed = urllib.parse.urlparse(normalized)
+    alpaca_hosts = {
+        "api.alpaca.markets",
+        "paper-api.alpaca.markets",
+        "data.alpaca.markets",
+    }
+    if parsed.scheme in {"http", "https"} and parsed.netloc.lower() in alpaca_hosts:
+        if parsed.path.rstrip("/") in {"", "/"}:
+            return urllib.parse.urlunparse(
+                (parsed.scheme, parsed.netloc, "/v2", "", "", "")
+            )
+
+    return normalized
+
+
 def env_decimal(name: str, default: str) -> Decimal:
     value = os.environ.get(name, default)
     try:
@@ -288,10 +308,10 @@ class BotConfig:
             raise BotError("DIRECTIONAL_COOLDOWN_MINUTES must be at least 0")
 
         return cls(
-            trading_base_url=trading_base_url.rstrip("/"),
-            data_base_url=os.environ.get(
-                "ALPACA_DATA_BASE_URL", DATA_BASE_URL_DEFAULT
-            ).rstrip("/"),
+            trading_base_url=normalize_alpaca_base_url(trading_base_url),
+            data_base_url=normalize_alpaca_base_url(
+                os.environ.get("ALPACA_DATA_BASE_URL", DATA_BASE_URL_DEFAULT)
+            ),
             api_key_id=api_key_id,
             api_secret_key=api_secret_key,
             symbol=os.environ.get("SYMBOL", SOXL).strip().upper(),
@@ -1839,6 +1859,7 @@ class EdgeWalkerBot:
         detector = RegimeDetector(self.config, self.client, self.market_data)
         signal, soxl_snapshot = detector.detect()
         if signal is None or soxl_snapshot is None:
+            self.state_store.set_regime_state(WARMUP, Decimal("0"))
             self._print_market_data_status(SOXL)
             print(
                 "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
@@ -1883,7 +1904,9 @@ class EdgeWalkerBot:
                 regime_override=WARMUP,
             )
 
-        signal = self._apply_regime_hysteresis(signal)
+        previous_regime_state = self.state_store.get_regime_state()
+        signal = self._apply_regime_hysteresis(signal, previous_regime_state)
+        self.state_store.set_regime_state(signal.regime, signal.gap_percent)
         route = RegimeRouter().route(signal.regime)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
@@ -1937,7 +1960,14 @@ class EdgeWalkerBot:
                 "no_entry",
             )
 
-        self._maybe_update_adaptive_posture(signal, route, freshness, positions, account)
+        self._maybe_update_adaptive_posture(
+            signal,
+            route,
+            freshness,
+            positions,
+            account,
+            previous_regime_state,
+        )
 
         market_data_blocks_entries = freshness.is_stale or self._market_data_blocks_trading(
             SOXL
@@ -2016,8 +2046,6 @@ class EdgeWalkerBot:
                 False,
                 "wait_stream_market_data",
             )
-
-        self.state_store.set_regime_state(signal.regime, signal.gap_percent)
 
         stale_symbol = self._stale_symbol(route, positions)
         if stale_symbol:
@@ -2468,6 +2496,7 @@ class EdgeWalkerBot:
         freshness: MarketDataFreshness,
         positions: dict[str, dict[str, Any] | None],
         account: dict[str, Any],
+        previous_regime_state: dict[str, Any] | None = None,
     ) -> None:
         if not self._adaptive_should_evaluate():
             return
@@ -2478,6 +2507,7 @@ class EdgeWalkerBot:
             freshness,
             positions,
             account,
+            previous_regime_state,
         )
         self._adaptive_posture = posture
         scope = "ACTIVE" if posture.active else "SHADOW"
@@ -2518,6 +2548,7 @@ class EdgeWalkerBot:
         freshness: MarketDataFreshness,
         positions: dict[str, dict[str, Any] | None],
         account: dict[str, Any],
+        previous_regime_state: dict[str, Any] | None = None,
     ) -> AdaptivePosture:
         active = self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE
         shadow = not active
@@ -2572,9 +2603,10 @@ class EdgeWalkerBot:
                 selected_mode = DIRECTIONAL_MODE_CONSERVATIVE
                 confidence = "LOW"
 
-        previous_regime = str(
-            self.state_store.get_regime_state().get("regime") or ""
-        ).upper()
+        previous_regime_source = (
+            previous_regime_state or self.state_store.get_regime_state()
+        )
+        previous_regime = str(previous_regime_source.get("regime") or "").upper()
         if previous_regime and previous_regime != signal.regime:
             constraints.append("regime_shift_detected")
             if selected_mode == DIRECTIONAL_MODE_AGGRESSIVE:
@@ -2596,11 +2628,16 @@ class EdgeWalkerBot:
             shadow=shadow,
         )
 
-    def _apply_regime_hysteresis(self, signal: RegimeSignal) -> RegimeSignal:
+    def _apply_regime_hysteresis(
+        self,
+        signal: RegimeSignal,
+        previous_regime_state: dict[str, Any] | None = None,
+    ) -> RegimeSignal:
         raw_regime = signal.regime
-        previous_regime = str(
-            self.state_store.get_regime_state().get("regime") or ""
-        ).upper()
+        previous_regime_source = (
+            previous_regime_state or self.state_store.get_regime_state()
+        )
+        previous_regime = str(previous_regime_source.get("regime") or "").upper()
         directional_regime = self._directional_regime_for_signal(signal)
         exit_threshold = self._regime_exit_threshold()
 

@@ -616,6 +616,42 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertNotIn("paper-secret-5678", json.dumps(settings))
         self.assertIn("ALPACA_LIVE_API_KEY_ID=live-key-1234", env_text)
 
+    def test_environment_settings_normalizes_bare_alpaca_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            payload = {
+                "active_environment": "live",
+                "data_base_url": "https://data.alpaca.markets",
+                "data_feed": "iex",
+                "paper": {
+                    "trading_base_url": "https://paper-api.alpaca.markets",
+                    "api_key_id": "paper-key",
+                    "api_secret_key": "paper-secret",
+                },
+                "live": {
+                    "trading_base_url": "https://api.alpaca.markets",
+                    "api_key_id": "live-key",
+                    "api_secret_key": "live-secret",
+                },
+            }
+
+            with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
+                settings = save_alpaca_environment_settings(payload)
+                parsed = config_from_payload({})
+                env_text = env_path.read_text()
+
+        self.assertEqual(settings["data_base_url"], "https://data.alpaca.markets/v2")
+        self.assertEqual(
+            settings["paper"]["trading_base_url"],
+            "https://paper-api.alpaca.markets/v2",
+        )
+        self.assertEqual(
+            settings["live"]["trading_base_url"],
+            "https://api.alpaca.markets/v2",
+        )
+        self.assertEqual(parsed.trading_base_url, "https://api.alpaca.markets/v2")
+        self.assertIn("ALPACA_LIVE_TRADING_BASE_URL=https://api.alpaca.markets/v2", env_text)
+
     def test_live_trading_arm_and_disarm_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_path = Path(tmpdir) / ".env"

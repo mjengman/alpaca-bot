@@ -74,6 +74,9 @@ const els = {
   directionalMinStrength: document.querySelector("#directionalMinStrengthInput"),
   directionalCooldown: document.querySelector("#directionalCooldownInput"),
   adaptiveShadow: document.querySelector("#adaptiveShadowInput"),
+  adaptiveShadowLabel: document.querySelector("#adaptiveShadowInput")
+    ?.closest(".switch")
+    ?.querySelector(".switch-label"),
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
@@ -1783,9 +1786,16 @@ function render(data) {
   els.toggle.classList.toggle("is-stop", state.running);
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
+  const settingsLocked = state.running || state.busy;
   settingInputs.forEach((input) => {
-    input.disabled = state.running || state.busy;
+    input.disabled = settingsLocked;
+    input.closest(".switch")?.classList.toggle("is-disabled", settingsLocked);
   });
+  if (els.adaptiveShadowLabel) {
+    els.adaptiveShadowLabel.dataset.tooltip = settingsLocked
+      ? "Stop EdgeWalker before changing Adaptive shadow telemetry."
+      : "When enabled, Adaptive logs the posture it would select while manual directional modes remain in control.";
+  }
   syncSizingControls();
 
   const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;

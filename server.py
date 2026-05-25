@@ -46,6 +46,7 @@ from bot import (
     classify_broker_error,
     format_decimal,
     load_dotenv,
+    normalize_alpaca_base_url,
     parse_clock_time,
 )
 from market_data import StreamingMarketDataService
@@ -993,18 +994,22 @@ def alpaca_environment_settings() -> dict[str, Any]:
     return {
         "active_environment": active_environment,
         "live_trading_armed": live_trading_armed(),
-        "data_base_url": _env_first(
-            values,
-            "ALPACA_DATA_BASE_URL",
-            default=DATA_BASE_URL_DEFAULT,
+        "data_base_url": normalize_alpaca_base_url(
+            _env_first(
+                values,
+                "ALPACA_DATA_BASE_URL",
+                default=DATA_BASE_URL_DEFAULT,
+            )
         ),
         "data_feed": _env_first(values, "DATA_FEED", default="iex"),
         "paper": {
-            "trading_base_url": _env_first(
-                values,
-                "ALPACA_PAPER_TRADING_BASE_URL",
-                "ALPACA_TRADING_BASE_URL",
-                default=TRADING_BASE_URL_DEFAULT,
+            "trading_base_url": normalize_alpaca_base_url(
+                _env_first(
+                    values,
+                    "ALPACA_PAPER_TRADING_BASE_URL",
+                    "ALPACA_TRADING_BASE_URL",
+                    default=TRADING_BASE_URL_DEFAULT,
+                )
             ),
             "api_key_id_masked": _mask_secret(paper_key),
             "api_secret_key_masked": _mask_secret(paper_secret),
@@ -1012,10 +1017,12 @@ def alpaca_environment_settings() -> dict[str, Any]:
             "has_api_secret_key": bool(paper_secret),
         },
         "live": {
-            "trading_base_url": _env_first(
-                values,
-                "ALPACA_LIVE_TRADING_BASE_URL",
-                default=LIVE_TRADING_BASE_URL_DEFAULT,
+            "trading_base_url": normalize_alpaca_base_url(
+                _env_first(
+                    values,
+                    "ALPACA_LIVE_TRADING_BASE_URL",
+                    default=LIVE_TRADING_BASE_URL_DEFAULT,
+                )
             ),
             "api_key_id_masked": _mask_secret(live_key),
             "api_secret_key_masked": _mask_secret(live_secret),
@@ -1036,11 +1043,13 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
 
     updates = {
         "ALPACA_ENVIRONMENT": active_environment,
-        "ALPACA_DATA_BASE_URL": str(
-            payload.get("data_base_url")
-            or payload.get("dataBaseUrl")
-            or DATA_BASE_URL_DEFAULT
-        ).strip().rstrip("/"),
+        "ALPACA_DATA_BASE_URL": normalize_alpaca_base_url(
+            str(
+                payload.get("data_base_url")
+                or payload.get("dataBaseUrl")
+                or DATA_BASE_URL_DEFAULT
+            )
+        ),
         "DATA_FEED": str(
             payload.get("data_feed") or payload.get("dataFeed") or "iex"
         ).strip(),
@@ -1054,7 +1063,9 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
             section.get("trading_base_url") or section.get("tradingBaseUrl")
         )
         if trading_url:
-            updates[f"{prefix}_TRADING_BASE_URL"] = trading_url.rstrip("/")
+            updates[f"{prefix}_TRADING_BASE_URL"] = normalize_alpaca_base_url(
+                trading_url
+            )
         key_id = _optional_text(section.get("api_key_id") or section.get("apiKeyId"))
         secret = _optional_text(
             section.get("api_secret_key") or section.get("apiSecretKey")
