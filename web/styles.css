@@ -622,6 +622,24 @@ body.dark-theme .theme-icon {
   appearance: none;
 }
 
+.custom-allocation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.custom-allocation[hidden] {
+  display: none;
+}
+
+.custom-allocation .allocation-suffix {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
 .field input:focus,
 .field select:focus {
   border-color: var(--green);

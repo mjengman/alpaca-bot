@@ -63,6 +63,8 @@ const els = {
   symbol: document.querySelector("#symbolInput"),
   notional: document.querySelector("#notionalInput"),
   positionSizing: document.querySelector("#positionSizingInput"),
+  customAllocationField: document.querySelector("#customAllocationField"),
+  customAllocation: document.querySelector("#customAllocationInput"),
   trail: document.querySelector("#trailInput"),
   poll: document.querySelector("#pollInput"),
   closeout: document.querySelector("#closeoutInput"),
@@ -128,6 +130,7 @@ const els = {
 const settingInputs = [
   els.notional,
   els.positionSizing,
+  els.customAllocation,
   els.trail,
   els.poll,
   els.closeout,
@@ -157,7 +160,10 @@ function payloadFromForm() {
   const sizingValue = els.positionSizing ? els.positionSizing.value : "FIXED";
   const positionSizingMode = sizingValue === "FIXED" ? "FIXED" : "DYNAMIC";
   const positionAllocationPercent =
-    sizingValue === "FIXED" ? "25" : sizingValue;
+    sizingValue === "FIXED" ? "25" : selectedAllocationPercent();
+  if (positionSizingMode === "DYNAMIC") {
+    validateAllocationPercent(positionAllocationPercent);
+  }
   return {
     symbol: els.symbol ? els.symbol.value.trim().toUpperCase() : "SOXL",
     positionNotional:
@@ -261,17 +267,7 @@ function sizingValueFromData(data) {
   if (exact) {
     return exact;
   }
-  const numeric = Number(allocation);
-  if (numeric >= 90) {
-    return "95";
-  }
-  if (numeric >= 75) {
-    return "75";
-  }
-  if (numeric >= 50) {
-    return "50";
-  }
-  return "25";
+  return "CUSTOM";
 }
 
 function buyingPowerFromData(data) {
@@ -284,7 +280,7 @@ function dynamicNotionalPreview() {
     return null;
   }
   const buyingPower = state.latestBuyingPower;
-  const allocation = numberOrNull(els.positionSizing.value);
+  const allocation = numberOrNull(selectedAllocationPercent());
   if (buyingPower === null || allocation === null) {
     return null;
   }
@@ -307,6 +303,13 @@ function syncSizingControls() {
     return;
   }
   const dynamicSizing = els.positionSizing.value !== "FIXED";
+  const customSizing = els.positionSizing.value === "CUSTOM";
+  if (els.customAllocationField) {
+    els.customAllocationField.hidden = !customSizing;
+  }
+  if (els.customAllocation) {
+    els.customAllocation.disabled = state.running || state.busy || !customSizing;
+  }
   if (dynamicSizing) {
     const preview = dynamicNotionalPreview();
     els.notional.value = preview === null ? "" : formatNotionalInput(preview);
@@ -323,6 +326,23 @@ function syncSizingControls() {
   els.notional.closest(".field")?.classList.toggle("is-disabled", dynamicSizing);
 }
 
+function selectedAllocationPercent() {
+  if (!els.positionSizing || els.positionSizing.value === "FIXED") {
+    return "25";
+  }
+  if (els.positionSizing.value === "CUSTOM") {
+    return els.customAllocation?.value.trim() || "";
+  }
+  return els.positionSizing.value;
+}
+
+function validateAllocationPercent(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null || parsed <= 0 || parsed > 100) {
+    throw new Error("Sizing percent must be greater than 0 and at most 100.");
+  }
+}
+
 function hydrateForm(data) {
   if (
     state.hydrated ||
@@ -336,8 +356,13 @@ function hydrateForm(data) {
   state.fixedNotionalValue = data.position_notional || state.fixedNotionalValue || "25";
   els.notional.value = state.fixedNotionalValue;
   if (els.positionSizing) {
-    els.positionSizing.value = sizingValueFromData(data);
+    const allocation = String(data.position_allocation_percent || "25");
+    const sizingValue = sizingValueFromData(data);
+    els.positionSizing.value = sizingValue;
     state.lastSizingValue = els.positionSizing.value;
+    if (els.customAllocation) {
+      els.customAllocation.value = allocation;
+    }
   }
   els.trail.value = data.trail_percent || "1.5";
   els.poll.value = data.poll_seconds || "60";
@@ -1919,6 +1944,10 @@ if (els.positionSizing) {
     }
     syncSizingControls();
   });
+}
+
+if (els.customAllocation) {
+  els.customAllocation.addEventListener("input", syncSizingControls);
 }
 
 if (els.notional) {
