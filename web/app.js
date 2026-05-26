@@ -95,7 +95,6 @@ const els = {
   botPerformanceGrid: document.querySelector("#botPerformanceGrid"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
-  cycles: document.querySelector("#cycleValue"),
   regime: document.querySelector("#regimeValue"),
   activeBot: document.querySelector("#activeBotValue"),
   routedSymbol: document.querySelector("#routedSymbolValue"),
@@ -1838,7 +1837,6 @@ function render(data) {
   renderOrderState(data.order_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
-  els.cycles.textContent = String(data.cycle_count || 0);
   els.error.textContent = data.last_error || "";
   renderDecision(data.edgewalker_status);
   renderLog(data);
