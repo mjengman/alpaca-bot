@@ -35,6 +35,7 @@ const THEME_KEY = "edgewalker-theme";
 const AUDIOSCAPE_KEY = "edgewalker-audioscape-enabled";
 const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
+const SECTION_COLLAPSED_PREFIX = "edgewalker-section-collapsed:";
 const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v1";
 const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
@@ -1262,6 +1263,26 @@ function loadLogExpanded() {
   }
 }
 
+function sectionCollapseStorageKey(key) {
+  return `${SECTION_COLLAPSED_PREFIX}${key}`;
+}
+
+function saveSectionCollapsed(key, collapsed) {
+  try {
+    localStorage.setItem(sectionCollapseStorageKey(key), collapsed ? "1" : "0");
+  } catch {
+    return;
+  }
+}
+
+function loadSectionCollapsed(key) {
+  try {
+    return localStorage.getItem(sectionCollapseStorageKey(key)) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function setLogCollapsed(collapsed) {
   state.logCollapsed = collapsed;
   if (!els.activityPanel || !els.activityToggle) {
@@ -1291,6 +1312,36 @@ function setLogExpanded(expanded) {
     ? "Return the activity log to compact height."
     : "Expand the activity log vertically for review.";
   saveLogExpanded(expanded);
+}
+
+function setCollapsibleSection(button, collapsed, persist = true) {
+  const targetSelector = button.dataset.collapseTarget;
+  const target = targetSelector ? document.querySelector(targetSelector) : null;
+  const panel = button.closest(".collapsible-panel");
+  if (!target || !panel) {
+    return;
+  }
+  const label = button.dataset.collapseLabel || "section";
+  const key = button.dataset.collapseKey || targetSelector;
+  panel.classList.toggle("is-collapsed", collapsed);
+  target.hidden = collapsed;
+  button.textContent = collapsed ? "Show" : "Hide";
+  button.setAttribute("aria-expanded", String(!collapsed));
+  button.dataset.tooltip = collapsed ? `Show ${label}.` : `Hide ${label}.`;
+  if (persist) {
+    saveSectionCollapsed(key, collapsed);
+  }
+}
+
+function setupCollapsibleSections() {
+  document.querySelectorAll("[data-collapse-target]").forEach((button) => {
+    const key = button.dataset.collapseKey || button.dataset.collapseTarget;
+    setCollapsibleSection(button, loadSectionCollapsed(key), false);
+    button.addEventListener("click", () => {
+      const collapsed = button.getAttribute("aria-expanded") === "true";
+      setCollapsibleSection(button, collapsed);
+    });
+  });
 }
 
 async function copyActivityLog() {
@@ -1868,17 +1919,34 @@ function formatOrderQty(value) {
   return formatQty(value) || value || "--";
 }
 
+function formatOrderDetail(event) {
+  if (event.error) {
+    return event.error;
+  }
+  const reason = event.reason
+    ? formatLabel(event.reason)
+    : formatLabel(event.status || "Lifecycle");
+  const fillQty = event.fill_delta_qty || event.filled_qty;
+  if (fillQty) {
+    const qty = formatOrderQty(fillQty);
+    const price = event.filled_avg_price
+      ? ` @ ${formatPrice(event.filled_avg_price)}`
+      : "";
+    return `${qty}${price} · ${reason}`;
+  }
+  const status = event.status ? formatLabel(event.status) : "Submitted";
+  return `${status} · ${reason}`;
+}
+
 function renderOrderEvent(event) {
   const side = event.side ? event.side.toUpperCase() : "--";
   const symbol = event.symbol || "--";
   const eventLabel = formatOrderEventType(event.event_type);
   const time = formatTime(event.created_at, "--");
-  const qty = formatOrderQty(event.fill_delta_qty || event.filled_qty);
-  const price = event.filled_avg_price ? ` @ ${formatPrice(event.filled_avg_price)}` : "";
-  const reason = event.reason ? formatLabel(event.reason) : event.status || "Lifecycle";
-  const detail =
-    event.error ||
-    `${qty}${price} · ${formatLabel(reason)}`;
+  const owner = event.bot
+    ? formatLabel(event.bot)
+    : formatLabel(event.status || "Broker Event");
+  const detail = formatOrderDetail(event);
   return `
     <div class="order-row">
       <div>
@@ -1886,7 +1954,7 @@ function renderOrderEvent(event) {
         <span>${escapeHtml(symbol)} ${escapeHtml(side)} · ${escapeHtml(time)}</span>
       </div>
       <div>
-        <strong>${escapeHtml(event.order_id || "--")}</strong>
+        <strong>${escapeHtml(owner)}</strong>
         <span>${escapeHtml(detail)}</span>
       </div>
     </div>
@@ -2254,6 +2322,7 @@ setupSettingsMenu();
 setupUiSounds();
 setupSettingsModal();
 setupOperatorGuide();
+setupCollapsibleSections();
 setupActivityLog();
 setupTooltips();
 startRefreshLoop();

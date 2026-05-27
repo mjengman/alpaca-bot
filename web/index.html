@@ -90,8 +90,32 @@
         </div>
       </header>
 
-      <section class="panel controls">
-        <div class="control-grid">
+      <section class="panel controls collapsible-panel">
+        <div class="section-head">
+          <h2
+            class="has-tooltip"
+            data-tooltip="Operator-facing strategy configuration for the next EdgeWalker run."
+          >
+            Strategy Controls
+          </h2>
+          <div class="section-actions">
+            <strong>Run config</strong>
+            <button
+              type="button"
+              class="log-toggle panel-collapse-toggle has-tooltip"
+              aria-expanded="true"
+              aria-controls="strategyControlsBody"
+              data-collapse-target="#strategyControlsBody"
+              data-collapse-key="strategy-controls"
+              data-collapse-label="Strategy Controls"
+              data-tooltip="Hide Strategy Controls."
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div id="strategyControlsBody" class="controls-body">
+          <div class="control-grid">
           <!-- Signal is fixed to SOXL for the MVP. Bring this field back when we add broader ticker routing.
           <label class="field">
             <span class="has-tooltip" data-tooltip="SOXL is the regime source. EdgeWalker routes between SOXL, SOXS, or no trade.">Signal</span>
@@ -398,44 +422,69 @@
           </div>
         </details>
 
-        <div class="switch-row">
-          <label class="switch">
-            <input
-              id="dryRunInput"
-              type="checkbox"
-              checked
-              aria-label="Dry run"
-            />
-            <span class="track"></span>
-            <span
-              class="switch-label has-tooltip"
-              data-tooltip="When enabled, the bot prints intended orders without sending them to Alpaca."
-              >Dry run</span
-            >
-          </label>
+          <div class="switch-row">
+            <label class="switch">
+              <input
+                id="dryRunInput"
+                type="checkbox"
+                checked
+                aria-label="Dry run"
+              />
+              <span class="track"></span>
+              <span
+                class="switch-label has-tooltip"
+                data-tooltip="When enabled, the bot prints intended orders without sending them to Alpaca."
+                >Dry run</span
+              >
+            </label>
 
-          <div class="button-row">
-            <button
-              id="runOnceButton"
-              type="button"
-              class="secondary has-tooltip"
-              data-tooltip="Run one evaluation cycle without starting the repeating loop."
-            >
-              Check now
-            </button>
-            <button
-              id="toggleButton"
-              type="button"
-              class="primary has-tooltip"
-              data-tooltip="Start the repeating bot loop with the current settings."
-            >
-              Turn On
-            </button>
+            <div class="button-row">
+              <button
+                id="runOnceButton"
+                type="button"
+                class="secondary has-tooltip"
+                data-tooltip="Run one evaluation cycle without starting the repeating loop."
+              >
+                Check now
+              </button>
+              <button
+                id="toggleButton"
+                type="button"
+                class="primary has-tooltip"
+                data-tooltip="Start the repeating bot loop with the current settings."
+              >
+                Turn On
+              </button>
+            </div>
           </div>
         </div>
       </section>
 
-      <section class="panel decision-panel">
+      <section class="panel decision-panel collapsible-panel">
+        <div class="section-head">
+          <h2
+            class="has-tooltip"
+            data-tooltip="Current regime classification, specialist route, account state, and open-position risk."
+          >
+            Decision State
+          </h2>
+          <div class="section-actions">
+            <strong>Live route</strong>
+            <button
+              type="button"
+              class="log-toggle panel-collapse-toggle has-tooltip"
+              aria-expanded="true"
+              aria-controls="decisionStateBody"
+              data-collapse-target="#decisionStateBody"
+              data-collapse-key="decision-state"
+              data-collapse-label="Decision State"
+              data-tooltip="Hide Decision State."
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div id="decisionStateBody" class="decision-body">
         <div class="decision-lead">
           <div>
             <span
@@ -537,86 +586,10 @@
             <strong id="trailExitValue">--</strong>
           </div>
         </div>
-      </section>
-
-      <section class="metrics">
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Shows whether the bot is simulating orders or sending paper orders to Alpaca."
-            >Mode</span
-          >
-          <strong id="modeValue">Dry run</strong>
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Live Alpaca stream health. EdgeWalker will not trade unless the stream is live and the latest completed one-minute bar is fresh."
-            >Data</span
-          >
-          <strong id="dataStatusValue">Waiting</strong>
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Latest broker constraint state classified from order responses."
-            >Broker</span
-          >
-          <strong
-            id="brokerStateValue"
-            class="has-tooltip"
-            data-tooltip="No broker constraint is currently active."
-            >OK</strong
-          >
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Adaptive posture selector output. Active only when Directional mode is Adaptive; otherwise it can run as shadow telemetry."
-            >Adaptive</span
-          >
-          <strong
-            id="adaptiveValue"
-            class="has-tooltip"
-            data-tooltip="Adaptive posture has not evaluated yet."
-            >Waiting</strong
-          >
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Realized session P/L calculated from lifecycle fill records, not account-level drift."
-            >Realized P/L</span
-          >
-          <strong id="sessionRealizedPlValue">--</strong>
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Number of closed lifecycle trades matched from same-session entry and exit fills."
-            >Closed trades</span
-          >
-          <strong id="sessionTradesValue">0</strong>
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Most recent completed strategy evaluation."
-            >Last check</span
-          >
-          <strong id="lastRunValue">Never</strong>
-        </div>
-        <div class="metric">
-          <span
-            class="has-tooltip"
-            data-tooltip="Next scheduled wake-up while the bot is online."
-            >Next check</span
-          >
-          <strong id="nextRunValue">Idle</strong>
         </div>
       </section>
 
-      <section class="panel bot-performance-panel">
+      <section class="panel bot-performance-panel collapsible-panel">
         <div class="section-head">
           <h2
             class="has-tooltip"
@@ -624,14 +597,130 @@
           >
             Bot Performance
           </h2>
-          <strong id="botPerformanceSummaryValue">No closed trades</strong>
+          <div class="section-actions">
+            <strong id="botPerformanceSummaryValue">No closed trades</strong>
+            <button
+              type="button"
+              class="log-toggle panel-collapse-toggle has-tooltip"
+              aria-expanded="true"
+              aria-controls="botPerformanceGrid"
+              data-collapse-target="#botPerformanceGrid"
+              data-collapse-key="bot-performance"
+              data-collapse-label="Bot Performance"
+              data-tooltip="Hide Bot Performance."
+            >
+              Hide
+            </button>
+          </div>
         </div>
         <div id="botPerformanceGrid" class="bot-performance-grid">
           <div class="bot-performance-empty">No closed trades yet.</div>
         </div>
       </section>
 
-      <section class="panel order-panel">
+      <section class="panel telemetry-panel collapsible-panel">
+        <div class="section-head">
+          <h2
+            class="has-tooltip"
+            data-tooltip="Compact operational status, health, realized P/L, and schedule telemetry."
+          >
+            Telemetry
+          </h2>
+          <div class="section-actions">
+            <strong>Session status</strong>
+            <button
+              type="button"
+              class="log-toggle panel-collapse-toggle has-tooltip"
+              aria-expanded="true"
+              aria-controls="telemetryBody"
+              data-collapse-target="#telemetryBody"
+              data-collapse-key="telemetry"
+              data-collapse-label="Telemetry"
+              data-tooltip="Hide Telemetry."
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div id="telemetryBody" class="metrics">
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Shows whether the bot is simulating orders or sending paper orders to Alpaca."
+              >Mode</span
+            >
+            <strong id="modeValue">Dry run</strong>
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Live Alpaca stream health. EdgeWalker will not trade unless the stream is live and the latest completed one-minute bar is fresh."
+              >Data</span
+            >
+            <strong id="dataStatusValue">Waiting</strong>
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Latest broker constraint state classified from order responses."
+              >Broker</span
+            >
+            <strong
+              id="brokerStateValue"
+              class="has-tooltip"
+              data-tooltip="No broker constraint is currently active."
+              >OK</strong
+            >
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Adaptive posture selector output. Active only when Directional mode is Adaptive; otherwise it can run as shadow telemetry."
+              >Adaptive</span
+            >
+            <strong
+              id="adaptiveValue"
+              class="has-tooltip"
+              data-tooltip="Adaptive posture has not evaluated yet."
+              >Waiting</strong
+            >
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Realized session P/L calculated from lifecycle fill records, not account-level drift."
+              >Realized P/L</span
+            >
+            <strong id="sessionRealizedPlValue">--</strong>
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Number of closed lifecycle trades matched from same-session entry and exit fills."
+              >Closed trades</span
+            >
+            <strong id="sessionTradesValue">0</strong>
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Most recent completed strategy evaluation."
+              >Last check</span
+            >
+            <strong id="lastRunValue">Never</strong>
+          </div>
+          <div class="metric">
+            <span
+              class="has-tooltip"
+              data-tooltip="Next scheduled wake-up while the bot is online."
+              >Next check</span
+            >
+            <strong id="nextRunValue">Idle</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel order-panel collapsible-panel">
         <div class="section-head">
           <h2
             class="has-tooltip"
@@ -639,9 +728,23 @@
           >
             Order Flow
           </h2>
-          <strong id="orderSummaryValue">No pending orders</strong>
+          <div class="section-actions">
+            <strong id="orderSummaryValue">No pending orders</strong>
+            <button
+              type="button"
+              class="log-toggle panel-collapse-toggle has-tooltip"
+              aria-expanded="true"
+              aria-controls="orderFlowBody"
+              data-collapse-target="#orderFlowBody"
+              data-collapse-key="order-flow"
+              data-collapse-label="Order Flow"
+              data-tooltip="Hide recent order events."
+            >
+              Hide
+            </button>
+          </div>
         </div>
-        <div class="order-grid">
+        <div id="orderFlowBody" class="order-grid">
           <div class="order-column">
             <span
               class="has-tooltip"
