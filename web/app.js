@@ -23,17 +23,44 @@ const state = {
   activeEnvironment: "paper",
   liveTradingArmed: false,
   liveCredentialsReady: false,
+  audioscapeEnabled: false,
+  audioHydrated: false,
+  lastOrderFillSignature: null,
+  lastInterventionSignature: null,
+  lastPositionSignature: null,
+  lastTrailingExitPrice: null,
 };
 
 const THEME_KEY = "edgewalker-theme";
+const AUDIOSCAPE_KEY = "edgewalker-audioscape-enabled";
 const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
 const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v1";
 const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
+const SOUND_BASE = `${API_BASE}/assets/sounds`;
+const SOUND_LIBRARY = {
+  uiClick: { file: "UI_click.wav", volume: 0.28 },
+  botStarted: { file: "Bot_started.wav", volume: 0.42 },
+  botDeactivated: { file: "Bot_deactivated.wav", volume: 0.42 },
+  limitMovedUp: { file: "Limit_moved_up.wav", volume: 0.34 },
+  orderFilled: { file: "Order_filled.wav", volume: 0.46 },
+  positionClosed: { file: "Position_closed.wav", volume: 0.46 },
+  humanIntervention: {
+    file: "Error.wav",
+    volume: 0.52,
+  },
+};
+const INTERVENTION_BROKER_STATES = new Set([
+  "RESTRICTED",
+  "EXIT_BLOCKED",
+  "BUYING_POWER_LIMITED",
+]);
 
 const els = {
+  settingsMenuToggle: document.querySelector("#settingsMenuToggle"),
+  settingsMenu: document.querySelector("#settingsMenu"),
   settingsOpen: document.querySelector("#settingsOpen"),
   settingsDialog: document.querySelector("#settingsDialog"),
   settingsClose: document.querySelector("#settingsClose"),
@@ -58,6 +85,8 @@ const els = {
   operatorGuideDialog: document.querySelector("#operatorGuideDialog"),
   operatorGuideClose: document.querySelector("#operatorGuideClose"),
   themeToggle: document.querySelector("#themeToggle"),
+  audioscapeToggle: document.querySelector("#audioscapeToggle"),
+  notificationsToggle: document.querySelector("#notificationsToggle"),
   statusPill: document.querySelector("#statusPill"),
   statusText: document.querySelector("#statusText"),
   symbol: document.querySelector("#symbolInput"),
@@ -152,6 +181,8 @@ tooltipBubble.className = "tooltip-bubble";
 tooltipBubble.setAttribute("role", "tooltip");
 tooltipBubble.setAttribute("aria-hidden", "true");
 document.body.appendChild(tooltipBubble);
+
+const soundCache = new Map();
 
 function payloadFromForm() {
   const selectedDirectionalMode =
@@ -674,10 +705,7 @@ function applyTheme(theme) {
   const useDark = theme === "dark";
   document.body.classList.toggle("dark-theme", useDark);
   if (els.themeToggle) {
-    els.themeToggle.setAttribute("aria-pressed", String(useDark));
-    els.themeToggle.dataset.tooltip = useDark
-      ? "Switch to light mode."
-      : "Switch to dark mode.";
+    els.themeToggle.checked = useDark;
   }
 }
 
@@ -689,11 +717,281 @@ function setupTheme() {
 }
 
 function toggleTheme() {
-  const nextTheme = document.body.classList.contains("dark-theme")
-    ? "light"
-    : "dark";
+  const nextTheme =
+    els.themeToggle && "checked" in els.themeToggle
+      ? els.themeToggle.checked
+        ? "dark"
+        : "light"
+      : document.body.classList.contains("dark-theme")
+      ? "light"
+      : "dark";
   applyTheme(nextTheme);
   saveTheme(nextTheme);
+}
+
+function savedAudioscape() {
+  try {
+    return localStorage.getItem(AUDIOSCAPE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveAudioscape(enabled) {
+  try {
+    localStorage.setItem(AUDIOSCAPE_KEY, enabled ? "1" : "0");
+  } catch {
+    return;
+  }
+}
+
+function applyAudioscape(enabled) {
+  const isEnabled = Boolean(enabled);
+  state.audioscapeEnabled = isEnabled;
+  document.body.classList.toggle("audioscape-enabled", isEnabled);
+  if (els.audioscapeToggle) {
+    els.audioscapeToggle.checked = isEnabled;
+  }
+  if (isEnabled) {
+    prepareSound("uiClick");
+  }
+}
+
+function setupAudioscapePreference() {
+  applyAudioscape(savedAudioscape());
+  if (els.audioscapeToggle) {
+    els.audioscapeToggle.addEventListener("change", () => {
+      applyAudioscape(els.audioscapeToggle.checked);
+      saveAudioscape(state.audioscapeEnabled);
+      if (state.audioscapeEnabled) {
+        playSound("uiClick", { force: true });
+      }
+    });
+  }
+}
+
+function soundUrl(filename) {
+  return `${SOUND_BASE}/${filename.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+function prepareSound(soundName) {
+  if (soundCache.has(soundName)) {
+    return soundCache.get(soundName);
+  }
+  const soundConfig = SOUND_LIBRARY[soundName];
+  if (!soundConfig) {
+    return null;
+  }
+  const sound = new Audio(soundUrl(soundConfig.file));
+  sound.preload = "auto";
+  sound.volume = soundConfig.volume;
+  sound.load();
+  soundCache.set(soundName, sound);
+  return sound;
+}
+
+function playSound(soundName, { force = false } = {}) {
+  if (!force && !state.audioscapeEnabled) {
+    return;
+  }
+  const sound = prepareSound(soundName);
+  if (!sound) {
+    return;
+  }
+  try {
+    sound.pause();
+    sound.currentTime = 0;
+    const playback = sound.play();
+    if (playback && typeof playback.catch === "function") {
+      playback.catch(() => {});
+    }
+  } catch {
+    return;
+  }
+}
+
+function isUiSoundTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  const control = target.closest(
+    'button, select, summary, input[type="checkbox"], input[type="radio"], .switch, .segmented-control label, [role="tab"]',
+  );
+  if (!control || control.closest(".is-disabled")) {
+    return false;
+  }
+  if ("disabled" in control && control.disabled) {
+    return false;
+  }
+  return true;
+}
+
+function setupUiSounds() {
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (isUiSoundTarget(event.target)) {
+        playSound("uiClick");
+      }
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (!["Enter", " "].includes(event.key)) {
+        return;
+      }
+      if (isUiSoundTarget(event.target)) {
+        playSound("uiClick");
+      }
+    },
+    true,
+  );
+}
+
+function signatureFromParts(parts) {
+  return parts.map((part) => part ?? "").join("|");
+}
+
+function orderFillSignature(orderState) {
+  const events = Array.isArray(orderState?.recent_events)
+    ? orderState.recent_events
+    : [];
+  const latestFill =
+    orderState?.latest_fill ||
+    events.find((event) => event.event_type === "FULL_FILL");
+  if (!latestFill) {
+    return null;
+  }
+  return signatureFromParts([
+    latestFill.event_type || "FULL_FILL",
+    latestFill.order_id,
+    latestFill.symbol,
+    latestFill.side,
+    latestFill.filled_qty,
+    latestFill.fill_delta_qty,
+    latestFill.filled_avg_price,
+    latestFill.created_at,
+  ]);
+}
+
+function interventionSignature(data) {
+  if (data.last_error) {
+    return signatureFromParts(["error", data.last_error]);
+  }
+  const brokerState = data.broker_state?.state;
+  if (!INTERVENTION_BROKER_STATES.has(brokerState)) {
+    return null;
+  }
+  return signatureFromParts([
+    "broker",
+    brokerState,
+    data.broker_state?.category,
+    data.broker_state?.message,
+    data.broker_state?.side,
+    data.broker_state?.symbol,
+    data.broker_state?.code,
+  ]);
+}
+
+function positionSignature(status) {
+  if (!status?.position_symbol || !numberOrNull(status.position_qty)) {
+    return null;
+  }
+  return signatureFromParts([
+    status.position_symbol,
+    status.position_qty,
+    status.position_owner,
+  ]);
+}
+
+function trailingExitPrice(status) {
+  return numberOrNull(status?.trailing_exit_price);
+}
+
+function hydrateAudioBaselines(data) {
+  state.lastOrderFillSignature = orderFillSignature(data.order_state);
+  state.lastInterventionSignature = interventionSignature(data);
+  state.lastPositionSignature = positionSignature(data.edgewalker_status);
+  state.lastTrailingExitPrice = trailingExitPrice(data.edgewalker_status);
+  state.audioHydrated = true;
+}
+
+function handleRuntimeSounds(data, wasRunning) {
+  if (!state.audioHydrated) {
+    hydrateAudioBaselines(data);
+    return;
+  }
+
+  if (!wasRunning && state.running) {
+    playSound("botStarted");
+  } else if (wasRunning && !state.running) {
+    playSound("botDeactivated");
+  }
+
+  const fillSignature = orderFillSignature(data.order_state);
+  if (fillSignature && fillSignature !== state.lastOrderFillSignature) {
+    playSound("orderFilled");
+  }
+  state.lastOrderFillSignature = fillSignature;
+
+  const currentInterventionSignature = interventionSignature(data);
+  if (
+    currentInterventionSignature &&
+    currentInterventionSignature !== state.lastInterventionSignature
+  ) {
+    playSound("humanIntervention");
+  }
+  state.lastInterventionSignature = currentInterventionSignature;
+
+  const currentPositionSignature = positionSignature(data.edgewalker_status);
+  if (state.lastPositionSignature && !currentPositionSignature) {
+    playSound("positionClosed");
+  }
+  state.lastPositionSignature = currentPositionSignature;
+
+  const currentTrailingExitPrice = trailingExitPrice(data.edgewalker_status);
+  if (
+    currentTrailingExitPrice !== null &&
+    state.lastTrailingExitPrice !== null &&
+    currentTrailingExitPrice > state.lastTrailingExitPrice
+  ) {
+    playSound("limitMovedUp");
+  }
+  state.lastTrailingExitPrice = currentTrailingExitPrice;
+}
+
+function setSettingsMenuOpen(open) {
+  if (!els.settingsMenu || !els.settingsMenuToggle) return;
+  els.settingsMenu.hidden = !open;
+  els.settingsMenuToggle.classList.toggle("is-open", open);
+  els.settingsMenuToggle.setAttribute("aria-expanded", String(open));
+}
+
+function setupSettingsMenu() {
+  if (!els.settingsMenu || !els.settingsMenuToggle) return;
+
+  els.settingsMenuToggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    hideTooltip();
+    setSettingsMenuOpen(els.settingsMenu.hidden);
+  });
+
+  els.settingsMenu.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  els.settingsMenu.querySelectorAll(".menu-action").forEach((button) => {
+    button.addEventListener("click", () => setSettingsMenuOpen(false));
+  });
+
+  document.addEventListener("click", () => setSettingsMenuOpen(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      setSettingsMenuOpen(false);
+    }
+  });
 }
 
 function setupOperatorGuide() {
@@ -1780,6 +2078,7 @@ function renderLog(data) {
 }
 
 function render(data) {
+  const wasRunning = state.running;
   state.running = Boolean(data.running);
   state.activeEnvironment = data.active_environment || state.activeEnvironment;
   state.liveTradingArmed = Boolean(data.live_trading_armed);
@@ -1840,6 +2139,7 @@ function render(data) {
   els.error.textContent = data.last_error || "";
   renderDecision(data.edgewalker_status);
   renderLog(data);
+  handleRuntimeSounds(data, wasRunning);
 }
 
 async function refresh() {
@@ -1864,11 +2164,16 @@ async function postAction(path) {
   els.toggle.disabled = true;
   els.runOnce.disabled = true;
   try {
+    const shouldPlayStartCueAfterRender =
+      path === "/api/start" && !state.running && !state.audioHydrated;
     const data = await request(path, {
       method: "POST",
       body: JSON.stringify(payloadFromForm()),
     });
     render(data);
+    if (shouldPlayStartCueAfterRender && data.running) {
+      playSound("botStarted");
+    }
   } catch (error) {
     els.error.textContent = error.message;
   } finally {
@@ -1966,10 +2271,13 @@ els.dryRun.addEventListener("change", () => {
 });
 
 if (els.themeToggle) {
-  els.themeToggle.addEventListener("click", toggleTheme);
+  els.themeToggle.addEventListener("change", toggleTheme);
 }
 
 setupTheme();
+setupAudioscapePreference();
+setupSettingsMenu();
+setupUiSounds();
 setupSettingsModal();
 setupOperatorGuide();
 setupActivityLog();

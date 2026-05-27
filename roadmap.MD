@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-05-25
+Last updated: 2026-05-27
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -315,16 +315,101 @@ clear.
   - Position opened
   - Position closed
 
-### Audio Cues
+### Audioscape
 
-Optional toggle. Disabled by default until the cue set feels useful.
+Goal: add a calm situational-awareness layer that makes EdgeWalker feel alive,
+trustworthy, and operator-facing without turning the app into a casino or a
+game.
 
-- Position opened
+Core principle:
+
+The audioscape should quietly answer three questions:
+
+1. Is the system alive?
+2. Did something materially change?
+3. Do I need to care right now?
+
+Design identity:
+
+- Calm cockpit, not dopamine casino
+- Machine dignity: disciplined, procedural, restrained
+- Textural, tactile, semi-mechanical, and cinematic-realistic
+- More submarine, spacecraft, aviation cockpit, industrial control room, or
+  high-end lab equipment than synthwave, game UI, or phone notifications
+- Silence is part of the design; long stable stretches should feel calm, not
+  dead
+
+Initial implementation posture:
+
+- Optional app preference in the settings menu
+- Disabled by default until the cue set feels useful
+- Start mostly event-driven, then consider an optional ambient layer later
+- Critical operational cues should eventually be able to remain audible even if
+  ambience is disabled
+- Avoid strategy or trading-logic changes while adding audio
+
+Tier 1: Operationally critical state transitions
+
+- Bot started
+- Bot stopped
+- Order submitted
+- Order filled
+- Order rejected
+- Error / disconnect
+- Live trading armed
+- Human intervention required
+
+Notes:
+
+- These sounds create trust by confirming important state transitions.
+- Live trading armed should be unmistakable, deeper, slower, restrained, and
+  procedural. It marks the transition from simulation to consequence.
+- Human intervention required should be separate from generic errors for states
+  like insufficient buying power, conflicting position state, API desync,
+  authentication expiry, broker approval requirements, or blocked exits. It
+  should interrupt ambience, recur gently until acknowledged, and stop when the
+  operator has handled it.
+
+Tier 2: Ambient awareness
+
+- UI taps and menu interactions
+- Audioscape enabled / disabled
+- Optional low-level idle ambience while the bot is online
+- Optional poll-cycle tick or soft heartbeat
+
+Notes:
+
+- These should nearly disappear from conscious awareness after long use.
+- If the operator notices them constantly, they are too loud or too frequent.
+- Poll-cycle ticks should be used carefully, especially at short polling
+  intervals.
+
+Tier 3: Strategic intelligence
+
+- Regime changed
+- Active bot shifted
+- Trailing exit updated
 - Position closed
-- Regime change
-- Broker rejection
-- Trailing stop hit
-- Exit blocked
+
+Notes:
+
+- Regime audio could become a signature EdgeWalker feature: uptrend, sideways,
+  and downtrend should become subconsciously recognizable without implying that
+  one is inherently "good" or "bad."
+- Uptrend may use airy upward motion; sideways may use dry, stable, percussive
+  texture; downtrend may use denser, lower, slower motion.
+- Active bot shifts should use subtle identity motifs for MomentumBot, ChopBot,
+  and InverseBot, with timbre doing more work than melody.
+- Trailing exit updated should feel like a tiny mechanical ratchet or lock-in
+  tick: progress, protection, and tightening control without celebrating money.
+
+Future sound profiles:
+
+- Silent
+- Minimal
+- Tactical
+- Cinematic
+- Streamer Mode
 
 ### Operator Guide
 

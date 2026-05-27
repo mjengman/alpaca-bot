@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -54,6 +55,7 @@ from market_data import StreamingMarketDataService
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 WEB_ROOT = PROJECT_ROOT / "web"
+ASSETS_ROOT = PROJECT_ROOT / "assets"
 HOST = "127.0.0.1"
 PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
@@ -2447,12 +2449,25 @@ class AppHandler(BaseHTTPRequestHandler):
             raise BotError(f"{label} must come from the local EdgeWalker UI.")
 
     def serve_static(self) -> None:
-        route = self.path.split("?", 1)[0]
+        route = urllib.parse.unquote(self.path.split("?", 1)[0])
         if route == "/":
             route = "/index.html"
 
-        path = (WEB_ROOT / route.lstrip("/")).resolve()
-        if not str(path).startswith(str(WEB_ROOT.resolve())) or not path.is_file():
+        is_asset_route = route.startswith("/assets/")
+        root = ASSETS_ROOT if is_asset_route else WEB_ROOT
+        if is_asset_route:
+            relative_route = route.removeprefix("/assets/")
+        else:
+            relative_route = route.lstrip("/")
+
+        path = (root / relative_route).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            self.send_json({"error": "Not found"}, status=404)
+            return
+
+        if not path.is_file():
             self.send_json({"error": "Not found"}, status=404)
             return
 

@@ -14,34 +14,71 @@
           <h1>EdgeWalker</h1>
         </div>
         <div class="top-actions">
-          <button
-            id="settingsOpen"
-            type="button"
-            class="settings-toggle has-tooltip"
-            aria-label="Open settings"
-            data-tooltip="Configure paper and live broker connections."
-          >
-            <span aria-hidden="true">⚙</span>
-          </button>
-          <button
-            id="operatorGuideOpen"
-            type="button"
-            class="info-toggle has-tooltip"
-            aria-label="Open operator guide"
-            data-tooltip="Open the EdgeWalker operator guide."
-          >
-            <span aria-hidden="true">i</span>
-          </button>
-          <button
-            id="themeToggle"
-            type="button"
-            class="theme-toggle has-tooltip"
-            aria-label="Toggle dark mode"
-            aria-pressed="false"
-            data-tooltip="Switch between light and dark mode."
-          >
-            <span class="theme-icon"></span>
-          </button>
+          <div class="settings-menu">
+            <button
+              id="settingsMenuToggle"
+              type="button"
+              class="menu-toggle has-tooltip"
+              aria-label="Open settings menu"
+              aria-controls="settingsMenu"
+              aria-expanded="false"
+              data-tooltip="Open app settings."
+            >
+              <span class="menu-dots" aria-hidden="true"></span>
+            </button>
+            <div
+              id="settingsMenu"
+              class="settings-popover"
+              aria-label="App settings"
+              hidden
+            >
+              <div class="settings-popover-head">
+                <p class="eyebrow">APP SETTINGS</p>
+                <strong>Preferences</strong>
+              </div>
+
+              <div class="settings-popover-section">
+                <label class="switch menu-switch">
+                  <input
+                    id="themeToggle"
+                    type="checkbox"
+                    aria-label="Dark theme"
+                  />
+                  <span class="track"></span>
+                  <span class="switch-label">Dark theme</span>
+                </label>
+                <label class="switch menu-switch">
+                  <input
+                    id="audioscapeToggle"
+                    type="checkbox"
+                    aria-label="Audioscape"
+                  />
+                  <span class="track"></span>
+                  <span class="switch-label">Audioscape</span>
+                </label>
+                <label class="switch menu-switch is-disabled">
+                  <input
+                    id="notificationsToggle"
+                    type="checkbox"
+                    aria-label="Notifications"
+                    disabled
+                  />
+                  <span class="track"></span>
+                  <span class="switch-label">Notifications</span>
+                  <span class="setting-state">Later</span>
+                </label>
+              </div>
+
+              <div class="settings-popover-section">
+                <button id="settingsOpen" type="button" class="menu-action">
+                  Broker Readiness
+                </button>
+                <button id="operatorGuideOpen" type="button" class="menu-action">
+                  Operator Guide
+                </button>
+              </div>
+            </div>
+          </div>
           <div
             class="status-pill has-tooltip"
             id="statusPill"
