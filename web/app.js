@@ -137,7 +137,6 @@ const els = {
   positionPl: document.querySelector("#positionPlValue"),
   trailExit: document.querySelector("#trailExitValue"),
   orderSummary: document.querySelector("#orderSummaryValue"),
-  pendingOrders: document.querySelector("#pendingOrdersList"),
   orderEvents: document.querySelector("#orderEventsList"),
   error: document.querySelector("#errorText"),
   activityPanel: document.querySelector("#activityPanel"),
@@ -1869,28 +1868,6 @@ function formatOrderQty(value) {
   return formatQty(value) || value || "--";
 }
 
-function renderPendingOrder(order) {
-  const side = order.side ? order.side.toUpperCase() : "--";
-  const symbol = order.symbol || "--";
-  const bot = order.bot ? formatLabel(order.bot) : "Unassigned";
-  const reason = order.reason ? formatLabel(order.reason) : "Pending";
-  const status = order.status ? formatLabel(order.status) : "Submitted";
-  const filled = formatOrderQty(order.filled_qty);
-  const updated = formatTime(order.updated_at || order.submitted_at, "--");
-  return `
-    <div class="order-row">
-      <div>
-        <strong>${escapeHtml(symbol)} ${escapeHtml(side)}</strong>
-        <span>${escapeHtml(bot)} · ${escapeHtml(reason)}</span>
-      </div>
-      <div>
-        <strong>${escapeHtml(status)}</strong>
-        <span>${escapeHtml(filled)} filled · ${escapeHtml(updated)}</span>
-      </div>
-    </div>
-  `;
-}
-
 function renderOrderEvent(event) {
   const side = event.side ? event.side.toUpperCase() : "--";
   const symbol = event.symbol || "--";
@@ -1941,9 +1918,6 @@ function renderOrderState(orderState) {
     els.orderSummary.classList.add("is-neutral");
   }
 
-  els.pendingOrders.innerHTML = pending.length
-    ? pending.map(renderPendingOrder).join("")
-    : '<div class="order-empty">None</div>';
   els.orderEvents.innerHTML = events.length
     ? events.map(renderOrderEvent).join("")
     : '<div class="order-empty">No events</div>';

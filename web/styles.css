@@ -1080,7 +1080,7 @@ button:disabled {
 
 .order-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .order-column {
@@ -1088,10 +1088,6 @@ button:disabled {
   gap: 10px;
   min-width: 0;
   padding: 14px 16px;
-}
-
-.order-column:not(:last-child) {
-  border-right: 1px solid var(--line);
 }
 
 .order-column > span {
