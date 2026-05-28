@@ -1452,6 +1452,9 @@ class TrailingStopBot:
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(f"{symbol}: closeout window active, sell order already open.")
             return
+        if any(order.get("side") == "buy" for order in symbol_orders):
+            print(f"{symbol}: closeout window active, buy order still open; waiting.")
+            return
 
         qty = decimal_from_api(position.get("qty"), "position qty")
         if qty <= 0:
@@ -1507,6 +1510,9 @@ class TrailingStopBot:
     ) -> None:
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(f"{symbol}: sell order already open; waiting for it to resolve.")
+            return
+        if any(order.get("side") == "buy" for order in symbol_orders):
+            print(f"{symbol}: buy order still open; trailing stop waiting for it to resolve.")
             return
 
         qty = decimal_from_api(position.get("qty"), "position qty")
@@ -3116,6 +3122,13 @@ class EdgeWalkerBot:
                 "entry_signal=False action_taken=wait_for_stale_close"
             )
             return "wait_for_stale_close"
+        if any(order.get("side") == "buy" for order in symbol_orders):
+            print(
+                f"[RISK] {symbol}: regime={regime} owner={owner_text} "
+                f"active_bot={active_bot} stale exposure, buy order still open; "
+                "entry_signal=False action_taken=wait_for_stale_close_order"
+            )
+            return "wait_for_stale_close_order"
 
         qty = self._position_qty(position).quantize(
             FRACTIONAL_QTY_STEP,
@@ -3200,6 +3213,12 @@ class EdgeWalkerBot:
                 "entry_signal=False action_taken=wait_for_chop_exit_order"
             )
             return "wait_for_chop_exit_order"
+        if any(order.get("side") == "buy" for order in symbol_orders):
+            print(
+                f"[RISK] {symbol}: ChopBot slow SMA reclaim, buy order still open; "
+                "entry_signal=False action_taken=wait_for_chop_exit_order"
+            )
+            return "wait_for_chop_exit_order"
 
         qty = self._position_qty(position).quantize(
             FRACTIONAL_QTY_STEP,
@@ -3278,6 +3297,10 @@ class EdgeWalkerBot:
             symbol_orders = [order for order in orders if order.get("symbol") == symbol]
             if any(order.get("side") == "sell" for order in symbol_orders):
                 print(f"[RISK] {symbol}: closeout window active, sell order already open.")
+                sell_pending = True
+                continue
+            if any(order.get("side") == "buy" for order in symbol_orders):
+                print(f"[RISK] {symbol}: closeout window active, buy order still open.")
                 sell_pending = True
                 continue
 

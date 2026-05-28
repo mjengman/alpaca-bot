@@ -97,6 +97,7 @@ class FakeClient:
         sell_error: BotError | None = None,
         buy_order_response: dict[str, Any] | None = None,
         sell_order_response: dict[str, Any] | None = None,
+        open_orders: list[dict[str, Any]] | None = None,
         order_lookup: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.bar_map = bar_map
@@ -107,6 +108,7 @@ class FakeClient:
         self.sell_error = sell_error
         self.buy_order_response = buy_order_response
         self.sell_order_response = sell_order_response
+        self.open_orders = open_orders or []
         self.order_lookup = order_lookup or {}
         self.buys: list[tuple[str, Decimal]] = []
         self.sells: list[tuple[str, Decimal]] = []
@@ -130,7 +132,7 @@ class FakeClient:
         return self.latest_quotes.get(symbol)
 
     def list_open_orders(self) -> list[dict[str, Any]]:
-        return []
+        return list(self.open_orders)
 
     def get_position(self, symbol: str) -> dict[str, Any] | None:
         return self.positions.get(symbol)
@@ -766,6 +768,31 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "ChopBot")
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+
+    def test_stale_position_waits_when_same_symbol_buy_order_is_open(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "101", "99")},
+            {"SOXL": {"qty": "75", "avg_entry_price": "219.87"}},
+            open_orders=[
+                {
+                    "id": "buy-open",
+                    "symbol": "SOXL",
+                    "side": "buy",
+                    "status": "accepted",
+                }
+            ],
+        )
+
+        output, status = self.run_bot(
+            client,
+            lambda state: state.set_position_owner("SOXL", "MomentumBot"),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertIn("stale exposure, buy order still open", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, "ChopBot")
+        self.assertEqual(status.action_taken, "wait_for_stale_close_order")
 
     def test_uptrend_closes_chop_owned_soxl_before_momentum_entry(self) -> None:
         client = FakeClient(

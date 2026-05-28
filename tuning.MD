@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-05-26
+Last updated: 2026-05-28
 
 Go-live target: 2026-06-04
 
@@ -131,6 +131,84 @@ What needs attention:
   this should be studied before changing.
 - The system needs a first-class event vocabulary so after-action reviews are
   built from structured facts instead of loose log interpretation.
+
+## 2026-05-28 After-Action Review
+
+Session: qualification day 3, Aggressive mode
+
+Cycles: 386
+
+Result: 20 completed trades. Account value moved from about $99,121.35 to
+$99,408.60, roughly +$287.25. Lifecycle summary reported +$297.86, which should
+be reconciled against fill-paired/account movement.
+
+Session identity:
+
+- Directional participation day with persistent regime churn.
+- SOXL ranged from about $219.87 at first actionable cycle, down to $207.59,
+  up to $231.60, and closed the session near $224.91.
+- Regime transitions remained high at 38, but the tape rewarded directional
+  persistence more than Balanced day did.
+- Aggressive mode acted more continuation-friendly than reckless; it approved
+  many continuation entries while still blocking weak or sideways setups.
+
+Bot behavior:
+
+- MomentumBot was the primary winner, with 11 trades and strong positive P/L.
+- InverseBot struggled, with 8 trades and negative P/L.
+- ChopBot was mostly irrelevant, with one small losing trade.
+- Only one entry used `strong_trend_chase_allowed`; most approved directional
+  entries were ordinary `trend_continuation_allowed`.
+
+What worked:
+
+- Aggressive increased participation without obviously collapsing discipline.
+- The bot spent more time managing open positions than entering new ones.
+- Stale-data, closeout, sizing, and route-invalidation policies remained active.
+- MomentumBot captured a major persistence window that Conservative would have
+  avoided and Balanced may have handled differently.
+- The comparison with Balanced day suggests churn count alone is not enough to
+  explain tradeability.
+
+What needs attention:
+
+- Two exit attempts were rejected during a partial-fill opening state because
+  Alpaca detected an opposite-side/wash-trade conflict.
+- Broker rejection classification labeled those rejections as insufficient
+  buying power, which was misleading.
+- P/L reconciliation differed by about $10 between lifecycle summary and
+  account/fill-paired movement.
+- `stale_position_regime_mismatch` is behaviorally useful but semantically
+  muddy; future naming should distinguish route invalidation from stale data.
+- Regime-mismatch exits need outcome classification before the doctrine can be
+  judged.
+
+Behavioral assessment:
+
+Aggressive mode expanded participation and captured directional persistence
+without behaving like a churn-seeking mode. The session increased confidence in
+the continuation-entry architecture, but the most actionable findings were
+execution and telemetry issues rather than strategy-threshold defects.
+
+Evidence strength:
+
+- Strong evidence for preserving the open-buy sell guard and improving
+  opening/closing lifecycle visibility before live trading.
+- Strong evidence for improving broker rejection classification.
+- Moderate evidence that directional persistence quality matters more than
+  transition count alone.
+- Moderate evidence that regime-mismatch exits need richer outcome telemetry.
+- Weak evidence for changing directional thresholds, cooldowns, stops, or
+  InverseBot filters.
+
+Adaptive note:
+
+Adaptive shadow mostly displayed Balanced posture, but most of those cycles
+were `adaptive_entry_posture_paused` while a position was already open. This
+should not be read as a simple rejection of Aggressive mode. Adaptive day should
+be judged on doctrine selection quality: whether it avoids churn traps,
+participates when persistence emerges, and makes confidence changes that remain
+explainable in hindsight.
 
 ## P0 Candidates Before Go-Live
 
@@ -353,6 +431,65 @@ Acceptance criteria:
 - The UI exposes the active live envelope clearly.
 - Breaching a limit halts entries and explains why.
 
+### 8. Harden Partial-Fill Exit Handling
+
+Status: partially implemented; continue hardening
+
+Impact: high
+
+Why:
+
+Aggressive day produced two broker-rejected exit attempts while an opening buy
+order was still partially filling. The initial open-buy sell guard has been
+implemented so same-symbol exits wait while a buy order is still open. The
+remaining live-readiness work is to make `OPENING`, `OPEN`, `CLOSING`, and
+`CLOSED` materially visible position lifecycle states.
+
+Candidate behavior:
+
+- Preserve the implemented guard that avoids opposite-side market exits while a
+  same-symbol buy order is still open.
+- Surface an `OPENING` state when entry fill reconciliation is incomplete.
+- Keep risk logic aware that a partially filled position exists, but avoid
+  broker-rejected opposite-side orders.
+- Escalate repeated partial-fill exit blockage as an operator-visible
+  interrupt.
+
+Acceptance criteria:
+
+- Partial entry fills do not create repeated rejected exit attempts.
+- The dashboard shows when a position is opening, open, closing, or closed.
+- Risk logs explain whether the bot is waiting for fill completion or taking an
+  allowed protective action.
+
+### 9. Tighten Broker Rejection And P/L Truth
+
+Status: strongly consider
+
+Impact: high
+
+Why:
+
+The partial-fill exit rejections were classified as insufficient buying power
+even though Alpaca reported an opposite-side/wash-trade conflict. Aggressive day
+also showed a small P/L difference between lifecycle summary and account/fill
+movement.
+
+Recommended action:
+
+- Add a distinct rejection category for opposite-side order conflict or
+  wash-trade risk.
+- Preserve broker-provided rejection text in operator-visible state.
+- Reconcile lifecycle P/L, fill-paired P/L, and account day P/L around partial
+  fills.
+
+Acceptance criteria:
+
+- Broker rejection categories match the actual failure cause.
+- P/L summaries can explain any gap between account movement and lifecycle
+  realized P/L.
+- Partial fills are not double-counted or mispaired in trade summaries.
+
 ## P1 Candidates After More Sessions
 
 ### 1. ChopBot Threshold Review
@@ -406,6 +543,55 @@ Watch:
 - Whether Adaptive correctly reduces aggression near closeout and stale-data
   conditions
 
+### 4. Regime-Mismatch Exit Outcome Classification
+
+Status: watch
+
+Why:
+
+Route-invalidation exits are doctrine, not automatically success or failure.
+Aggressive day had many exits under the current `stale_position_regime_mismatch`
+reason, but the outcome quality likely varied.
+
+Potential classifications:
+
+- Defensive save: exit prevented meaningful adverse continuation.
+- Premature cut: exit was followed by favorable continuation in the exited
+  direction.
+- Profitable handoff: exit cleared exposure before a different bot captured the
+  new regime.
+- Neutral exit: little meaningful movement followed.
+
+Watch:
+
+- Post-exit price path over 5, 15, and 30 minutes.
+- Whether a new routed bot entered after the exit.
+- Whether the exit protected capital or mostly increased churn.
+
+### 5. Directional Persistence And Session Difficulty Telemetry
+
+Status: watch
+
+Why:
+
+Balanced day and Aggressive day had similar regime-transition counts but very
+different outcomes. Churn count alone is not the causal explanation.
+
+Potential metrics:
+
+- Regime age at entry.
+- Regime flips over the last 15, 30, and 60 minutes.
+- Post-entry follow-through over 5, 15, and 30 minutes.
+- Max favorable excursion and max adverse excursion per trade.
+- Session difficulty score based on churn, volatility, persistence, and
+  reversal frequency.
+
+Watch:
+
+- Whether continuation entries work only after regimes have proven enough age.
+- Whether high local churn should lower Adaptive confidence.
+- Whether session difficulty explains mode performance better than raw churn.
+
 ## Go-Live Readiness Checklist
 
 - [ ] Fresh-cross doctrine explicitly accepted or revised.
@@ -414,6 +600,13 @@ Watch:
 - [ ] Daily narrative includes behavioral assessment.
 - [ ] Daily narrative includes narrative confidence.
 - [ ] Stale-exposure exits are named policy events.
+- [x] Initial open-buy sell guard prevents repeated opposite-side sell attempts
+  while a same-symbol buy order is still open.
+- [ ] Opening, open, closing, and closed lifecycle states are visible to the
+  operator.
+- [ ] Broker rejection classification distinguishes buying-power limits from
+  opposite-side or wash-trade conflicts.
+- [ ] Lifecycle P/L, fill-paired P/L, and account movement can be reconciled.
 - [ ] Live risk envelope is configured and visible.
 - [ ] Live trading remains explicitly armed, typed-confirmation gated, and easy
   to disarm.
@@ -440,3 +633,14 @@ Watch:
 - Added the qualification mode rotation plan:
   Conservative -> Balanced -> Aggressive -> Adaptive, repeated across separated
   market contexts.
+
+2026-05-28:
+
+- Added the Aggressive qualification day AAR.
+- Recorded that Aggressive increased continuation participation without
+  appearing reckless, but surfaced execution and telemetry findings.
+- Recorded the implemented open-buy sell guard and promoted remaining lifecycle
+  visibility, broker rejection classification, and P/L reconciliation as
+  pre-live correctness candidates.
+- Added regime-mismatch outcome classification and directional-persistence
+  telemetry as watch items before any strategy-threshold changes.

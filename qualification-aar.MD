@@ -1,6 +1,6 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 This file captures paper-trading qualification observations before they become
 tuning decisions. During the first full rotation through Conservative,
@@ -311,3 +311,167 @@ Next session:
 - Preserve all other configuration unless a fire-fix is required.
 - Compare Aggressive mode's behavior under whatever tape the market gives us,
   especially trade count, churn sensitivity, and MomentumBot exposure.
+
+## 2026-05-28 AAR: Aggressive Mode
+
+Qualification day: Day 3
+
+Mode: Aggressive
+
+Session files:
+
+- `logs/edgewalker-2026-05-28.jsonl`
+- `logs/position_lifecycle.jsonl`
+
+Result:
+
+- Final lifecycle realized P/L: `+$297.86`
+- Approximate account impact: `+$287.25`, about `+0.29%` on a roughly `$99k`
+  paper account
+- Fill-paired P/L: `+$287.24`
+- Cycles: `386`
+- Closed trades: `20`
+- Wins/losses: `8W / 12L`
+- Regime transitions: `38`
+- Data health: `368 / 386` cycles were `LIVE`; `13` stale cycles and `3`
+  warming-up cycles were recorded
+- Broker state: mostly `OK`, with `2` exit-blocked cycles from partial-fill
+  opposite-side order conflicts
+- End state: flat into close, no pending orders
+- Session difficulty: `HIGH / CHURNY BUT TRADEABLE`
+- Interpretation confidence: `HIGH` for operational findings, `MEDIUM` for
+  strategy conclusions because Adaptive has not yet had control
+
+Bot performance:
+
+- MomentumBot: lifecycle `+$636.48`, `11 trades`, `6W / 5L`
+- ChopBot: `-$23.83`, `1 trade`, `0W / 1L`
+- InverseBot: `-$314.79`, `8 trades`, `2W / 6L`
+
+Fill-paired contribution note:
+
+- Fill-paired MomentumBot P/L was about `+$625.86`, about `$10.62` below the
+  lifecycle bot summary. This appears tied to the opening partial-fill sequence
+  and should be reconciled before live trading.
+
+Exit reason contribution, fill-paired:
+
+- Stale-position regime mismatch: `17 exits`, about `-$91.80`
+- Trailing-stop breached: `3 exits`, about `+$379.04`
+
+Entry reason contribution, fill-paired:
+
+- Trend continuation allowed: `18 trades`, about `+$8.48`
+- Strong trend chase allowed: `1 trade`, about `+$302.59`
+- Discount confirmed: `1 trade`, about `-$23.83`
+
+Notable events:
+
+- Highest realized gain: MomentumBot SOXL, about `+$650.36`, roughly
+  `10:55-11:45 ET`, exited by stale-position regime mismatch after a major
+  persistence window.
+- Largest realized loss: MomentumBot SOXL, about `-$242.82`, roughly
+  `15:09-15:17 ET`, exited by stale-position regime mismatch.
+- Longest hold: MomentumBot SOXL, about `50m 36s`, roughly `10:55-11:45 ET`.
+- First trade opened during partial fills; attempted route-invalidation exits
+  at roughly `9:36` and `9:37 ET` were rejected by Alpaca as opposite-side /
+  wash-trade conflicts until the entry finished filling.
+- Only one trade used `strong_trend_chase_allowed`; Aggressive did not behave
+  like uncontrolled chase mode.
+
+Session identity:
+
+- Directional participation day with persistent regime churn.
+- SOXL moved from about `$219.87` at the first actionable cycle, down to
+  `$207.59`, up to `$231.60`, and ended near `$224.91`.
+- Regime churn remained high, but the tape rewarded directional persistence
+  more than Balanced day did.
+- Aggressive mode acted more continuation-friendly than reckless.
+
+Behavioral fingerprint:
+
+- Aggressive increased participation and captured persistence without obviously
+  collapsing discipline.
+- The system spent most of the day managing open positions rather than firing
+  constant new entries.
+- Continuation participation was materially higher than Conservative and more
+  successful than Balanced under this tape.
+- MomentumBot appears environment-sensitive rather than intrinsically weak:
+  nearly absent in Conservative, heavily negative in Balanced, strongly
+  positive in Aggressive.
+- InverseBot was the casualty of this session, which contrasts with its
+  positive contribution on Balanced day.
+
+Adaptive shadow observations:
+
+- Adaptive posture counts: `BALANCED/HIGH 241`, `BALANCED/LOW 77`,
+  `CONSERVATIVE/LOW 27`, `BALANCED/MODERATE 18`, `CONSERVATIVE/HIGH 8`,
+  `AGGRESSIVE/HIGH 4`.
+- Most `BALANCED/HIGH` cycles were `adaptive_entry_posture_paused` while a
+  position was already open, so the raw Balanced count should not be read as a
+  simple rejection of Aggressive mode.
+- Grouping actual entries by Adaptive's shadow posture at entry time:
+  `AGGRESSIVE/HIGH 4 trades, +$519.53`; `BALANCED/MODERATE 14 trades,
+  -$173.57`; `BALANCED/HIGH 1 trade, -$34.89`; `BALANCED/LOW 1 trade,
+  -$23.83`. This is observational grouping, not counterfactual Adaptive P/L.
+- Tomorrow's Adaptive day should be judged on doctrine-selection quality, not
+  just P/L.
+
+What worked:
+
+- Aggressive traded less than Balanced while producing better session results:
+  `20` trades versus Balanced's `25`.
+- The runtime still blocked many weak setups: ChopBot discount/mean checks and
+  directional strength checks remained active.
+- Stale-data, closeout, sizing, and route-invalidation policies remained active.
+- The strongest MomentumBot trade showed that continuation entries can work
+  when directional persistence quality is favorable.
+- Churn count alone was shown to be insufficient: Balanced lost money with
+  `42` transitions, while Aggressive made money with `38`.
+
+What needs attention:
+
+- Initial open-buy sell guards have been implemented; remaining work is
+  lifecycle visibility around opening/closing states.
+- Broker rejection classification mislabeled opposite-side/wash-trade conflict
+  as insufficient buying power.
+- Lifecycle P/L, fill-paired P/L, and account movement should reconcile cleanly,
+  especially around partial fills.
+- The phrase `stale_position_regime_mismatch` is behaviorally useful but
+  semantically muddy; it reads like stale data even when the real issue is
+  route/owner invalidation.
+- Regime-mismatch exits need outcome classification before the doctrine can be
+  evaluated. Potential buckets: defensive save, premature cut, profitable
+  handoff, neutral exit.
+
+Parked hypotheses:
+
+- The key hidden variable may be directional persistence quality, not raw
+  regime-transition count.
+- Regime age at entry and recent churn pressure may eventually improve Adaptive
+  confidence.
+- Continuation entries may need confidence scoring that distinguishes fresh
+  cross, ordinary continuation, and strong-trend chase.
+- Session difficulty should eventually capture churn, volatility, persistence,
+  and reversal frequency.
+- Aggressive may be better understood by operators as continuation-friendly or
+  participation-oriented, not reckless.
+
+Do not change yet:
+
+- Do not change directional thresholds from this single profitable session.
+- Do not change InverseBot filters from one bad day.
+- Do not change trail percent or cooldown from this session.
+- Do not promote Aggressive live behavior just because it ended green.
+- Do not interrupt the qualification rotation before Adaptive has a full day in
+  control.
+
+Next session:
+
+- Qualification Day 4 should run Adaptive mode.
+- Judge Adaptive on doctrine-selection quality before profitability.
+- Watch whether Adaptive avoids churn traps, participates when persistence
+  emerges, and exposes confidence changes that are explainable in hindsight.
+- After Adaptive day, promote operational fixes that now have enough evidence
+  into implementation backlog: opening/closing lifecycle visibility, broker
+  rejection classification, and P/L reconciliation.
