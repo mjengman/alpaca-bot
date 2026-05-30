@@ -218,6 +218,36 @@ class FakeMarketData:
         }
 
 
+class RepairingMarketData(FakeMarketData):
+    def __init__(
+        self,
+        bar_map: dict[str, list[dict[str, Any]]],
+        repaired_bar_map: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        super().__init__(bar_map)
+        self.repaired_bar_map = repaired_bar_map
+        self.repair_calls: list[dict[str, Any]] = []
+
+    def repair_stale_bars(
+        self,
+        client: FakeClient,
+        symbols: tuple[str, ...],
+        required_bars: int,
+    ) -> dict[str, Any]:
+        self.repair_calls.append(
+            {"symbols": symbols, "required_bars": required_bars}
+        )
+        self.bar_map.update(self.repaired_bar_map)
+        return {
+            "attempted": True,
+            "candidate_symbols": ["SOXL"],
+            "repaired_symbols": ["SOXL"],
+            "unchanged_symbols": [],
+            "errors": [],
+            "reasons": {"SOXL": "bars_stale"},
+        }
+
+
 class EdgeWalkerBotTest(unittest.TestCase):
     def run_bot(
         self,
@@ -624,6 +654,23 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
         self.assertEqual(status.data_source, "stream")
         self.assertEqual(status.data_status, "LIVE")
+        self.assertEqual(status.action_taken, "market_buy")
+
+    def test_streaming_market_data_repairs_stale_bars_before_regime_detection(self) -> None:
+        stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        client = FakeClient({"SOXL": bars("100", "100", "100")})
+        stream = RepairingMarketData(
+            {"SOXL": bars("100", "101", latest_at=stale_latest_at)},
+            {"SOXL": bars("100", "101", "99")},
+        )
+
+        output, status = self.run_bot(client, market_data=stream)
+
+        self.assertEqual(
+            stream.repair_calls,
+            [{"symbols": ("SOXL", "SOXS"), "required_bars": 4}],
+        )
+        self.assertIn("[DATA] BAR BACKFILL repaired symbols=SOXL", output)
         self.assertEqual(status.action_taken, "market_buy")
 
     def test_stream_status_must_be_live_before_strategy_actions(self) -> None:

@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from bot import (
     MARKET_DATA_MAX_AGE_SECONDS,
     BotConfig,
+    BotError,
     age_seconds,
     bar_end_age_seconds,
     parse_market_timestamp,
@@ -64,6 +65,7 @@ class StreamingMarketDataService:
         self._last_message_at: datetime | None = None
         self._last_error: str | None = None
         self._last_save_monotonic = 0.0
+        self._last_repair_monotonic: dict[str, float] = {}
         self._load_state()
 
     @property
@@ -161,6 +163,82 @@ class StreamingMarketDataService:
                 "latest_quote_time": self._time_text(latest_quote_time),
                 "quote_age_seconds": self._rounded_seconds(age_seconds(latest_quote_time)),
             }
+
+    def repair_stale_bars(
+        self,
+        client: Any,
+        symbols: tuple[str, ...] | None = None,
+        required_bars: int | None = None,
+        max_age_seconds: int = MARKET_DATA_MAX_AGE_SECONDS,
+        min_interval_seconds: int = 30,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        checked_at = now or datetime.now(timezone.utc)
+        candidates: list[dict[str, Any]] = []
+        current_monotonic = time.monotonic()
+        target_symbols = tuple(dict.fromkeys((symbols or self.symbols)))
+
+        with self._lock:
+            for raw_symbol in target_symbols:
+                symbol = raw_symbol.upper()
+                if symbol not in self.symbols:
+                    continue
+                reason = self._bar_repair_reason_locked(
+                    symbol,
+                    required_bars,
+                    max_age_seconds,
+                    checked_at,
+                )
+                if reason is None:
+                    continue
+                last_repair = self._last_repair_monotonic.get(symbol, 0.0)
+                if current_monotonic - last_repair < min_interval_seconds:
+                    continue
+                self._last_repair_monotonic[symbol] = current_monotonic
+                candidates.append({"symbol": symbol, "reason": reason})
+
+        result: dict[str, Any] = {
+            "attempted": bool(candidates),
+            "candidate_symbols": [candidate["symbol"] for candidate in candidates],
+            "repaired_symbols": [],
+            "unchanged_symbols": [],
+            "errors": [],
+            "reasons": {
+                candidate["symbol"]: candidate["reason"] for candidate in candidates
+            },
+        }
+        if not candidates:
+            return result
+
+        fetch_minutes = max(required_bars or 1, 1)
+        changed_any = False
+        for candidate in candidates:
+            symbol = candidate["symbol"]
+            try:
+                fetched_bars = client.get_recent_bars(symbol, fetch_minutes)
+            except BotError as exc:
+                result["errors"].append({"symbol": symbol, "error": str(exc)})
+                continue
+
+            with self._lock:
+                before = self._regular_session_bars_locked(symbol)
+                before_latest = before[-1].get("t") if before else None
+                changed = self._merge_backfill_bars_locked(symbol, fetched_bars)
+                self._prune_current_trading_day_locked()
+                after = self._regular_session_bars_locked(symbol)
+                after_latest = after[-1].get("t") if after else None
+
+            changed_any = changed_any or changed
+            if changed and (len(after) != len(before) or after_latest != before_latest):
+                result["repaired_symbols"].append(symbol)
+            else:
+                result["unchanged_symbols"].append(symbol)
+
+        if changed_any:
+            with self._lock:
+                self._save_state_locked(force=True)
+
+        return result
 
     def _run(self, stop_event: threading.Event) -> None:
         backoff_seconds = 1.0
@@ -274,6 +352,26 @@ class StreamingMarketDataService:
 
     def _record_bar_locked(self, message: dict[str, Any]) -> bool:
         symbol = str(message.get("S", "")).upper()
+        return self._upsert_bar_locked(symbol, message, self.source_name)
+
+    def _merge_backfill_bars_locked(
+        self,
+        symbol: str,
+        bars: list[dict[str, Any]],
+    ) -> bool:
+        changed = False
+        for bar in bars:
+            if not isinstance(bar, dict):
+                continue
+            changed = self._upsert_bar_locked(symbol, bar, "rest_backfill") or changed
+        return changed
+
+    def _upsert_bar_locked(
+        self,
+        symbol: str,
+        message: dict[str, Any],
+        source: str,
+    ) -> bool:
         timestamp = message.get("t")
         if symbol not in self.symbols or not isinstance(timestamp, str):
             return False
@@ -283,8 +381,17 @@ class StreamingMarketDataService:
             for key in ("S", "o", "h", "l", "c", "v", "n", "vw", "t")
             if key in message
         }
-        bar["source"] = self.source_name
-        bars = [item for item in self._bars.setdefault(symbol, []) if item.get("t") != timestamp]
+        bar["S"] = str(bar.get("S") or symbol).upper()
+        bar["source"] = source
+        existing_bars = self._bars.setdefault(symbol, [])
+        existing = next(
+            (item for item in existing_bars if item.get("t") == timestamp),
+            None,
+        )
+        if existing == bar:
+            return False
+
+        bars = [item for item in existing_bars if item.get("t") != timestamp]
         bars.append(bar)
         bars.sort(key=lambda item: self._bar_sort_key(item))
         self._bars[symbol] = bars[-self.max_bars :]
@@ -402,6 +509,52 @@ class StreamingMarketDataService:
             for bar in self._bars.get(symbol, [])
             if self._bar_is_regular_session_on_date(bar, today)
         ]
+
+    def _bar_repair_reason_locked(
+        self,
+        symbol: str,
+        required_bars: int | None,
+        max_age_seconds: int,
+        now: datetime,
+    ) -> str | None:
+        bars = self._regular_session_bars_locked(symbol)
+        latest_bar = bars[-1] if bars else None
+        latest_bar_time = (
+            parse_market_timestamp(latest_bar.get("t")) if latest_bar else None
+        )
+
+        if latest_bar_time is None:
+            if self._regular_session_completed_minutes(now) > 0:
+                return "missing_regular_session_bars"
+            return None
+
+        bar_age = bar_end_age_seconds(latest_bar_time, now)
+        if bar_age is not None and bar_age > max_age_seconds:
+            return "bars_stale"
+
+        if (
+            required_bars is not None
+            and len(bars) < required_bars
+            and self._regular_session_completed_minutes(now) >= required_bars
+        ):
+            return "insufficient_bars_after_warmup"
+
+        return None
+
+    def _regular_session_completed_minutes(self, now: datetime) -> int:
+        local_timestamp = now.astimezone(NY_TZ)
+        seconds_since_midnight = (
+            local_timestamp.hour * 60 * 60
+            + local_timestamp.minute * 60
+            + local_timestamp.second
+        )
+        if seconds_since_midnight < REGULAR_SESSION_START_SECONDS:
+            return 0
+        if seconds_since_midnight >= REGULAR_SESSION_END_SECONDS:
+            return (
+                REGULAR_SESSION_END_SECONDS - REGULAR_SESSION_START_SECONDS
+            ) // 60
+        return (seconds_since_midnight - REGULAR_SESSION_START_SECONDS) // 60
 
     def _bar_is_regular_session_on_date(self, bar: dict[str, Any], date: Any) -> bool:
         timestamp = parse_market_timestamp(bar.get("t"))

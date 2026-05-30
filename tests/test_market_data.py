@@ -43,14 +43,27 @@ def config() -> BotConfig:
     )
 
 
-def market_timestamp(hour: int = 10, minute: int = 0) -> str:
-    timestamp = datetime.now(NY_TZ).replace(
+def market_datetime(hour: int = 10, minute: int = 0) -> datetime:
+    return datetime.now(NY_TZ).replace(
         hour=hour,
         minute=minute,
         second=0,
         microsecond=0,
-    )
-    return timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    ).astimezone(timezone.utc)
+
+
+def market_timestamp(hour: int = 10, minute: int = 0) -> str:
+    return market_datetime(hour, minute).isoformat().replace("+00:00", "Z")
+
+
+class FakeBarsClient:
+    def __init__(self, bars_by_symbol: dict[str, list[dict[str, object]]]) -> None:
+        self.bars_by_symbol = bars_by_symbol
+        self.calls: list[tuple[str, int]] = []
+
+    def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, object]]:
+        self.calls.append((symbol, minutes))
+        return self.bars_by_symbol.get(symbol, [])[-minutes:]
 
 
 class StreamingMarketDataServiceTest(unittest.TestCase):
@@ -200,6 +213,71 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
             bars = service.get_recent_bars("SOXL", 20)
             self.assertEqual(len(bars), 1)
             self.assertEqual(bars[0]["t"], regular_timestamp)
+
+    def test_repair_stale_bars_backfills_regular_session_bars(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+            stale_timestamp = market_timestamp(9, 30)
+            repaired_timestamp = market_timestamp(10, 5)
+            client = FakeBarsClient(
+                {
+                    "SOXL": [
+                        {"S": "SOXL", "c": 99, "t": stale_timestamp},
+                        {"S": "SOXL", "c": 101, "t": repaired_timestamp},
+                    ]
+                }
+            )
+
+            with service._lock:
+                service._handle_messages_locked(
+                    [{"T": "b", "S": "SOXL", "c": 99, "t": stale_timestamp}]
+                )
+
+            result = service.repair_stale_bars(
+                client,
+                symbols=("SOXL",),
+                required_bars=1,
+                now=market_datetime(10, 7),
+                min_interval_seconds=0,
+            )
+
+            bars = service.get_recent_bars("SOXL", 5)
+            self.assertEqual(client.calls, [("SOXL", 1)])
+            self.assertEqual(result["repaired_symbols"], ["SOXL"])
+            self.assertEqual(bars[-1]["t"], repaired_timestamp)
+            self.assertEqual(bars[-1]["source"], "rest_backfill")
+
+    def test_repair_stale_bars_ignores_normal_opening_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+            regular_timestamp = market_timestamp(9, 30)
+            client = FakeBarsClient(
+                {"SOXL": [{"S": "SOXL", "c": 100, "t": regular_timestamp}]}
+            )
+
+            with service._lock:
+                service._handle_messages_locked(
+                    [{"T": "b", "S": "SOXL", "c": 100, "t": regular_timestamp}]
+                )
+
+            result = service.repair_stale_bars(
+                client,
+                symbols=("SOXL",),
+                required_bars=20,
+                now=market_datetime(9, 31),
+                min_interval_seconds=0,
+            )
+
+            self.assertEqual(client.calls, [])
+            self.assertFalse(result["attempted"])
 
 
 if __name__ == "__main__":

@@ -1865,6 +1865,8 @@ class EdgeWalkerBot:
             f"portfolio_value={account.get('portfolio_value')}"
         )
         self.order_tracker.reconcile_pending_orders()
+        if market_open:
+            self._repair_stale_market_bars()
 
         detector = RegimeDetector(self.config, self.client, self.market_data)
         signal, soxl_snapshot = detector.detect()
@@ -2752,6 +2754,45 @@ class EdgeWalkerBot:
             symbol,
             required_bars=self.config.slow_sma_minutes,
         )
+
+    def _repair_stale_market_bars(self) -> None:
+        if self.market_data is None:
+            return
+        repair = getattr(self.market_data, "repair_stale_bars", None)
+        if not callable(repair):
+            return
+
+        result = repair(
+            self.client,
+            self.basket_symbols,
+            required_bars=self.config.slow_sma_minutes + 1,
+        )
+        if not result.get("attempted"):
+            return
+
+        reasons = result.get("reasons") or {}
+        reason_text = ",".join(
+            f"{symbol}:{reason}" for symbol, reason in sorted(reasons.items())
+        )
+        repaired = result.get("repaired_symbols") or []
+        unchanged = result.get("unchanged_symbols") or []
+        errors = result.get("errors") or []
+
+        if repaired:
+            print(
+                "[DATA] BAR BACKFILL repaired "
+                f"symbols={','.join(repaired)} reasons={reason_text}"
+            )
+        if unchanged:
+            print(
+                "[DATA] BAR BACKFILL unchanged "
+                f"symbols={','.join(unchanged)} reasons={reason_text}"
+            )
+        for error in errors:
+            print(
+                "[DATA] BAR BACKFILL error "
+                f"symbol={error.get('symbol')} error={error.get('error')}"
+            )
 
     def _print_market_data_status(self, symbol: str) -> None:
         status = self._market_data_status(symbol)
