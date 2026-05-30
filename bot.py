@@ -88,6 +88,7 @@ BROKER_CATEGORY_PDT = "PDT"
 BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER = "INSUFFICIENT_BUYING_POWER"
 BROKER_CATEGORY_MARKET_CLOSED = "MARKET_CLOSED"
 BROKER_CATEGORY_DUPLICATE_ORDER = "DUPLICATE_ORDER"
+BROKER_CATEGORY_PARTIAL_FILL_CONFLICT = "PARTIAL_FILL_CONFLICT"
 BROKER_CATEGORY_NOTIONAL_TOO_LARGE = "NOTIONAL_TOO_LARGE"
 BROKER_CATEGORY_ASSET_NOT_TRADABLE = "ASSET_NOT_TRADABLE"
 BROKER_CATEGORY_GENERIC_REJECTION = "GENERIC_BROKER_REJECTION"
@@ -631,6 +632,13 @@ def classify_broker_error(
     state = BROKER_STATE_RESTRICTED
     if "pattern day" in text or "pdt" in text:
         category = BROKER_CATEGORY_PDT
+    elif (
+        "potential wash trade" in text
+        or "opposite side market/stop order exists" in text
+        or ("existing_order_id" in text and "opposite side" in text)
+    ):
+        category = BROKER_CATEGORY_PARTIAL_FILL_CONFLICT
+        state = BROKER_STATE_ORDER_PENDING
     elif "insufficient buying power" in text or code == "40310000":
         category = BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER
         state = BROKER_STATE_BUYING_POWER_LIMITED

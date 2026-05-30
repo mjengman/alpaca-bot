@@ -17,8 +17,10 @@ from bot import (
     BotStateStore,
     BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER,
     BROKER_CATEGORY_MARKET_CLOSED,
+    BROKER_CATEGORY_PARTIAL_FILL_CONFLICT,
     BROKER_STATE_BUYING_POWER_LIMITED,
     BROKER_STATE_EXIT_BLOCKED,
+    BROKER_STATE_ORDER_PENDING,
     BROKER_STATE_RESTRICTED,
     EdgeWalkerBot,
     LIFECYCLE_INTENDED_ENTRY,
@@ -645,6 +647,25 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(
             constraint.category,
             BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER,
+        )
+        self.assertEqual(constraint.code, "40310000")
+        self.assertEqual(constraint.symbol, "SOXL")
+
+    def test_broker_error_classifier_maps_wash_trade_to_partial_fill_conflict(self) -> None:
+        error = (
+            'HTTP 403 from https://paper-api.alpaca.markets/v2/orders: '
+            '{"code":40310000,'
+            '"existing_order_id":"813de39f-0e2c-45f6-84df-fcb64b88f3fc",'
+            '"message":"potential wash trade detected. use complex orders",'
+            '"reject_reason":"opposite side market/stop order exists"}'
+        )
+
+        constraint = classify_broker_error(error, side="sell", symbol="SOXL")
+
+        self.assertEqual(constraint.state, BROKER_STATE_ORDER_PENDING)
+        self.assertEqual(
+            constraint.category,
+            BROKER_CATEGORY_PARTIAL_FILL_CONFLICT,
         )
         self.assertEqual(constraint.code, "40310000")
         self.assertEqual(constraint.symbol, "SOXL")
