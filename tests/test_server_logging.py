@@ -21,6 +21,10 @@ from bot import (
     LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
     MOMENTUM_BOT,
+    POSITION_LIFECYCLE_CLOSED,
+    POSITION_LIFECYCLE_CLOSING,
+    POSITION_LIFECYCLE_OPEN,
+    POSITION_LIFECYCLE_OPENING,
     broker_constraint_ok,
     broker_constraint_payload,
 )
@@ -345,6 +349,7 @@ class ServerLoggingTest(unittest.TestCase):
                 "side": "buy",
                 "last_status": "partially_filled",
                 "last_filled_qty": "0.25",
+                "position_lifecycle_state": POSITION_LIFECYCLE_OPENING,
                 "submitted_at": "2026-05-22T14:30:00+00:00",
                 "updated_at": "2026-05-22T14:31:00+00:00",
             }
@@ -359,6 +364,7 @@ class ServerLoggingTest(unittest.TestCase):
                 "order_id": "buy-1",
                 "status": "new",
                 "reason": "discount_confirmed",
+                "position_lifecycle_state": POSITION_LIFECYCLE_OPENING,
             },
             {
                 "event_type": LIFECYCLE_PARTIAL_FILL,
@@ -372,17 +378,79 @@ class ServerLoggingTest(unittest.TestCase):
                 "filled_qty": "0.25",
                 "filled_avg_price": "99.5",
                 "reason": "discount_confirmed",
+                "position_lifecycle_state": POSITION_LIFECYCLE_OPENING,
             },
         ]
 
         summary = order_visibility_summary(records, pending_orders, now)
 
+        self.assertEqual(
+            summary["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPENING,
+        )
         self.assertEqual(summary["pending_count"], 1)
         self.assertEqual(summary["pending_orders"][0]["order_id"], "buy-1")
         self.assertEqual(summary["pending_orders"][0]["status"], "partially_filled")
         self.assertEqual(summary["pending_orders"][0]["filled_qty"], "0.25")
+        self.assertEqual(
+            summary["pending_orders"][0]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPENING,
+        )
         self.assertEqual(summary["recent_events"][0]["event_type"], LIFECYCLE_PARTIAL_FILL)
+        self.assertEqual(
+            summary["recent_events"][0]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPENING,
+        )
         self.assertEqual(summary["latest_fill"]["filled_avg_price"], "99.5")
+
+    def test_order_visibility_summary_prefers_closing_state_for_pending_sell(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        pending_orders = {
+            "sell-1": {
+                "symbol": "SOXL",
+                "side": "sell",
+                "last_status": "new",
+                "last_filled_qty": "0",
+                "position_lifecycle_state": POSITION_LIFECYCLE_CLOSING,
+            },
+        }
+
+        summary = order_visibility_summary([], pending_orders, now)
+
+        self.assertEqual(
+            summary["position_lifecycle_state"],
+            POSITION_LIFECYCLE_CLOSING,
+        )
+
+    def test_order_visibility_summary_uses_latest_closed_or_open_fill_state(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "status": "filled",
+                "filled_qty": "1",
+                "position_lifecycle_state": POSITION_LIFECYCLE_OPEN,
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T14:40:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "status": "filled",
+                "filled_qty": "1",
+                "position_lifecycle_state": POSITION_LIFECYCLE_CLOSED,
+            },
+        ]
+
+        summary = order_visibility_summary(records, {}, now)
+
+        self.assertEqual(
+            summary["position_lifecycle_state"],
+            POSITION_LIFECYCLE_CLOSED,
+        )
 
     def test_summary_default_prefers_recent_market_open_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

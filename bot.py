@@ -75,6 +75,10 @@ LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
 LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
 LIFECYCLE_ADAPTIVE_POSTURE_SELECTED = "ADAPTIVE_POSTURE_SELECTED"
+POSITION_LIFECYCLE_OPENING = "OPENING"
+POSITION_LIFECYCLE_OPEN = "OPEN"
+POSITION_LIFECYCLE_CLOSING = "CLOSING"
+POSITION_LIFECYCLE_CLOSED = "CLOSED"
 BROKER_STATE_OK = "OK"
 BROKER_STATE_RESTRICTED = "RESTRICTED"
 BROKER_STATE_EXIT_BLOCKED = "EXIT_BLOCKED"
@@ -1135,6 +1139,11 @@ class OrderLifecycleTracker:
             "side": order.get("side"),
             "last_status": None,
             "last_filled_qty": "0",
+            "position_lifecycle_state": self._position_lifecycle_state(
+                self._order_side(order, {}),
+                "submitted",
+                Decimal("0"),
+            ),
             "position_opened_recorded": False,
             "position_closed_recorded": False,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
@@ -1172,6 +1181,11 @@ class OrderLifecycleTracker:
         )
         bot_name = self._field(order, pending, "bot")
         reason = self._field(order, pending, "reason")
+        position_lifecycle_state = self._position_lifecycle_state(
+            side,
+            status,
+            filled_qty,
+        )
 
         if (
             status in self.ACCEPTED_STATUSES
@@ -1186,6 +1200,7 @@ class OrderLifecycleTracker:
                 side=side,
                 status=status,
                 reason=reason,
+                position_lifecycle_state=position_lifecycle_state,
                 order=order,
             )
             pending["accepted_recorded"] = True
@@ -1204,6 +1219,7 @@ class OrderLifecycleTracker:
                 status=status,
                 reason=reason,
                 error=str(order.get("reject_reason") or "order rejected"),
+                position_lifecycle_state=position_lifecycle_state,
                 order=order,
             )
             pending["rejected_recorded"] = True
@@ -1226,6 +1242,7 @@ class OrderLifecycleTracker:
                 fill_delta_qty=fill_delta,
                 filled_avg_price=filled_avg_price,
                 reason=reason,
+                position_lifecycle_state=position_lifecycle_state,
                 order=order,
             )
             if side == "buy" and not pending.get("position_opened_recorded"):
@@ -1238,6 +1255,7 @@ class OrderLifecycleTracker:
                     qty=filled_qty,
                     avg_entry_price=filled_avg_price,
                     reason=reason,
+                    position_lifecycle_state=position_lifecycle_state,
                 )
                 pending["position_opened_recorded"] = True
             if (
@@ -1254,6 +1272,7 @@ class OrderLifecycleTracker:
                     qty=filled_qty,
                     exit_price=filled_avg_price,
                     reason=reason,
+                    position_lifecycle_state=position_lifecycle_state,
                 )
                 pending["position_closed_recorded"] = True
 
@@ -1265,6 +1284,7 @@ class OrderLifecycleTracker:
                 "side": side,
                 "last_status": status,
                 "last_filled_qty": format_decimal(filled_qty),
+                "position_lifecycle_state": position_lifecycle_state,
                 "accepted_recorded": pending.get("accepted_recorded", False),
                 "position_opened_recorded": pending.get(
                     "position_opened_recorded",
@@ -1299,6 +1319,24 @@ class OrderLifecycleTracker:
     ) -> str | None:
         value = order.get(key) or pending.get(key)
         return str(value) if value not in (None, "") else None
+
+    def _position_lifecycle_state(
+        self,
+        side: str | None,
+        status: str,
+        filled_qty: Decimal,
+    ) -> str | None:
+        if side == "buy":
+            if status == "filled":
+                return POSITION_LIFECYCLE_OPEN
+            if status in {"canceled", "expired", "rejected"} and filled_qty <= 0:
+                return POSITION_LIFECYCLE_CLOSED
+            return POSITION_LIFECYCLE_OPENING
+        if side == "sell":
+            if status == "filled":
+                return POSITION_LIFECYCLE_CLOSED
+            return POSITION_LIFECYCLE_CLOSING
+        return None
 
     def _order_id(self, order: dict[str, Any] | None) -> str | None:
         if not order:

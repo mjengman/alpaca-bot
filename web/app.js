@@ -1915,6 +1915,16 @@ function formatOrderEventType(value) {
   return labels[value] || formatLabel(value || "event");
 }
 
+function formatPositionLifecycleState(value) {
+  const labels = {
+    OPENING: "Opening",
+    OPEN: "Open",
+    CLOSING: "Closing",
+    CLOSED: "Closed",
+  };
+  return labels[value] || formatLabel(value || "Closed");
+}
+
 function formatOrderQty(value) {
   return formatQty(value) || value || "--";
 }
@@ -1926,16 +1936,19 @@ function formatOrderDetail(event) {
   const reason = event.reason
     ? formatLabel(event.reason)
     : formatLabel(event.status || "Lifecycle");
+  const lifecycle = event.position_lifecycle_state
+    ? `${formatPositionLifecycleState(event.position_lifecycle_state)} · `
+    : "";
   const fillQty = event.fill_delta_qty || event.filled_qty;
   if (fillQty) {
     const qty = formatOrderQty(fillQty);
     const price = event.filled_avg_price
       ? ` @ ${formatPrice(event.filled_avg_price)}`
       : "";
-    return `${qty}${price} · ${reason}`;
+    return `${lifecycle}${qty}${price} · ${reason}`;
   }
   const status = event.status ? formatLabel(event.status) : "Submitted";
-  return `${status} · ${reason}`;
+  return `${lifecycle}${status} · ${reason}`;
 }
 
 function renderOrderEvent(event) {
@@ -1961,6 +1974,30 @@ function renderOrderEvent(event) {
   `;
 }
 
+function renderPendingOrder(order) {
+  const side = order.side ? order.side.toUpperCase() : "--";
+  const symbol = order.symbol || "--";
+  const lifecycle = formatPositionLifecycleState(order.position_lifecycle_state);
+  const time = formatTime(order.updated_at || order.submitted_at, "--");
+  const owner = order.bot ? formatLabel(order.bot) : "Pending Order";
+  const filled = order.filled_qty ? `filled ${formatOrderQty(order.filled_qty)}` : "";
+  const status = order.status ? formatLabel(order.status) : "Submitted";
+  const reason = order.reason ? ` · ${formatLabel(order.reason)}` : "";
+  const detail = [status, filled].filter(Boolean).join(" · ");
+  return `
+    <div class="order-row">
+      <div>
+        <strong>${escapeHtml(lifecycle)}</strong>
+        <span>${escapeHtml(symbol)} ${escapeHtml(side)} · ${escapeHtml(time)}</span>
+      </div>
+      <div>
+        <strong>${escapeHtml(owner)}</strong>
+        <span>${escapeHtml(detail + reason)}</span>
+      </div>
+    </div>
+  `;
+}
+
 function renderOrderState(orderState) {
   const pending = Array.isArray(orderState?.pending_orders)
     ? orderState.pending_orders
@@ -1969,25 +2006,32 @@ function renderOrderState(orderState) {
     ? orderState.recent_events
     : [];
   const latestFill = orderState?.latest_fill || null;
+  const lifecycle = formatPositionLifecycleState(
+    orderState?.position_lifecycle_state,
+  );
 
   if (pending.length > 0) {
-    els.orderSummary.textContent = `${pending.length} pending`;
+    els.orderSummary.textContent = `${lifecycle} · ${pending.length} pending`;
     els.orderSummary.classList.remove("is-positive", "is-negative", "is-neutral");
     els.orderSummary.classList.add("data-warn");
   } else if (latestFill) {
-    els.orderSummary.textContent = `Last fill ${formatOrderQty(
+    els.orderSummary.textContent = `${lifecycle} · Last fill ${formatOrderQty(
       latestFill.fill_delta_qty || latestFill.filled_qty,
     )}`;
     els.orderSummary.classList.remove("data-warn");
     els.orderSummary.classList.add("is-neutral");
   } else {
-    els.orderSummary.textContent = "No pending orders";
+    els.orderSummary.textContent = lifecycle;
     els.orderSummary.classList.remove("data-warn");
     els.orderSummary.classList.add("is-neutral");
   }
 
-  els.orderEvents.innerHTML = events.length
-    ? events.map(renderOrderEvent).join("")
+  const rows = [
+    ...pending.map(renderPendingOrder),
+    ...events.map(renderOrderEvent),
+  ];
+  els.orderEvents.innerHTML = rows.length
+    ? rows.join("")
     : '<div class="order-empty">No events</div>';
 }
 

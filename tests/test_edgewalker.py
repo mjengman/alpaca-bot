@@ -32,6 +32,9 @@ from bot import (
     LIFECYCLE_POSITION_OPENED,
     LIFECYCLE_POSITION_MANAGED,
     LIFECYCLE_ADAPTIVE_POSTURE_SELECTED,
+    POSITION_LIFECYCLE_CLOSED,
+    POSITION_LIFECYCLE_OPEN,
+    POSITION_LIFECYCLE_OPENING,
     LifecycleLedger,
     _last_completed_bar_end,
     bar_end_age_seconds,
@@ -393,8 +396,16 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(records[2]["order_id"], "buy-1")
         self.assertEqual(records[3]["filled_qty"], "0.25")
         self.assertEqual(records[3]["filled_avg_price"], "99.5")
+        self.assertEqual(
+            records[3]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPEN,
+        )
         self.assertEqual(records[4]["qty"], "0.25")
         self.assertEqual(records[4]["avg_entry_price"], "99.5")
+        self.assertEqual(
+            records[4]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPEN,
+        )
 
     def test_lifecycle_ledger_reconciles_partial_fill_for_pending_order(self) -> None:
         def setup_state(state_store: BotStateStore) -> None:
@@ -434,7 +445,15 @@ class EdgeWalkerBotTest(unittest.TestCase):
         )
         self.assertEqual(records[0]["order_id"], "buy-1")
         self.assertEqual(records[0]["fill_delta_qty"], "0.1")
+        self.assertEqual(
+            records[0]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPENING,
+        )
         self.assertEqual(records[1]["qty"], "0.1")
+        self.assertEqual(
+            records[1]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_OPENING,
+        )
 
     def test_lifecycle_ledger_reconciles_pending_sell_fill_as_position_closed(self) -> None:
         def setup_state(state_store: BotStateStore) -> None:
@@ -474,8 +493,16 @@ class EdgeWalkerBotTest(unittest.TestCase):
         )
         self.assertEqual(records[0]["order_id"], "sell-1")
         self.assertEqual(records[0]["filled_qty"], "1")
+        self.assertEqual(
+            records[0]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_CLOSED,
+        )
         self.assertEqual(records[1]["qty"], "1")
         self.assertEqual(records[1]["exit_price"], "98")
+        self.assertEqual(
+            records[1]["position_lifecycle_state"],
+            POSITION_LIFECYCLE_CLOSED,
+        )
 
     def test_stale_market_data_blocks_strategy_actions(self) -> None:
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)

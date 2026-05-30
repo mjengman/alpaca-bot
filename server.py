@@ -38,6 +38,10 @@ from bot import (
     MOMENTUM_BOT,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
+    POSITION_LIFECYCLE_CLOSED,
+    POSITION_LIFECYCLE_CLOSING,
+    POSITION_LIFECYCLE_OPEN,
+    POSITION_LIFECYCLE_OPENING,
     REGIME_STRENGTHS,
     SOXL,
     SOXS,
@@ -748,6 +752,7 @@ def order_visibility_summary(
     return {
         "source": "position_lifecycle",
         "session_date": session_date,
+        "position_lifecycle_state": _position_lifecycle_state(pending, recent_events),
         "pending_count": len(pending),
         "pending_orders": pending,
         "recent_events": recent_events,
@@ -828,6 +833,9 @@ def _pending_order_payload(order_id: str, order: dict[str, Any]) -> dict[str, An
         "reason": _optional_text(order.get("reason")),
         "status": _optional_text(order.get("last_status")) or "submitted",
         "filled_qty": _optional_text(order.get("last_filled_qty")) or "0",
+        "position_lifecycle_state": _optional_text(
+            order.get("position_lifecycle_state")
+        ),
         "submitted_at": _optional_text(order.get("submitted_at")),
         "updated_at": _optional_text(order.get("updated_at")),
     }
@@ -847,12 +855,37 @@ def _order_event_payload(
         "side": _optional_text(record.get("side")),
         "bot": _optional_text(record.get("bot")),
         "status": _optional_text(record.get("status")),
+        "position_lifecycle_state": _optional_text(
+            record.get("position_lifecycle_state")
+        ),
         "reason": _optional_text(record.get("reason")),
         "filled_qty": _optional_text(record.get("filled_qty")),
         "fill_delta_qty": _optional_text(record.get("fill_delta_qty")),
         "filled_avg_price": _optional_text(record.get("filled_avg_price")),
         "error": _optional_text(record.get("error")),
     }
+
+
+def _position_lifecycle_state(
+    pending_orders: list[dict[str, Any]],
+    recent_events: list[dict[str, Any]],
+) -> str:
+    pending_states = {
+        order.get("position_lifecycle_state")
+        for order in pending_orders
+        if order.get("position_lifecycle_state")
+    }
+    if POSITION_LIFECYCLE_CLOSING in pending_states:
+        return POSITION_LIFECYCLE_CLOSING
+    if POSITION_LIFECYCLE_OPENING in pending_states:
+        return POSITION_LIFECYCLE_OPENING
+
+    for event in recent_events:
+        state = event.get("position_lifecycle_state")
+        if state in {POSITION_LIFECYCLE_OPEN, POSITION_LIFECYCLE_CLOSED}:
+            return state
+
+    return POSITION_LIFECYCLE_CLOSED
 
 
 def _optional_text(value: Any) -> str | None:
