@@ -99,6 +99,8 @@ class ServerLoggingTest(unittest.TestCase):
             "source": "position_lifecycle",
             "session_date": "2026-05-21",
             "session_realized_pl": "5",
+            "reconciliation_confidence": "HIGH",
+            "reconciliation_notes": ["all_fills_matched"],
             "session_trade_count": 1,
             "bot_performance": [
                 {
@@ -149,6 +151,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(record["bot_performance"], performance["bot_performance"])
         self.assertEqual(record["session_realized_pl"], "5")
         self.assertEqual(record["session_trade_count"], 1)
+        self.assertEqual(record["pl_reconciliation_confidence"], "HIGH")
         self.assertEqual(record["order_state"], order_state)
         self.assertEqual(record["pending_order_count"], 1)
         self.assertNotIn("api_secret_key", record["config"])
@@ -235,6 +238,8 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["session_losses"], 0)
         self.assertEqual(summary["last_trade_realized_pl"], "6")
         self.assertEqual(summary["last_trade"]["realized_pl_percent"], "3")
+        self.assertEqual(summary["reconciliation_confidence"], "HIGH")
+        self.assertEqual(summary["reconciliation_notes"], ["all_fills_matched"])
         self.assertEqual(summary["open_lot_qty"], "0")
         self.assertEqual(summary["unmatched_exit_qty"], "0")
 
@@ -246,6 +251,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["session_realized_pl"], "0")
         self.assertEqual(summary["session_trade_count"], 0)
         self.assertEqual(summary["last_trade"], None)
+        self.assertEqual(summary["reconciliation_confidence"], "HIGH")
         self.assertEqual(summary["open_lot_qty"], "0")
 
     def test_lifecycle_performance_summary_handles_partial_open_lot(self) -> None:
@@ -281,6 +287,30 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["session_losses"], 1)
         self.assertEqual(summary["open_lot_qty"], "2")
         self.assertEqual(summary["open_lot_cost_basis"], "20")
+        self.assertEqual(summary["reconciliation_confidence"], "MEDIUM")
+        self.assertEqual(summary["reconciliation_notes"], ["open_lot_qty=2"])
+
+    def test_lifecycle_performance_summary_marks_unmatched_exit_low_confidence(self) -> None:
+        now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
+        records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-05-22T15:30:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "order_id": "sell-1",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "9",
+            },
+        ]
+
+        summary = lifecycle_performance_summary(records, now)
+
+        self.assertEqual(summary["session_realized_pl"], "0")
+        self.assertEqual(summary["session_trade_count"], 0)
+        self.assertEqual(summary["unmatched_exit_qty"], "1")
+        self.assertEqual(summary["reconciliation_confidence"], "LOW")
+        self.assertEqual(summary["reconciliation_notes"], ["unmatched_exit_qty=1"])
 
     def test_lifecycle_performance_summary_groups_realized_pl_by_bot(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)

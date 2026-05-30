@@ -619,9 +619,18 @@ function renderPerformance(performance) {
   const realizedPl = performance?.session_realized_pl ?? null;
   const tradeCount = performance?.session_trade_count ?? 0;
   const lastTradePl = performance?.last_trade_realized_pl ?? null;
+  const reconciliationConfidence =
+    performance?.reconciliation_confidence || "UNKNOWN";
+  const reconciliationNotes = Array.isArray(performance?.reconciliation_notes)
+    ? performance.reconciliation_notes
+    : [];
 
   els.sessionRealizedPl.textContent =
     realizedPl === null ? "--" : formatMoney(realizedPl);
+  els.sessionRealizedPl.dataset.tooltip = [
+    `Reconciliation confidence: ${formatLabel(reconciliationConfidence)}`,
+    ...reconciliationNotes.map(formatLabel),
+  ].join(" · ");
   setTone(els.sessionRealizedPl, realizedPl);
 
   if (tradeCount > 0 && lastTradePl !== null) {

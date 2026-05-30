@@ -580,6 +580,7 @@ def lifecycle_performance_summary(
     lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
     realized_trades: list[dict[str, Any]] = []
     unmatched_exit_qty = Decimal("0")
+    ignored_fill_count = 0
 
     for record in records:
         if record.get("event_type") not in {
@@ -599,8 +600,10 @@ def lifecycle_performance_summary(
         )
         fill_price = _record_decimal(record, "filled_avg_price")
         if not isinstance(symbol, str) or side not in {"buy", "sell"}:
+            ignored_fill_count += 1
             continue
         if fill_qty is None or fill_qty <= 0 or fill_price is None:
+            ignored_fill_count += 1
             continue
 
         if side == "buy":
@@ -694,11 +697,18 @@ def lifecycle_performance_summary(
     )
     last_trade = realized_trades[-1] if realized_trades else None
     bot_performance = bot_performance_summary(realized_trades)
+    reconciliation_confidence, reconciliation_notes = _pl_reconciliation_confidence(
+        open_qty,
+        unmatched_exit_qty,
+        ignored_fill_count,
+    )
 
     return {
         "source": "position_lifecycle",
         "session_date": session_date,
         "session_realized_pl": format_decimal(total_realized),
+        "reconciliation_confidence": reconciliation_confidence,
+        "reconciliation_notes": reconciliation_notes,
         "session_trade_count": len(realized_trades),
         "session_wins": wins,
         "session_losses": losses,
@@ -710,7 +720,27 @@ def lifecycle_performance_summary(
         "open_lot_qty": format_decimal(open_qty),
         "open_lot_cost_basis": format_decimal(open_cost_basis),
         "unmatched_exit_qty": format_decimal(unmatched_exit_qty),
+        "ignored_fill_count": ignored_fill_count,
     }
+
+
+def _pl_reconciliation_confidence(
+    open_qty: Decimal,
+    unmatched_exit_qty: Decimal,
+    ignored_fill_count: int,
+) -> tuple[str, list[str]]:
+    notes: list[str] = []
+    if unmatched_exit_qty > 0:
+        notes.append(f"unmatched_exit_qty={format_decimal(unmatched_exit_qty)}")
+    if ignored_fill_count > 0:
+        notes.append(f"ignored_fill_records={ignored_fill_count}")
+    if notes:
+        return "LOW", notes
+
+    if open_qty > 0:
+        return "MEDIUM", [f"open_lot_qty={format_decimal(open_qty)}"]
+
+    return "HIGH", ["all_fills_matched"]
 
 
 def order_visibility_summary(
@@ -1290,6 +1320,9 @@ def _cycle_log_record(
         record["bot_performance"] = performance.get("bot_performance")
         record["session_realized_pl"] = performance.get("session_realized_pl")
         record["session_trade_count"] = performance.get("session_trade_count")
+        record["pl_reconciliation_confidence"] = performance.get(
+            "reconciliation_confidence"
+        )
     if order_state:
         record["order_state"] = order_state
         record["pending_order_count"] = order_state.get("pending_count")
@@ -2005,6 +2038,10 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
     if performance:
         parts.append("REALIZED PERFORMANCE (from lifecycle ledger):")
         parts.append(f"  Session P/L: {performance.get('session_realized_pl')}")
+        parts.append(
+            "  Reconciliation confidence: "
+            f"{performance.get('reconciliation_confidence')}"
+        )
         parts.append(f"  Closed trades: {performance.get('session_trade_count')}")
         parts.append(
             f"  Wins/Losses: {performance.get('session_wins')}/{performance.get('session_losses')}"
