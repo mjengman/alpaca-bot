@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>EdgeWalker</title>
+    <title>Edgewalker</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -11,7 +11,7 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">AUTONOMOUS STRATEGY ENGINE</p>
-          <h1>EdgeWalker</h1>
+          <h1>Edgewalker</h1>
         </div>
         <div class="top-actions">
           <div class="settings-menu">
@@ -94,7 +94,7 @@
         <div class="section-head">
           <h2
             class="has-tooltip"
-            data-tooltip="Operator-facing strategy configuration for the next EdgeWalker run."
+            data-tooltip="Operator-facing strategy configuration for the next Edgewalker run."
           >
             Strategy Controls
           </h2>
@@ -118,7 +118,7 @@
           <div class="control-grid">
           <!-- Signal is fixed to SOXL for the MVP. Bring this field back when we add broader ticker routing.
           <label class="field">
-            <span class="has-tooltip" data-tooltip="SOXL is the regime source. EdgeWalker routes between SOXL, SOXS, or no trade.">Signal</span>
+            <span class="has-tooltip" data-tooltip="SOXL is the regime source. Edgewalker routes between SOXL, SOXS, or no trade.">Signal</span>
             <input id="symbolInput" type="text" value="SOXL" autocomplete="off" aria-label="Signal ticker">
           </label>
           -->
@@ -564,7 +564,7 @@
           <div>
             <span
               class="has-tooltip"
-              data-tooltip="Current SOXL/SOXS basket exposure. EdgeWalker should hold at most one."
+              data-tooltip="Current SOXL/SOXS basket exposure. Edgewalker should hold at most one."
               >Position</span
             >
             <strong id="positionValue">Flat</strong>
@@ -593,7 +593,7 @@
         <div class="section-head">
           <h2
             class="has-tooltip"
-            data-tooltip="Realized same-session performance split by EdgeWalker specialist bot."
+            data-tooltip="Realized same-session performance split by Edgewalker specialist bot."
           >
             Bot Performance
           </h2>
@@ -654,7 +654,7 @@
           <div class="metric">
             <span
               class="has-tooltip"
-              data-tooltip="Live Alpaca stream health. EdgeWalker will not trade unless the stream is live and the latest completed one-minute bar is fresh."
+              data-tooltip="Live Alpaca stream health. Edgewalker will not trade unless the stream is live and the latest completed one-minute bar is fresh."
               >Data</span
             >
             <strong id="dataStatusValue">Waiting</strong>
@@ -855,7 +855,7 @@
         <div class="guide-head">
           <div>
             <p class="eyebrow">OPERATOR GUIDE</p>
-            <h2 id="operatorGuideTitle">EdgeWalker Reference</h2>
+            <h2 id="operatorGuideTitle">Edgewalker Reference</h2>
           </div>
           <button
             id="operatorGuideClose"
@@ -869,9 +869,9 @@
 
         <div class="guide-body">
           <details open>
-            <summary>What EdgeWalker Does</summary>
+            <summary>What Edgewalker Does</summary>
             <p>
-              EdgeWalker watches SOXL, classifies the market as uptrend,
+              Edgewalker watches SOXL, classifies the market as uptrend,
               sideways, or downtrend, and routes the decision to a specialist
               bot. It can enter, manage a trailing exit, close stale exposures,
               and stop taking new entries near the closeout window.
@@ -922,7 +922,7 @@
           <details>
             <summary>Safety Notes</summary>
             <p>
-              EdgeWalker is an operator tool, not financial advice. Leveraged
+              Edgewalker is an operator tool, not financial advice. Leveraged
               ETFs can move quickly, paper results do not guarantee live
               outcomes, and the operator remains responsible for configuration,
               supervision, and trading risk.

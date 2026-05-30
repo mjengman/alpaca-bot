@@ -1,6 +1,6 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-05-28
+Last updated: 2026-05-30
 
 This file captures paper-trading qualification observations before they become
 tuning decisions. During the first full rotation through Conservative,
@@ -30,6 +30,22 @@ without moving the target.
 - Did Adaptive shadow reveal useful posture, confidence, or stability signals?
 - What should be watched in the next mode before changing anything?
 
+## Emerging Themes
+
+These are recurring observations, not tuning decisions.
+
+- Trend Trust appears more important than raw trend strength.
+- Regime age may be underrepresented in current confidence logic.
+- Churn count alone is insufficient to explain tradeability.
+- Route invalidation exits dominate realized outcomes on churny sessions.
+- Adaptive appears disciplined, but may need stronger regime-maturity awareness.
+- `POLL_SEC` may be more important for exit precision than entry quality while
+  regime logic remains one-minute-bar based.
+- Regular-session warmup integrity is a doctrine question: what market world is
+  EdgeWalker modeling at the open?
+- Human-facing label: route invalidation exit. Current internal code:
+  `stale_position_regime_mismatch`.
+
 ## Daily AAR Template
 
 - Date:
@@ -39,6 +55,8 @@ without moving the target.
 - Account result:
 - Closed trades:
 - Regime transitions:
+- Market character:
+- Session difficulty:
 - Data / broker health:
 - Interpretation confidence:
 - Bot performance:
@@ -69,6 +87,8 @@ Result:
 - Closed trades: `1`
 - Wins/losses: `1W / 0L`
 - Regime transitions: `30`
+- Market character: `CHURNY / MIXED`
+- Session difficulty: `MODERATE-HIGH`
 - Data health: `353 / 380` cycles were `LIVE`; `15` warmup cycles and `12`
   stale-data wait cycles were recorded
 - Broker state: `OK`
@@ -191,6 +211,8 @@ Result:
 - Closed trades: `25`
 - Wins/losses: `8W / 17L`
 - Regime transitions: `42`
+- Market character: `CHURNY / HOSTILE`
+- Session difficulty: `HIGH`
 - Data health: `383 / 385` cycles were `LIVE`
 - Broker state: `OK`
 - End state: flat into close, no pending orders
@@ -333,6 +355,7 @@ Result:
 - Closed trades: `20`
 - Wins/losses: `8W / 12L`
 - Regime transitions: `38`
+- Market character: `CHURNY / DIRECTIONAL / TRADEABLE`
 - Data health: `368 / 386` cycles were `LIVE`; `13` stale cycles and `3`
   warming-up cycles were recorded
 - Broker state: mostly `OK`, with `2` exit-blocked cycles from partial-fill
@@ -475,3 +498,164 @@ Next session:
 - After Adaptive day, promote operational fixes that now have enough evidence
   into implementation backlog: opening/closing lifecycle visibility, broker
   rejection classification, and P/L reconciliation.
+
+## 2026-05-29 AAR: Adaptive Mode
+
+Qualification day: Day 4
+
+Mode: Adaptive
+
+Session files:
+
+- `logs/edgewalker-2026-05-29.jsonl`
+- `logs/position_lifecycle.jsonl`
+
+Result:
+
+- Final lifecycle realized P/L: `-$25.03`
+- Approximate account impact: `-$25.02`, about `-0.03%` on a roughly `$99k`
+  paper account
+- Cycles: `385`
+- Closed trades: `16`
+- Wins/losses: `3W / 13L`
+- Regime transitions: `34`
+- Market character: `CHURNY / BOUNDARY-DRIVEN / MICRO-TREND`
+- Data health: `353 / 385` cycles were `LIVE`; `25` stale cycles and `7`
+  warming-up cycles were recorded
+- Broker state: `OK` all day
+- Broker/order errors: `0`
+- End state: flat into close, no pending orders
+- Session difficulty: `HIGH / CHURNY AND BOUNDARY-DRIVEN`
+- Interpretation confidence: `HIGH` for operational behavior, `MEDIUM` for
+  strategy conclusions because this is Adaptive's first active qualification
+  day
+
+Bot performance:
+
+- MomentumBot: `-$369.28`, `7 trades`, `2W / 5L`
+- ChopBot: `-$23.21`, `2 trades`, `0W / 2L`
+- InverseBot: `+$367.46`, `7 trades`, `1W / 6L`
+
+Exit reason contribution:
+
+- Stale-position regime mismatch: `15 exits`, about `-$1,050.77`
+- Trailing-stop breached: `1 exit`, about `+$1,025.75`
+
+Entry reason contribution:
+
+- Trend continuation allowed: `12 trades`, about `+$59.04`
+- Strong trend chase allowed: `1 trade`, about `+$192.28`
+- Fresh cross confirmed: `1 trade`, about `-$253.14`
+- Discount confirmed: `2 trades`, about `-$23.21`
+
+Notable events:
+
+- Highest realized gain: InverseBot SOXS, about `+$1,025.75`, roughly
+  `10:08-10:52 ET`, exited by trailing-stop breach.
+- Largest realized loss: InverseBot SOXS, about `-$253.14`, roughly
+  `11:09-11:15 ET`, exited by stale-position regime mismatch.
+- Longest hold: InverseBot SOXS, about `43m 33s`, the same high-gain trade.
+- Only one trailing-stop exit nearly offset fifteen route-invalidation exits.
+- No partial-fill opposite-side rejection repeated after the open-buy sell
+  guard was added.
+- The first cycle showed `12 / 20` warmup bars at `09:30:01 ET`; the latest bar
+  was from `09:24 ET`, implying persisted same-day premarket bars were included
+  in the opening warmup cache.
+
+Session identity:
+
+- Micro-trend/chop day where the market repeatedly changed its mind.
+- SOXL opened with a strong early move, moved into a sharp downtrend, then spent
+  much of the day alternating between short-lived directional regimes and
+  sideways classifications.
+- Adaptive finished essentially flat despite `34` regime transitions and a
+  `3W / 13L` trade distribution.
+- The day's P/L was carried by one persistent InverseBot thesis and eroded by
+  many small route-invalidation losses.
+
+Behavioral fingerprint:
+
+- Adaptive mostly selected Balanced, but this should not be read as simple
+  indecision. Most Balanced/HIGH cycles happened while a position was already
+  open and entry posture was paused.
+- Adaptive escalated to Aggressive only twice, suggesting the confidence model
+  did not overreact to strength.
+- Adaptive used Conservative during stale-bar entry-block conditions and weak
+  directional regimes.
+- The system remained operationally disciplined: no broker errors, no runaway
+  entries, clean P/L reconciliation, and flat closeout.
+
+Adaptive active observations:
+
+- Posture counts: `BALANCED 336`, `CONSERVATIVE 34`, `AGGRESSIVE 2`, no
+  posture on `13` warmup/closeout cycles.
+- Entry grouping by active Adaptive posture:
+  - `AGGRESSIVE`: `2 trades`, about `+$35.13`
+  - `BALANCED`: `12 directional trades`, about `-$36.94`
+  - ChopBot/sideways entries: `2 trades`, about `-$23.21`
+- Of `16` entries, `14` occurred within about `3` minutes of the active regime
+  beginning, and all `16` occurred within `10` minutes.
+- Median regime age at entry was about `1` minute.
+- This suggests Adaptive evaluated signal strength coherently but did not yet
+  fully price regime maturity or environmental trustworthiness.
+
+What worked:
+
+- Adaptive behaved coherently and stayed disciplined under a difficult tape.
+- The system did not overtrade: `16` buys across `385` cycles.
+- Aggressive posture was rare and controlled.
+- Extension protection and entry checks continued to block weak or overextended
+  setups.
+- The high-gain InverseBot trade showed the architecture can benefit from a
+  real persistence window.
+- Account P/L and lifecycle P/L reconciled cleanly.
+- Broker state stayed clean all day.
+
+What needs attention:
+
+- Adaptive needs better visibility into regime age, recent churn, and trend
+  trustworthiness. Strength alone is not enough.
+- Route-invalidation exits dominated realized outcomes. They need outcome
+  classification before the doctrine can be judged.
+- The opening warmup cache included current-day bars from before regular-market
+  open. If EdgeWalker is modeling regular-session behavior, warmup should
+  either explicitly include or explicitly exclude premarket bars.
+- Logs exposed a recurring state where quotes/trades were live while bars were
+  stale. This means the market was moving while the regime interpretation
+  pipeline was temporarily frozen.
+- The label `stale_position_regime_mismatch` remains semantically muddy because
+  it describes route/owner invalidation, not stale market data.
+
+Parked hypotheses:
+
+- Trend Trust may need to become a first-class telemetry concept, separate from
+  raw regime strength.
+- A one-minute-old regime should not receive the same confidence treatment as a
+  thirty-minute-old regime with similar SMA gap.
+- Recent flips over `15`, `30`, and `60` minutes may be more useful to Adaptive
+  than total daily transition count.
+- Directional efficiency and post-signal follow-through may better explain mode
+  performance than churn count alone.
+- `POLL_SEC` may become an exit-precision and perception setting, especially
+  while a position is open, but should be instrumented before active tuning.
+- A subtle audio cue when trailing exit crosses entry price could help the
+  operator perceive when a position becomes protected without celebrating P/L.
+- The dashboard should eventually show entry price and trail exit together for
+  easier visual comparison.
+
+Do not change yet:
+
+- Do not demote Adaptive because the first active day was near-flat.
+- Do not change regime thresholds from this single boundary-driven session.
+- Do not loosen ChopBot based on two small losing trades.
+- Do not tighten trail percent from this session alone.
+- Do not make active Dynamic Controls changes before shadow evidence exists.
+
+Next session:
+
+- Continue the qualification rotation without strategy-threshold changes.
+- Promote documentation and observability items: Trend Trust telemetry,
+  regular-session warmup integrity, stale-bar repair/backfill investigation,
+  and route-invalidation exit classification.
+- Judge the next Conservative sample against Day 1 to see whether separated
+  time slices reveal consistent behavior.

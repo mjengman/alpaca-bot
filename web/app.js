@@ -2159,7 +2159,7 @@ function render(data) {
   });
   if (els.adaptiveShadowLabel) {
     els.adaptiveShadowLabel.dataset.tooltip = settingsLocked
-      ? "Stop EdgeWalker before changing Adaptive shadow telemetry."
+      ? "Stop Edgewalker before changing Adaptive shadow telemetry."
       : "When enabled, Adaptive logs the posture it would select while manual directional modes remain in control.";
   }
   syncSizingControls();

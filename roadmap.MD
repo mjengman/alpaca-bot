@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-05-27
+Last updated: 2026-05-30
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -46,6 +46,9 @@ These should stay true as the app evolves.
 - Never continue entering during stale-bar entry-block conditions.
 - Never hide a broker-rejected exit behind ordinary log noise.
 - Never orphan a position lifecycle state.
+- Never let stale interpretation masquerade as fresh conviction.
+- Never make regular-session strategy behavior depend on accidental premarket
+  warmup context.
 - Never auto-send logs, credentials, or trading records to an outside service
   without explicit user action.
 
@@ -83,6 +86,8 @@ foundation for future work.
   status exposure, explainable reasons/constraints, and lifecycle posture events
 - Qualification-hardening pass for paper/live connection tests, non-overlapping
   dashboard polling, and lower-noise stream bar persistence
+- Initial same-symbol open-buy sell guard to avoid broker-rejected
+  opposite-side exits while an entry order is still resolving
 
 ## Priority 0: Operational Truth
 
@@ -227,6 +232,43 @@ Notes:
   management data is unavailable.
 - The summary should eventually support dashboard display, replay, metrics,
   live guardrails, multi-symbol routing, and arena work.
+
+### Market Data Interpretation Integrity
+
+Goal: make the difference between live market state and market interpretation
+explicit. Quotes and trades may be live while one-minute bars are stale; in
+that state, price/risk visibility exists but regime interpretation is degraded.
+
+Name this state clearly:
+
+- Live market, stale interpretation
+
+Key behaviors:
+
+- Block fresh entries while bar-based interpretation is stale.
+- Continue open-position risk management from live quote/trade marks when those
+  marks are fresh.
+- Distinguish stream disconnects from bar aggregation lag.
+- Attempt bounded recent-bar repair/backfill when quote/trade data is live but
+  bars are stale.
+- Record whether backfill repaired the stream cache, partially repaired it, or
+  failed.
+
+Regular-session warmup integrity:
+
+- Decide explicitly whether regular-session trading includes premarket bars in
+  warmup.
+- If not, filter warmup bars to regular-session time before producing the first
+  actionable regime.
+- If premarket context is useful, expose it separately instead of silently
+  mixing it into the regular-session SMA context.
+
+Notes:
+
+- A bot pre-armed before open can have same-day premarket bars cached at
+  `09:30 ET`. That is a partially formed opinion, not a clean regular-session
+  blank slate.
+- This is an observability and doctrine issue before it is a strategy issue.
 
 ### Foundational Replay / Timeline Reconstruction
 
@@ -389,6 +431,7 @@ Tier 3: Strategic intelligence
 - Regime changed
 - Active bot shifted
 - Trailing exit updated
+- Trailing exit crossed entry price
 - Position closed
 
 Notes:
@@ -402,6 +445,9 @@ Notes:
   and InverseBot, with timbre doing more work than melody.
 - Trailing exit updated should feel like a tiny mechanical ratchet or lock-in
   tick: progress, protection, and tightening control without celebrating money.
+- Trailing exit crossed entry should be a once-per-position cue that the
+  position has entered a more protected state. It should be calm and procedural,
+  not celebratory.
 
 Future sound profiles:
 
@@ -422,6 +468,27 @@ system.
   safety notes
 - Keep copy concise and operator-facing
 - Expand later with diagrams or contextual links if the UI grows more complex
+
+### Position Risk Display
+
+Goal: make the open-position risk picture legible at a glance.
+
+- Split the current Trail exit block into a compact comparison:
+  - Entry price
+  - Trail exit
+- Visually indicate when trail exit is at or above entry price.
+- Keep the display stable when an exit order is pending.
+- Preserve the current Position P/L readout as account/position mark context,
+  not as a substitute for risk-state clarity.
+
+### Icon Polish
+
+Goal: keep high-frequency controls visually quiet and cohesive.
+
+- Replace the Activity/Narrative `Copy` text button with a copy icon.
+- Preserve accessible label text and hover tooltip.
+- Preserve state feedback for copied, empty, or failed copy attempts through a
+  tooltip, temporary icon state, or small toast.
 
 ### Live Trading Readiness
 
@@ -493,11 +560,35 @@ Metrics should be built from the lifecycle ledger, not from loose log scraping.
 
 - Stream uptime
 - Stale-bar frequency
+- Live-market/stale-interpretation frequency
+- Stale-bar repair/backfill attempts and outcomes
 - Broker rejection counts
 - Average data latency
 - Trade execution timing
 - Order acceptance latency
 - Time spent armed, active, closeout, and flat
+
+### Trend Trust Telemetry
+
+Goal: measure whether a trend deserves trust, not only whether a trend exists.
+
+Initial components:
+
+- Strength: fast/slow SMA gap and regime strength bucket
+- Age: how long the current regime has persisted
+- Stability: regime flips over the last 15, 30, and 60 minutes
+- Persistence: post-signal follow-through over 5, 15, and 30 minutes
+- Efficiency: net directional movement divided by total movement
+- Excursion: max favorable and max adverse excursion after entry
+
+Notes:
+
+- A strong one-minute-old regime should not be treated the same as a strong
+  thirty-minute-old regime.
+- Adaptive should eventually distinguish strong-but-immature signals from
+  moderate-but-stable signals.
+- Begin as telemetry and narrative context before feeding it into active
+  decision logic.
 
 ## Priority 3: Strategy Evolution
 
@@ -569,6 +660,8 @@ posture logic has earned trust through logs, replay, and operator review.
 Potential input signals:
 
 - Trend strength
+- Trend Trust telemetry
+- Regime age
 - Regime stability and recent regime churn
 - Data freshness and stream health
 - Broker state and recent order rejections
@@ -587,12 +680,69 @@ Operator-facing readout:
 Notes:
 
 - Adaptive is a posture selector, not a new strategy.
+- Adaptive should answer not only "what posture fits?" but "how much should I
+  believe what I am seeing?"
 - Adaptive decisions should become first-class timeline/decision events.
 - Every posture selection or posture shift should be explainable and replayable.
 - Operator-defined envelopes should bound all adaptive behavior.
 - Sizing modulation may be a future version, but should not be part of v1.
 - Dependencies: Runtime State Summary, Broker Constraint State, Data Health,
   Explainability Layer, Telemetry, and Foundational Replay.
+
+### Dynamic Controls
+
+Future optional companion to Adaptive. Not enabled by default.
+
+Goal: let EdgeWalker adjust selected operating controls inside
+operator-approved rails when environmental conditions call for a tighter or
+looser runtime envelope.
+
+Adaptive answers:
+
+- What doctrine fits this environment?
+
+Dynamic Controls answers:
+
+- How tightly should the system operate right now?
+
+Initial doctrine:
+
+- Manual settings define the envelope.
+- Dynamic Controls may move only within explicit min/max rails.
+- Safety doctrine remains hardcoded and cannot be weakened dynamically.
+- Shadow mode comes first, using `would_set` recommendations before any active
+  runtime changes.
+- The first active version should control one or two low-risk knobs only.
+
+Early candidate controls:
+
+- Poll cadence while flat, opening, open, closing, or near closeout.
+- Trail sensitivity or trail ratchet behavior.
+- Cooldown duration after churn, route invalidation, or reversal clusters.
+- Position sizing cap inside the existing allocation and live-risk envelope.
+
+Higher-risk controls that require stronger evidence:
+
+- Continuation-entry strictness.
+- Strong-trend chase allowance.
+- ChopBot discount threshold.
+- Regime threshold or hysteresis behavior.
+
+Operator-facing readout:
+
+- Dynamic Controls status: Off, Shadow, or Active.
+- Current recommended values and active values.
+- Reasons, confidence, and constraints.
+- Operator rail ranges for each dynamic value.
+
+Notes:
+
+- This is bounded runtime adaptation, not autonomous optimization.
+- `POLL_SEC` may be especially important as an exit-precision and perception
+  setting, but faster polling should be tested for noise sensitivity before
+  active use.
+- Dynamic recommendations should become first-class events so debriefs can
+  compare manual behavior against the suggested dynamic envelope.
 
 ### Strategy Lab / Tuning Console
 
@@ -641,10 +791,14 @@ session.
 
 Qualification protocol:
 
-- Days 1-2: Conservative
-- Days 3-4: Balanced
-- Days 5-6: Aggressive
-- Days 7-8: Adaptive
+- Day 1: Conservative
+- Day 2: Balanced
+- Day 3: Aggressive
+- Day 4: Adaptive
+- Day 5: Conservative
+- Day 6: Balanced
+- Day 7: Aggressive
+- Day 8: Adaptive
 
 Operating rules:
 
@@ -658,3 +812,4 @@ Operating rules:
 6. Add average hold duration and best/worst trade metrics.
 7. Start Foundational Replay / Timeline Reconstruction once the event stream is
    representative enough to design against.
+8. Add Trend Trust telemetry before changing Adaptive's posture rules.

@@ -57,6 +57,22 @@ The bot defaults to `ALPACA_ENVIRONMENT=paper` and `DRY_RUN=true`, so it will sh
 
 Live trading uses separate live credentials and the live Alpaca trading URL. Real live-order submission is blocked unless `LIVE_TRADING_ARMED=true`, which the Settings modal only enables after live credentials are configured and a typed `LIVE` confirmation is entered. The same modal can disarm live trading. Keep paper trading as the default workflow until live-readiness checks are complete.
 
+## Qualification Notes
+
+Current paper-trading review is focused on operational truth before strategy
+optimization. A few concepts are now part of the project vocabulary:
+
+- Regime strength is not the same as Trend Trust. Future telemetry should track
+  regime age, recent flips, follow-through, directional efficiency, and
+  favorable/adverse excursion before changing thresholds.
+- Quotes/trades can be live while one-minute bars are stale. In that state the
+  market is visible for risk management, but regime interpretation is degraded;
+  entries remain blocked.
+- Regular-session warmup should explicitly decide whether premarket bars are
+  included or excluded from the first actionable SMA context.
+- Dynamic Controls are a future shadow-first idea for bounded runtime
+  adaptation inside operator-approved rails, not autonomous strategy mutation.
+
 ## Useful Commands
 
 ```bash

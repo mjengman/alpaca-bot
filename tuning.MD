@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-05-28
+Last updated: 2026-05-30
 
 Go-live target: 2026-06-04
 
@@ -89,6 +89,23 @@ Evaluation questions:
 - Did trade count, churn sensitivity, and exit quality remain acceptable?
 - Did the daily narrative correctly distinguish opportunity, authorization, and
   intentional non-participation?
+
+## Emerging Themes
+
+These are recurring observations that have graduated beyond single-session
+notes, but have not yet become approved tuning decisions.
+
+- Trend Trust appears more predictive than raw trend strength.
+- Regime age may be underrepresented in current confidence calculations.
+- Churn count alone is insufficient to explain performance.
+- Route invalidation exits dominate realized outcomes on churny sessions.
+- Adaptive appears disciplined, but may lack regime-maturity awareness.
+- `POLL_SEC` may be an exit-quality and perception lever rather than an
+  entry-quality lever.
+- Regular-session warmup integrity is a doctrine question, not just a data
+  hygiene issue.
+- Human-facing label: route invalidation exit. Current internal code:
+  `stale_position_regime_mismatch`.
 
 ## 2026-05-26 After-Action Review
 
@@ -209,6 +226,72 @@ should not be read as a simple rejection of Aggressive mode. Adaptive day should
 be judged on doctrine selection quality: whether it avoids churn traps,
 participates when persistence emerges, and makes confidence changes that remain
 explainable in hindsight.
+
+## 2026-05-29 After-Action Review
+
+Session: qualification day 4, Adaptive mode
+
+Cycles: 385
+
+Result: 16 completed trades. Account value moved from about $99,404.27 to
+$99,379.25, roughly -$25.02. Lifecycle summary reported -$25.03, so account and
+lifecycle movement reconciled cleanly.
+
+Session identity:
+
+- Micro-trend/chop day with frequent boundary-driven regime changes.
+- Regime transitions remained high at 34, roughly one change every 11 minutes.
+- Adaptive finished essentially flat despite a `3W / 13L` trade distribution.
+- One persistent InverseBot thesis nearly offset fifteen route-invalidation
+  exits.
+
+Bot behavior:
+
+- MomentumBot: `-$369.28`, 7 trades, 2 wins and 5 losses.
+- ChopBot: `-$23.21`, 2 trades, 0 wins and 2 losses.
+- InverseBot: `+$367.46`, 7 trades, 1 win and 6 losses.
+- The highest-impact exit was one trailing-stop breach for about `+$1,025.75`.
+- Fifteen route-invalidation exits totaled about `-$1,050.77`.
+
+What worked:
+
+- Adaptive stayed disciplined and did not over-escalate aggression.
+- Aggressive posture appeared only twice.
+- Conservative posture appeared during stale-bar entry-block conditions and
+  weak directional regimes.
+- Broker state stayed clean and the partial-fill opposite-side rejection did
+  not repeat.
+- Lifecycle P/L and account movement reconciled cleanly.
+
+What needs attention:
+
+- Adaptive selected reasonable posture from current regime strength, but most
+  entries occurred in very young regimes.
+- Of 16 entries, 14 occurred within about 3 minutes of the active regime
+  beginning, and all 16 occurred within 10 minutes.
+- Median regime age at entry was about 1 minute.
+- Current-day premarket bars appeared in the opening warmup cache, creating a
+  partially formed opening opinion before enough regular-session bars existed.
+- Logs repeatedly showed live quotes/trades while bars were stale: live market,
+  stale interpretation.
+
+Behavioral assessment:
+
+Adaptive mode passed its first active qualification day operationally. It did
+not prove profitability, but it showed coherent posture selection, clean broker
+behavior, and controlled participation. The major diagnostic lesson is that
+regime strength and regime trustworthiness are separate dimensions.
+
+Evidence strength:
+
+- Strong evidence for keeping Adaptive under observation rather than judging it
+  by one near-flat day.
+- Strong evidence that Trend Trust telemetry should include regime age and
+  recent churn pressure.
+- Moderate evidence that route-invalidation exits need outcome classification.
+- Moderate evidence that regular-session warmup integrity should be explicit.
+- Weak evidence for changing regime thresholds, trail percent, ChopBot
+  discount, or Adaptive posture rules.
 
 ## P0 Candidates Before Go-Live
 
@@ -490,6 +573,65 @@ Acceptance criteria:
   realized P/L.
 - Partial fills are not double-counted or mispaired in trade summaries.
 
+### 10. Regular-Session Warmup Integrity
+
+Status: strongly consider
+
+Impact: medium-high
+
+Why:
+
+Adaptive day opened with `12 / 20` bars already present at `09:30:01 ET`; the
+latest bar was from `09:24 ET`. That implies same-day premarket bars can enter
+the warmup cache. This is not necessarily wrong, but it should be explicit. If
+EdgeWalker is modeling regular-session behavior, the first actionable regime
+should be based on regular-session bars.
+
+Candidate behavior:
+
+- Add an explicit setting or doctrine for whether warmup includes premarket
+  bars.
+- Default regular-session trading to regular-session warmup bars only.
+- Keep premarket context available as separate telemetry if useful.
+- Log the warmup source: `regular_session`, `premarket_included`, or `mixed`.
+
+Acceptance criteria:
+
+- The operator can tell whether opening SMA context includes premarket bars.
+- A regular-session strategy does not accidentally start from a mixed
+  premarket/regular opinion.
+- Warmup behavior is stable across pre-armed and exactly-at-open starts.
+
+### 11. Stale-Bar Repair / Backfill Investigation
+
+Status: strongly consider
+
+Impact: high
+
+Why:
+
+The logs show a recurring state where quotes and trades are live while bars are
+stale. That means the live market is visible for mark/risk purposes, but the
+bar-based interpretation pipeline is temporarily frozen. Current behavior
+correctly blocks entries, but repeated stale-bar pauses reduce decision quality
+and operator trust.
+
+Candidate behavior:
+
+- Add session metrics for "live market, stale interpretation" cycles.
+- When bars are stale but quote/trade data is live, attempt a bounded REST
+  backfill of recent one-minute bars.
+- Record whether backfill repaired the stream cache or failed.
+- Keep entries blocked until bar freshness is restored.
+- Preserve live quote/trade marks for open-position risk management.
+
+Acceptance criteria:
+
+- Stale-bar episodes are summarized by count, duration, and recovery path.
+- The system distinguishes stream disconnect from bar aggregation lag.
+- Entry decisions remain blocked during stale interpretation.
+- Open-position risk management can continue from live quote/trade marks.
+
 ## P1 Candidates After More Sessions
 
 ### 1. ChopBot Threshold Review
@@ -553,6 +695,13 @@ Route-invalidation exits are doctrine, not automatically success or failure.
 Aggressive day had many exits under the current `stale_position_regime_mismatch`
 reason, but the outcome quality likely varied.
 
+Naming note:
+
+- Human-facing label: route invalidation exit.
+- Current internal code: `stale_position_regime_mismatch`.
+- Do not rename the internal code until logs, tests, docs, and narrative
+  prompts can move together.
+
 Potential classifications:
 
 - Defensive save: exit prevented meaningful adverse continuation.
@@ -568,14 +717,17 @@ Watch:
 - Whether a new routed bot entered after the exit.
 - Whether the exit protected capital or mostly increased churn.
 
-### 5. Directional Persistence And Session Difficulty Telemetry
+### 5. Trend Trust, Directional Persistence, And Session Difficulty Telemetry
 
 Status: watch
 
 Why:
 
 Balanced day and Aggressive day had similar regime-transition counts but very
-different outcomes. Churn count alone is not the causal explanation.
+different outcomes. Adaptive day added a stronger clue: most entries occurred
+in regimes that were only about one minute old. Churn count alone is not the
+causal explanation. The system needs to measure whether a trend deserves trust,
+not only whether a trend appears to exist.
 
 Potential metrics:
 
@@ -583,6 +735,8 @@ Potential metrics:
 - Regime flips over the last 15, 30, and 60 minutes.
 - Post-entry follow-through over 5, 15, and 30 minutes.
 - Max favorable excursion and max adverse excursion per trade.
+- Directional efficiency, such as net movement divided by total movement.
+- Time spent in current regime versus time spent near boundary thresholds.
 - Session difficulty score based on churn, volatility, persistence, and
   reversal frequency.
 
@@ -591,6 +745,72 @@ Watch:
 - Whether continuation entries work only after regimes have proven enough age.
 - Whether high local churn should lower Adaptive confidence.
 - Whether session difficulty explains mode performance better than raw churn.
+- Whether Adaptive should distinguish strong-but-immature signals from
+  moderate-but-stable signals.
+- Whether Trend Trust should become a visible operator metric or remain a
+  behind-the-scenes confidence input.
+
+### 6. Dynamic Controls Within Operator Rails
+
+Status: watch / instrument first
+
+Why:
+
+Adaptive posture selection answers which doctrine fits the environment.
+Dynamic Controls would answer how tightly the runtime should operate inside the
+operator-approved envelope. This should not mean automatic strategy mutation or
+unbounded self-optimization. It should mean bounded runtime adaptation for
+tempo, risk, and exit precision.
+
+Doctrine:
+
+- Operator settings define the allowed rails.
+- Dynamic Controls may move selected values within those rails.
+- Constitutional safety rules remain hardcoded and non-negotiable.
+- All dynamic recommendations should run in shadow before active use.
+- Every recommendation should include the proposed value, prior value, reason,
+  confidence, and active constraints.
+
+Best early candidates:
+
+- `POLL_SEC`, especially while a position is open.
+- Trail sensitivity or trail ratchet behavior.
+- Cooldown duration.
+- Position sizing cap inside the existing max allocation.
+
+Handle carefully:
+
+- Continuation strictness.
+- Chase allowance.
+- ChopBot discount threshold.
+- Regime hysteresis or confirmation windows.
+
+Do not dynamically mutate for now:
+
+- Stale-exposure flattening doctrine.
+- No same-cycle reversal policy.
+- Broker and lifecycle guards.
+- Live max allocation hard caps.
+- Closeout safety requirements.
+
+Potential shadow logs:
+
+```text
+[DYNAMIC] would_set poll_sec=15 previous=60 reason=position_open_profit_expanding confidence=HIGH constraints=within_operator_rails
+[DYNAMIC] would_set trail_pct=1.4 previous=1.8 reason=high_churn_short_regime_age confidence=MODERATE constraints=within_operator_rails
+[DYNAMIC] would_set cooldown=8m previous=5m reason=recent_reversal_cluster confidence=LOW constraints=shadow_only
+```
+
+Watch:
+
+- Whether faster polling would have ratcheted trailing exits sooner.
+- Whether delayed exit checks gave back meaningful max favorable excursion.
+- Whether lower `POLL_SEC` improves exit precision without creating noise-driven
+  churn.
+- Whether dynamic recommendations remain stable and explainable across
+  sessions.
+- Whether `POLL_SEC` is better treated as an exit-precision setting than an
+  entry-logic setting while regimes remain one-minute-bar based.
 
 ## Go-Live Readiness Checklist
 
@@ -607,6 +827,9 @@ Watch:
 - [ ] Broker rejection classification distinguishes buying-power limits from
   opposite-side or wash-trade conflicts.
 - [ ] Lifecycle P/L, fill-paired P/L, and account movement can be reconciled.
+- [ ] Opening warmup policy explicitly includes or excludes premarket bars.
+- [ ] Stale-bar episodes distinguish stream failure from
+  live-market/stale-interpretation lag.
 - [ ] Live risk envelope is configured and visible.
 - [ ] Live trading remains explicitly armed, typed-confirmation gated, and easy
   to disarm.
@@ -616,7 +839,8 @@ Watch:
 
 - Replay UI.
 - Multi-day strategy optimization.
-- Automatic parameter mutation.
+- Unbounded automatic parameter mutation.
+- Active Dynamic Controls before shadow evidence exists.
 - Increasing aggression based on one profitable day.
 - Replacing raw logs with narrative summaries.
 
@@ -644,3 +868,21 @@ Watch:
   pre-live correctness candidates.
 - Added regime-mismatch outcome classification and directional-persistence
   telemetry as watch items before any strategy-threshold changes.
+
+2026-05-29:
+
+- Added Dynamic Controls as a future bounded-adaptation concept.
+- Recorded that `POLL_SEC` may be a perception and exit-precision setting, but
+  should be instrumented before active tuning.
+- Clarified that any dynamic values should stay inside operator-approved rails
+  and run in shadow before production use.
+
+2026-05-30:
+
+- Added the Adaptive qualification day AAR.
+- Promoted regime age and Trend Trust telemetry as the main diagnostic lesson
+  from Adaptive day.
+- Added regular-session warmup integrity as a pre-live observability/doctrine
+  candidate.
+- Added stale-bar repair/backfill investigation around the "live market, stale
+  interpretation" state.
