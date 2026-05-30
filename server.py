@@ -1802,6 +1802,10 @@ def _extract_session_context(
         (r.get("performance") for r in reversed(records) if r.get("performance")),
         None,
     )
+    trend_trust = next(
+        (r.get("trend_trust") for r in reversed(records) if r.get("trend_trust")),
+        None,
+    )
     last_config = last.get("config", {})
     market_was_open = any(bool(r.get("market_open")) for r in records)
 
@@ -1832,6 +1836,7 @@ def _extract_session_context(
             "portfolio_value": last.get("portfolio_value") or last.get("account_value"),
             "buying_power": last.get("buying_power"),
             "open_position": last.get("position_symbol"),
+            "trend_trust": trend_trust,
         },
     }
 
@@ -2045,6 +2050,20 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
         parts.append(f"  Closed trades: {performance.get('session_trade_count')}")
         parts.append(
             f"  Wins/Losses: {performance.get('session_wins')}/{performance.get('session_losses')}"
+        )
+        parts.append("")
+
+    trend_trust = final.get("trend_trust")
+    if isinstance(trend_trust, dict):
+        parts.append("TREND TRUST (shadow telemetry):")
+        parts.append(
+            f"  Score: {trend_trust.get('score')} "
+            f"({trend_trust.get('label')})"
+        )
+        parts.append(
+            f"  Age: {trend_trust.get('regime_age_minutes')}m | "
+            f"Flips 60m: {trend_trust.get('recent_flip_count_60m')} | "
+            f"Efficiency: {trend_trust.get('directional_efficiency')}"
         )
         parts.append("")
 

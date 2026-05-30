@@ -328,6 +328,24 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(regime_state["regime"], "WARMUP")
         self.assertEqual(regime_state["gap_percent"], "0")
 
+    def test_regime_state_tracks_regime_age_and_transitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+
+            state_store.set_regime_state("UPTREND", Decimal("0.30"))
+            first_state = state_store.get_regime_state()
+            first_since = first_state["regime_since"]
+
+            state_store.set_regime_state("UPTREND", Decimal("0.35"))
+            same_state = state_store.get_regime_state()
+
+            state_store.set_regime_state("SIDEWAYS", Decimal("0.05"))
+            changed_state = state_store.get_regime_state()
+
+        self.assertEqual(same_state["regime_since"], first_since)
+        self.assertEqual(changed_state["transitions"][-1]["from"], "UPTREND")
+        self.assertEqual(changed_state["transitions"][-1]["to"], "SIDEWAYS")
+
     def test_market_timestamp_accepts_alpaca_nanosecond_precision(self) -> None:
         parsed = parse_market_timestamp("2026-05-21T14:56:53.123456789Z")
 
@@ -344,7 +362,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
         self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
+        self.assertIn("[TREND] TRUST", output)
         self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertIsNotNone(status.trend_trust)
+        self.assertIn("score", status.trend_trust)
         self.assertEqual(status.active_bot, "ChopBot")
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.action_taken, "market_buy")

@@ -902,6 +902,7 @@ class EdgeWalkerStatus:
     slow_sma: str | None
     gap_percent: str | None
     regime: str | None
+    trend_trust: dict[str, Any] | None
     active_bot: str | None
     routed_symbol: str | None
     entry_signal: bool | None
@@ -1028,10 +1029,31 @@ class BotStateStore:
 
     def set_regime_state(self, regime: str, gap_percent: Decimal) -> None:
         data = self._read()
+        existing = data.get("regime", {})
+        existing = existing if isinstance(existing, dict) else {}
+        previous_regime = existing.get("regime")
+        now = datetime.now(timezone.utc)
+        transitions = existing.get("transitions")
+        transitions = transitions if isinstance(transitions, list) else []
+        regime_since = existing.get("regime_since")
+        if previous_regime != regime:
+            if previous_regime:
+                transitions.append(
+                    {
+                        "from": previous_regime,
+                        "to": regime,
+                        "at": now.isoformat(),
+                    }
+                )
+            regime_since = now.isoformat()
+        elif not regime_since:
+            regime_since = now.isoformat()
         data["regime"] = {
             "regime": regime,
             "gap_percent": format_decimal(gap_percent),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": now.isoformat(),
+            "regime_since": regime_since,
+            "transitions": transitions[-100:],
         }
         self._write(data)
 
@@ -1871,6 +1893,7 @@ class EdgeWalkerBot:
         )
         self._latest_freshness: MarketDataFreshness | None = None
         self._adaptive_posture: AdaptivePosture | None = None
+        self._trend_trust: dict[str, Any] | None = None
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
         payload = {
@@ -1893,6 +1916,7 @@ class EdgeWalkerBot:
     def run_once(self) -> EdgeWalkerStatus:
         self._latest_freshness = None
         self._adaptive_posture = None
+        self._trend_trust = None
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
@@ -1965,6 +1989,12 @@ class EdgeWalkerBot:
         previous_regime_state = self.state_store.get_regime_state()
         signal = self._apply_regime_hysteresis(signal, previous_regime_state)
         self.state_store.set_regime_state(signal.regime, signal.gap_percent)
+        current_regime_state = self.state_store.get_regime_state()
+        self._trend_trust = self._trend_trust_telemetry(
+            signal,
+            soxl_snapshot,
+            current_regime_state,
+        )
         route = RegimeRouter().route(signal.regime)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
@@ -1979,6 +2009,7 @@ class EdgeWalkerBot:
             f"[ROUTER] regime={signal.regime} active_bot={route.active_bot} "
             f"routed_symbol={routed_symbol}"
         )
+        self._print_trend_trust()
 
         orders = self.client.list_open_orders()
         positions = {symbol: self.client.get_position(symbol) for symbol in self.basket_symbols}
@@ -2437,6 +2468,7 @@ class EdgeWalkerBot:
             slow_sma=self._decimal_text(signal.slow_sma if signal else None),
             gap_percent=self._decimal_text(signal.gap_percent if signal else None),
             regime=regime_override or (signal.regime if signal else None),
+            trend_trust=self._trend_trust,
             active_bot=route.active_bot if route else None,
             routed_symbol=route.routed_symbol if route and route.routed_symbol else None,
             entry_signal=entry_signal,
@@ -2758,6 +2790,113 @@ class EdgeWalkerBot:
 
     def _regime_strength(self, signal: RegimeSignal) -> str:
         return self._strength_for_gap(signal.regime, signal.gap_percent)
+
+    def _trend_trust_telemetry(
+        self,
+        signal: RegimeSignal,
+        snapshot: SmaSnapshot,
+        regime_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        regime_since = parse_market_timestamp(regime_state.get("regime_since"))
+        regime_age = age_seconds(regime_since, now)
+        age_minutes = (regime_age or 0.0) / 60
+        recent_flips = self._recent_regime_flip_count(regime_state, now)
+        efficiency = self._directional_efficiency(snapshot.slow_now_values)
+        efficiency_value = float(efficiency) if efficiency is not None else 0.0
+
+        threshold = self.config.regime_gap_threshold
+        if threshold <= 0:
+            strength_component = 0.0
+        elif signal.regime == SIDEWAYS:
+            strength_component = min(float(signal.gap_percent / threshold) * 25, 40.0)
+        else:
+            strength_component = min(
+                float(signal.gap_percent / threshold) / 3 * 100,
+                100.0,
+            )
+        age_component = min(age_minutes / 30 * 100, 100.0)
+        stability_component = max(0.0, 100.0 - recent_flips * 15.0)
+        efficiency_component = min(max(efficiency_value, 0.0), 100.0)
+        score = int(
+            round(
+                strength_component * 0.35
+                + age_component * 0.25
+                + stability_component * 0.25
+                + efficiency_component * 0.15
+            )
+        )
+        if score >= 70:
+            label = "HIGH"
+        elif score >= 45:
+            label = "MODERATE"
+        else:
+            label = "LOW"
+
+        return {
+            "score": score,
+            "label": label,
+            "regime": signal.regime,
+            "strength": self._regime_strength(signal),
+            "regime_age_seconds": self._rounded_seconds(regime_age),
+            "regime_age_minutes": round(age_minutes, 2),
+            "recent_flip_count_60m": recent_flips,
+            "directional_efficiency": self._decimal_text(efficiency),
+            "components": {
+                "strength": round(strength_component, 1),
+                "age": round(age_component, 1),
+                "stability": round(stability_component, 1),
+                "efficiency": round(efficiency_component, 1),
+            },
+        }
+
+    def _recent_regime_flip_count(
+        self,
+        regime_state: dict[str, Any],
+        now: datetime,
+    ) -> int:
+        transitions = regime_state.get("transitions")
+        if not isinstance(transitions, list):
+            return 0
+        cutoff = now - timedelta(minutes=60)
+        count = 0
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            transition_at = parse_market_timestamp(transition.get("at"))
+            if transition_at is not None and transition_at >= cutoff:
+                count += 1
+        return count
+
+    def _directional_efficiency(
+        self,
+        values: list[Decimal],
+    ) -> Decimal | None:
+        if len(values) < 2:
+            return None
+        net_move = abs(values[-1] - values[0])
+        gross_move = sum(
+            abs(values[index] - values[index - 1])
+            for index in range(1, len(values))
+        )
+        if gross_move == 0:
+            return Decimal("0")
+        return net_move / gross_move * Decimal("100")
+
+    def _print_trend_trust(self) -> None:
+        telemetry = self._trend_trust
+        if not telemetry:
+            return
+        efficiency = telemetry.get("directional_efficiency") or "--"
+        print(
+            "[TREND] TRUST "
+            f"score={telemetry.get('score')} "
+            f"label={telemetry.get('label')} "
+            f"age={telemetry.get('regime_age_minutes')}m "
+            f"flips_60m={telemetry.get('recent_flip_count_60m')} "
+            f"efficiency={efficiency}% "
+            f"strength={telemetry.get('strength')}"
+        )
 
     def _strength_for_gap(self, regime: str, gap_percent: Decimal) -> str:
         threshold = self.config.regime_gap_threshold
