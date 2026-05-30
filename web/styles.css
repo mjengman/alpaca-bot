@@ -950,6 +950,21 @@ button:disabled {
   font-size: 0.95rem;
 }
 
+.trail-protection-state {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.trail-protection-state.is-protected {
+  color: var(--green-deep);
+}
+
+.trail-protection-state.is-building {
+  color: var(--amber);
+}
+
 .decision-lead strong {
   font-size: clamp(1.2rem, 2vw, 1.8rem);
   line-height: 1.05;

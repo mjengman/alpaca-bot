@@ -138,6 +138,7 @@ const els = {
   positionPl: document.querySelector("#positionPlValue"),
   entryPrice: document.querySelector("#entryPriceValue"),
   trailExit: document.querySelector("#trailExitValue"),
+  trailProtection: document.querySelector("#trailProtectionValue"),
   orderSummary: document.querySelector("#orderSummaryValue"),
   orderEvents: document.querySelector("#orderEventsList"),
   error: document.querySelector("#errorText"),
@@ -918,6 +919,18 @@ function positionSignature(status) {
 
 function trailingExitPrice(status) {
   return numberOrNull(status?.trailing_exit_price);
+}
+
+function trailProtectionState(status) {
+  const entryPrice = numberOrNull(status?.position_avg_entry_price);
+  const trailPrice = numberOrNull(status?.trailing_exit_price);
+  if (entryPrice === null || trailPrice === null) {
+    return { label: "--", protected: false, active: false };
+  }
+  if (trailPrice >= entryPrice) {
+    return { label: "Trail >= entry", protected: true, active: true };
+  }
+  return { label: "Trail below entry", protected: false, active: true };
 }
 
 function hydrateAudioBaselines(data) {
@@ -1911,6 +1924,11 @@ function renderDecision(status) {
   els.trailExit.textContent = status.trailing_exit_price
     ? formatPrice(status.trailing_exit_price)
     : "--";
+  const protection = trailProtectionState(status);
+  els.trailProtection.textContent = protection.label;
+  els.trailProtection.className = `trail-protection-state ${
+    protection.active ? (protection.protected ? "is-protected" : "is-building") : ""
+  }`.trim();
 }
 
 function escapeHtml(value) {
