@@ -776,6 +776,59 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.action_taken, "close_route_invalidated_position_no_same_cycle_reversal")
         self.assertEqual(status.position_symbol, "SOXL")
 
+    def test_route_invalidation_exit_records_outcome_scaffold(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "99", "98", "97")},
+            {
+                "SOXL": {
+                    "qty": "0.25",
+                    "avg_entry_price": "100",
+                    "current_price": "98.75",
+                    "market_value": "24.69",
+                    "unrealized_pl": "-0.31",
+                    "unrealized_plpc": "-0.0124",
+                }
+            },
+            sell_order_response={
+                "id": "sell-route",
+                "status": "filled",
+                "filled_qty": "0.25",
+                "filled_avg_price": "98.75",
+            },
+        )
+
+        def setup_state(state: BotStateStore) -> None:
+            state.set_position_owner("SOXL", "MomentumBot")
+            state.set_high_water_mark("SOXL", Decimal("101"))
+
+        _output, _status, records = self.run_bot_with_lifecycle(
+            client,
+            setup_state,
+        )
+
+        exit_records = [
+            record
+            for record in records
+            if record.get("reason") == "route_invalidated_exit"
+        ]
+        self.assertTrue(exit_records)
+        for record in exit_records:
+            context = record.get("lifecycle_context")
+            self.assertIsInstance(context, dict)
+            self.assertEqual(context["kind"], "route_invalidation_exit")
+            self.assertEqual(context["outcome_status"], "PENDING_FOLLOW_THROUGH")
+            self.assertIsNone(context["outcome_classification"])
+            self.assertEqual(context["owner_bot"], "MomentumBot")
+            self.assertEqual(context["active_bot"], "InverseBot")
+            self.assertEqual(context["regime_at_invalidation"], "DOWNTREND")
+            self.assertEqual(context["avg_entry_price"], "100")
+            self.assertEqual(context["current_price"], "98.75")
+            self.assertEqual(context["high_water_mark"], "101")
+        self.assertIn(
+            LIFECYCLE_POSITION_CLOSED,
+            [record["event_type"] for record in exit_records],
+        )
+
     def test_confirmed_downtrend_routes_next_cycle_to_soxs(self) -> None:
         client = FakeClient(
             {

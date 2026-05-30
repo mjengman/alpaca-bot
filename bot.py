@@ -1157,6 +1157,7 @@ class OrderLifecycleTracker:
         order: dict[str, Any] | None,
         bot_name: str | None,
         reason: str,
+        lifecycle_context: dict[str, Any] | None = None,
     ) -> None:
         order_id = self._order_id(order)
         if order_id is None or order is None:
@@ -1178,6 +1179,8 @@ class OrderLifecycleTracker:
             "position_closed_recorded": False,
             "submitted_at": datetime.now(timezone.utc).isoformat(),
         }
+        if lifecycle_context:
+            metadata["lifecycle_context"] = lifecycle_context
         self.state_store.track_order(order_id, metadata)
         self.reconcile_order(order_id, order)
 
@@ -1211,6 +1214,7 @@ class OrderLifecycleTracker:
         )
         bot_name = self._field(order, pending, "bot")
         reason = self._field(order, pending, "reason")
+        context_fields = self._context_fields(pending)
         position_lifecycle_state = self._position_lifecycle_state(
             side,
             status,
@@ -1232,6 +1236,7 @@ class OrderLifecycleTracker:
                 reason=reason,
                 position_lifecycle_state=position_lifecycle_state,
                 order=order,
+                **context_fields,
             )
             pending["accepted_recorded"] = True
 
@@ -1251,6 +1256,7 @@ class OrderLifecycleTracker:
                 error=str(order.get("reject_reason") or "order rejected"),
                 position_lifecycle_state=position_lifecycle_state,
                 order=order,
+                **context_fields,
             )
             pending["rejected_recorded"] = True
 
@@ -1274,6 +1280,7 @@ class OrderLifecycleTracker:
                 reason=reason,
                 position_lifecycle_state=position_lifecycle_state,
                 order=order,
+                **context_fields,
             )
             if side == "buy" and not pending.get("position_opened_recorded"):
                 self._record(
@@ -1286,6 +1293,7 @@ class OrderLifecycleTracker:
                     avg_entry_price=filled_avg_price,
                     reason=reason,
                     position_lifecycle_state=position_lifecycle_state,
+                    **context_fields,
                 )
                 pending["position_opened_recorded"] = True
             if (
@@ -1303,6 +1311,7 @@ class OrderLifecycleTracker:
                     exit_price=filled_avg_price,
                     reason=reason,
                     position_lifecycle_state=position_lifecycle_state,
+                    **context_fields,
                 )
                 pending["position_closed_recorded"] = True
 
@@ -1327,6 +1336,8 @@ class OrderLifecycleTracker:
                 "rejected_recorded": pending.get("rejected_recorded", False),
             }
         )
+        if context_fields:
+            pending["lifecycle_context"] = context_fields["lifecycle_context"]
 
         if status in self.TERMINAL_STATUSES:
             self.state_store.clear_order(order_id)
@@ -1349,6 +1360,12 @@ class OrderLifecycleTracker:
     ) -> str | None:
         value = order.get(key) or pending.get(key)
         return str(value) if value not in (None, "") else None
+
+    def _context_fields(self, pending: dict[str, Any]) -> dict[str, Any]:
+        context = pending.get("lifecycle_context")
+        if isinstance(context, dict):
+            return {"lifecycle_context": context}
+        return {}
 
     def _position_lifecycle_state(
         self,
@@ -1912,6 +1929,57 @@ class EdgeWalkerBot:
         return broker_constraint_payload(
             classify_broker_error(str(exc), side=side, symbol=symbol)
         )
+
+    def _route_invalidation_context(
+        self,
+        symbol: str,
+        position: dict[str, Any] | None,
+        qty: Decimal,
+        regime: str,
+        active_bot: str,
+        owner: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "kind": "route_invalidation_exit",
+            "outcome_status": "PENDING_FOLLOW_THROUGH",
+            "outcome_classification": None,
+            "outcome_candidates": [
+                "DEFENSIVE_SAVE",
+                "PREMATURE_CUT",
+                "PROFITABLE_HANDOFF",
+                "NEUTRAL_EXIT",
+            ],
+            "invalidated_symbol": symbol,
+            "owner_bot": owner or "UNKNOWN",
+            "active_bot": active_bot,
+            "regime_at_invalidation": regime,
+            "qty": qty,
+            "avg_entry_price": self._position_optional_decimal(
+                position,
+                "avg_entry_price",
+            ),
+            "current_price": self._position_optional_decimal(position, "current_price"),
+            "market_value": self._position_optional_decimal(position, "market_value"),
+            "unrealized_pl": self._position_optional_decimal(
+                position,
+                "unrealized_pl",
+            ),
+            "unrealized_pl_percent": self._position_optional_decimal(
+                position,
+                "unrealized_plpc",
+            ),
+            "high_water_mark": self.state_store.get_high_water_mark(symbol),
+            "captured_at": datetime.now(timezone.utc),
+        }
+
+    def _position_optional_decimal(
+        self,
+        position: dict[str, Any] | None,
+        field_name: str,
+    ) -> Decimal | None:
+        if not position:
+            return None
+        return optional_decimal_from_api(position.get(field_name), field_name)
 
     def run_once(self) -> EdgeWalkerStatus:
         self._latest_freshness = None
@@ -3367,6 +3435,14 @@ class EdgeWalkerBot:
             )
             return "noop"
 
+        lifecycle_context = self._route_invalidation_context(
+            symbol,
+            position,
+            qty,
+            regime,
+            active_bot,
+            owner,
+        )
         print(
             f"[RISK] {symbol}: route invalidated under regime={regime}; "
             f"owner={owner_text} active_bot={active_bot}; "
@@ -3382,6 +3458,7 @@ class EdgeWalkerBot:
             regime=regime,
             active_bot=active_bot,
             owner=owner_text,
+            lifecycle_context=lifecycle_context,
         )
         try:
             order = self.client.submit_market_sell_qty(symbol, qty)
@@ -3398,6 +3475,7 @@ class EdgeWalkerBot:
                 owner=owner_text,
                 error=str(exc),
                 broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
+                lifecycle_context=lifecycle_context,
             )
             raise
         self._record_lifecycle(
@@ -3411,11 +3489,13 @@ class EdgeWalkerBot:
             active_bot=active_bot,
             owner=owner_text,
             order=order,
+            lifecycle_context=lifecycle_context,
         )
         self.order_tracker.track_submitted_order(
             order,
             owner_text,
             "route_invalidated_exit",
+            lifecycle_context,
         )
         self.state_store.clear_symbol(symbol)
         print(
