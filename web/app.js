@@ -29,6 +29,8 @@ const state = {
   lastInterventionSignature: null,
   lastPositionSignature: null,
   lastTrailingExitPrice: null,
+  protectionPositionSignature: null,
+  trailProtectionPlayed: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -46,6 +48,7 @@ const SOUND_LIBRARY = {
   botStarted: { file: "Bot_started.wav", volume: 0.42 },
   botDeactivated: { file: "Bot_deactivated.wav", volume: 0.42 },
   limitMovedUp: { file: "Limit_moved_up.wav", volume: 0.34 },
+  trailProtected: { file: "Limit_moved_up.wav", volume: 0.22 },
   orderFilled: { file: "Order_filled.wav", volume: 0.46 },
   positionClosed: { file: "Position_closed.wav", volume: 0.46 },
   humanIntervention: {
@@ -934,10 +937,15 @@ function trailProtectionState(status) {
 }
 
 function hydrateAudioBaselines(data) {
+  const currentPositionSignature = positionSignature(data.edgewalker_status);
   state.lastOrderFillSignature = orderFillSignature(data.order_state);
   state.lastInterventionSignature = interventionSignature(data);
-  state.lastPositionSignature = positionSignature(data.edgewalker_status);
+  state.lastPositionSignature = currentPositionSignature;
   state.lastTrailingExitPrice = trailingExitPrice(data.edgewalker_status);
+  state.protectionPositionSignature = currentPositionSignature;
+  state.trailProtectionPlayed = trailProtectionState(
+    data.edgewalker_status,
+  ).protected;
   state.audioHydrated = true;
 }
 
@@ -974,11 +982,32 @@ function handleRuntimeSounds(data, wasRunning) {
   }
   state.lastPositionSignature = currentPositionSignature;
 
+  const currentProtection = trailProtectionState(data.edgewalker_status);
+  if (!currentPositionSignature) {
+    state.protectionPositionSignature = null;
+    state.trailProtectionPlayed = false;
+  } else if (currentPositionSignature !== state.protectionPositionSignature) {
+    state.protectionPositionSignature = currentPositionSignature;
+    state.trailProtectionPlayed = false;
+  }
+
+  let playedTrailProtectionCue = false;
+  if (
+    currentPositionSignature &&
+    currentProtection.protected &&
+    !state.trailProtectionPlayed
+  ) {
+    playSound("trailProtected");
+    state.trailProtectionPlayed = true;
+    playedTrailProtectionCue = true;
+  }
+
   const currentTrailingExitPrice = trailingExitPrice(data.edgewalker_status);
   if (
     currentTrailingExitPrice !== null &&
     state.lastTrailingExitPrice !== null &&
-    currentTrailingExitPrice > state.lastTrailingExitPrice
+    currentTrailingExitPrice > state.lastTrailingExitPrice &&
+    !playedTrailProtectionCue
   ) {
     playSound("limitMovedUp");
   }
