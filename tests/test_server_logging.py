@@ -616,14 +616,14 @@ class ServerLoggingTest(unittest.TestCase):
                 "timestamp": "2026-05-22T15:10:00Z",
                 "market_open": True,
                 "regime": "SIDEWAYS",
-                "action_taken": "close_stale_position_no_same_cycle_reversal",
+                "action_taken": "close_route_invalidated_position_no_same_cycle_reversal",
                 "position_owner": MOMENTUM_BOT,
                 "position_symbol": "SOXL",
                 "position_qty": "1",
                 "position_current_price": "99",
                 "config": {"dry_run": False},
                 "console_lines": [
-                    "[RISK] SOXL: stale exposure under regime=SIDEWAYS; "
+                    "[RISK] SOXL: route invalidated under regime=SIDEWAYS; "
                     "owner=MomentumBot active_bot=ChopBot; selling qty=1.",
                 ],
             },

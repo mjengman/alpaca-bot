@@ -769,11 +769,11 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(client.sells, [("SOXL", Decimal("0.250000000"))])
         self.assertEqual(client.buys, [])
         self.assertIn("regime=DOWNTREND active_bot=InverseBot", output)
-        self.assertIn("close_stale_position_no_same_cycle_reversal", output)
+        self.assertIn("close_route_invalidated_position_no_same_cycle_reversal", output)
         self.assertEqual(status.regime, "DOWNTREND")
         self.assertEqual(status.active_bot, "InverseBot")
         self.assertEqual(status.routed_symbol, "SOXS")
-        self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+        self.assertEqual(status.action_taken, "close_route_invalidated_position_no_same_cycle_reversal")
         self.assertEqual(status.position_symbol, "SOXL")
 
     def test_confirmed_downtrend_routes_next_cycle_to_soxs(self) -> None:
@@ -883,7 +883,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.regime, "SIDEWAYS")
         self.assertEqual(status.active_bot, "ChopBot")
         self.assertEqual(status.routed_symbol, "SOXL")
-        self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+        self.assertEqual(status.action_taken, "close_route_invalidated_position_no_same_cycle_reversal")
 
     def test_stale_position_waits_when_same_symbol_buy_order_is_open(self) -> None:
         client = FakeClient(
@@ -905,10 +905,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
         )
 
         self.assertEqual(client.sells, [])
-        self.assertIn("stale exposure, buy order still open", output)
+        self.assertIn("route invalidated, buy order still open", output)
         self.assertEqual(status.regime, "SIDEWAYS")
         self.assertEqual(status.active_bot, "ChopBot")
-        self.assertEqual(status.action_taken, "wait_for_stale_close_order")
+        self.assertEqual(status.action_taken, "wait_for_route_invalidated_close_order")
 
     def test_uptrend_closes_chop_owned_soxl_before_momentum_entry(self) -> None:
         client = FakeClient(
@@ -927,7 +927,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertIn("owner=ChopBot active_bot=MomentumBot", output)
         self.assertEqual(status.regime, "UPTREND")
         self.assertEqual(status.active_bot, "MomentumBot")
-        self.assertEqual(status.action_taken, "close_stale_position_no_same_cycle_reversal")
+        self.assertEqual(status.action_taken, "close_route_invalidated_position_no_same_cycle_reversal")
 
     def test_regime_hysteresis_holds_prior_trend_above_exit_threshold(self) -> None:
         client = FakeClient({"SOXL": bars("100", "100", "100.7")})

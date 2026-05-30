@@ -1721,6 +1721,7 @@ def _extract_cycle_trade_actions(records: list[dict[str, Any]]) -> list[dict[str
         "market_close_liquidation",
         "chop_exit_reclaim_slow_sma",
         "close_stale_position_no_same_cycle_reversal",
+        "close_route_invalidated_position_no_same_cycle_reversal",
     }
     for record in records:
         action = record.get("action_taken")

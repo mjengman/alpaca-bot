@@ -3344,28 +3344,31 @@ class EdgeWalkerBot:
         if any(order.get("side") == "sell" for order in symbol_orders):
             print(
                 f"[RISK] {symbol}: regime={regime} owner={owner_text} "
-                f"active_bot={active_bot} stale exposure, sell order already open; "
-                "entry_signal=False action_taken=wait_for_stale_close"
+                f"active_bot={active_bot} route invalidated, sell order already open; "
+                "entry_signal=False action_taken=wait_for_route_invalidated_close"
             )
-            return "wait_for_stale_close"
+            return "wait_for_route_invalidated_close"
         if any(order.get("side") == "buy" for order in symbol_orders):
             print(
                 f"[RISK] {symbol}: regime={regime} owner={owner_text} "
-                f"active_bot={active_bot} stale exposure, buy order still open; "
-                "entry_signal=False action_taken=wait_for_stale_close_order"
+                f"active_bot={active_bot} route invalidated, buy order still open; "
+                "entry_signal=False action_taken=wait_for_route_invalidated_close_order"
             )
-            return "wait_for_stale_close_order"
+            return "wait_for_route_invalidated_close_order"
 
         qty = self._position_qty(position).quantize(
             FRACTIONAL_QTY_STEP,
             rounding=ROUND_DOWN,
         )
         if qty <= 0:
-            print(f"[RISK] {symbol}: stale exposure not found; entry_signal=False action_taken=noop")
+            print(
+                f"[RISK] {symbol}: route-invalidated position not found; "
+                "entry_signal=False action_taken=noop"
+            )
             return "noop"
 
         print(
-            f"[RISK] {symbol}: stale exposure under regime={regime}; "
+            f"[RISK] {symbol}: route invalidated under regime={regime}; "
             f"owner={owner_text} active_bot={active_bot}; "
             f"selling qty={format_decimal(qty)}."
         )
@@ -3375,7 +3378,7 @@ class EdgeWalkerBot:
             symbol=symbol,
             side="sell",
             qty=qty,
-            reason="stale_position_regime_mismatch",
+            reason="route_invalidated_exit",
             regime=regime,
             active_bot=active_bot,
             owner=owner_text,
@@ -3389,7 +3392,7 @@ class EdgeWalkerBot:
                 symbol=symbol,
                 side="sell",
                 qty=qty,
-                reason="stale_position_regime_mismatch",
+                reason="route_invalidated_exit",
                 regime=regime,
                 active_bot=active_bot,
                 owner=owner_text,
@@ -3403,7 +3406,7 @@ class EdgeWalkerBot:
             symbol=symbol,
             side="sell",
             qty=qty,
-            reason="stale_position_regime_mismatch",
+            reason="route_invalidated_exit",
             regime=regime,
             active_bot=active_bot,
             owner=owner_text,
@@ -3412,11 +3415,14 @@ class EdgeWalkerBot:
         self.order_tracker.track_submitted_order(
             order,
             owner_text,
-            "stale_position_regime_mismatch",
+            "route_invalidated_exit",
         )
         self.state_store.clear_symbol(symbol)
-        print("entry_signal=False action_taken=close_stale_position_no_same_cycle_reversal")
-        return "close_stale_position_no_same_cycle_reversal"
+        print(
+            "entry_signal=False "
+            "action_taken=close_route_invalidated_position_no_same_cycle_reversal"
+        )
+        return "close_route_invalidated_position_no_same_cycle_reversal"
 
     def _maybe_exit_chop_position(
         self,

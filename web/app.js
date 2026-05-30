@@ -1818,7 +1818,11 @@ function formatLabel(value) {
     chop_no_trade_placeholder: "Standing Aside",
     collecting_data: "Collecting Data",
     no_entry_signal: "No Entry Signal",
+    close_route_invalidated_position_no_same_cycle_reversal:
+      "Closed Invalidated Route",
     close_stale_position_no_same_cycle_reversal: "Closed Stale Exposure",
+    wait_for_route_invalidated_close: "Waiting For Route Close",
+    wait_for_route_invalidated_close_order: "Waiting For Route Close",
     wait_for_stale_close: "Waiting For Stale Close",
     manage_open_position: "Managing Position",
     chop_exit_reclaim_slow_sma: "Chop Exit Reclaim",
@@ -2083,6 +2087,8 @@ function logToneForLine(line) {
     lower.includes("stream market data is not live") ||
     lower.includes('"isstale": true') ||
     lower.includes("downtrend") ||
+    lower.includes("route invalidated") ||
+    lower.includes("route_invalidated") ||
     lower.includes("stale exposure") ||
     lower.includes("selling") ||
     lower.includes("sell order") ||
