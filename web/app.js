@@ -136,6 +136,7 @@ const els = {
   gap: document.querySelector("#gapValue"),
   position: document.querySelector("#positionValue"),
   positionPl: document.querySelector("#positionPlValue"),
+  entryPrice: document.querySelector("#entryPriceValue"),
   trailExit: document.querySelector("#trailExitValue"),
   orderSummary: document.querySelector("#orderSummaryValue"),
   orderEvents: document.querySelector("#orderEventsList"),
@@ -1904,6 +1905,9 @@ function renderDecision(status) {
     status.position_unrealized_pl === null ? "--" : positionPlText;
   setTone(els.positionPl, status.position_unrealized_pl);
 
+  els.entryPrice.textContent = status.position_avg_entry_price
+    ? formatPrice(status.position_avg_entry_price)
+    : "--";
   els.trailExit.textContent = status.trailing_exit_price
     ? formatPrice(status.trailing_exit_price)
     : "--";

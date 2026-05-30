@@ -928,6 +928,28 @@ button:disabled {
   font-size: 1.05rem;
 }
 
+.trail-compare-cell {
+  align-content: center;
+}
+
+.trail-compare-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.trail-compare-row span {
+  min-width: 0;
+}
+
+.trail-compare-row strong {
+  flex: 0 1 auto;
+  text-align: right;
+  font-size: 0.95rem;
+}
+
 .decision-lead strong {
   font-size: clamp(1.2rem, 2vw, 1.8rem);
   line-height: 1.05;
