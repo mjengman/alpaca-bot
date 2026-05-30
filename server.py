@@ -1754,6 +1754,182 @@ def _extract_cycle_trade_actions(records: list[dict[str, Any]]) -> list[dict[str
     return trades
 
 
+def _increment_count(counts: dict[str, int], key: Any) -> None:
+    text = _optional_text(key) or "UNKNOWN"
+    counts[text] = counts.get(text, 0) + 1
+
+
+def _counts_payload(counts: dict[str, int]) -> list[dict[str, Any]]:
+    return [
+        {"name": key, "count": count}
+        for key, count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
+def _float_from_value(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_block_reason_from_line(line: str) -> str | None:
+    if "[ENTRY]" not in line or "reason=" not in line:
+        return None
+    if "BLOCKED" not in line and "entry_signal=False" not in line:
+        return None
+    match = re.search(r"\breason=([A-Za-z0-9_]+)", line)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _record_has_stale_bars(record: dict[str, Any]) -> bool:
+    if record.get("data_status") == "STALE":
+        return True
+    if record.get("action_taken") in {
+        "wait_stale_market_data",
+        "manage_open_position_stale_bars",
+    }:
+        return True
+    return any(
+        isinstance(line, str) and "[DATA] HEALTH bars=STALE" in line
+        for line in record.get("console_lines") or []
+    )
+
+
+def _session_metrics_summary(
+    records: list[dict[str, Any]],
+    lifecycle_records: list[dict[str, Any]],
+    log_date: str,
+) -> dict[str, Any]:
+    action_counts: dict[str, int] = {}
+    adaptive_counts: dict[str, int] = {}
+    entry_block_counts: dict[str, int] = {}
+    trend_label_counts: dict[str, int] = {}
+    trust_scores: list[float] = []
+    trust_ages: list[float] = []
+    trust_flips: list[float] = []
+    stale_bar_cycles = 0
+    backfill_repair_cycles = 0
+    backfill_unchanged_cycles = 0
+    backfill_error_cycles = 0
+
+    for record in records:
+        _increment_count(action_counts, record.get("action_taken"))
+        posture = _optional_text(record.get("adaptive_posture"))
+        if posture:
+            _increment_count(adaptive_counts, posture)
+
+        if _record_has_stale_bars(record):
+            stale_bar_cycles += 1
+
+        lines = record.get("console_lines") or []
+        if any(
+            isinstance(line, str) and "[DATA] BAR BACKFILL repaired" in line
+            for line in lines
+        ):
+            backfill_repair_cycles += 1
+        if any(
+            isinstance(line, str) and "[DATA] BAR BACKFILL unchanged" in line
+            for line in lines
+        ):
+            backfill_unchanged_cycles += 1
+        if any(
+            isinstance(line, str) and "[DATA] BAR BACKFILL error" in line
+            for line in lines
+        ):
+            backfill_error_cycles += 1
+
+        for line in lines:
+            if not isinstance(line, str):
+                continue
+            reason = _entry_block_reason_from_line(line)
+            if reason:
+                _increment_count(entry_block_counts, reason)
+
+        trend_trust = record.get("trend_trust")
+        if isinstance(trend_trust, dict):
+            score = _float_from_value(trend_trust.get("score"))
+            if score is not None:
+                trust_scores.append(score)
+            age = _float_from_value(trend_trust.get("regime_age_minutes"))
+            if age is not None:
+                trust_ages.append(age)
+            flips = _float_from_value(trend_trust.get("recent_flip_count_60m"))
+            if flips is not None:
+                trust_flips.append(flips)
+            label = _optional_text(trend_trust.get("label"))
+            if label:
+                _increment_count(trend_label_counts, label)
+
+    lifecycle_for_date = _lifecycle_records_for_date(lifecycle_records, log_date)
+    submitted_sell_records = [
+        record
+        for record in lifecycle_for_date
+        if record.get("event_type") == LIFECYCLE_ORDER_SUBMITTED
+        and str(record.get("side") or "").lower() == "sell"
+    ]
+    sell_source = submitted_sell_records or [
+        record
+        for record in lifecycle_for_date
+        if record.get("event_type") in {LIFECYCLE_PARTIAL_FILL, LIFECYCLE_FULL_FILL}
+        and str(record.get("side") or "").lower() == "sell"
+    ]
+    exit_reason_counts: dict[str, int] = {}
+    route_invalidation_scaffold_count = 0
+    for record in sell_source:
+        reason = _optional_text(record.get("reason")) or "UNKNOWN"
+        _increment_count(exit_reason_counts, reason)
+        context = record.get("lifecycle_context")
+        if (
+            reason == "route_invalidated_exit"
+            and isinstance(context, dict)
+            and context.get("kind") == "route_invalidation_exit"
+        ):
+            route_invalidation_scaffold_count += 1
+
+    def average(values: list[float]) -> str | None:
+        if not values:
+            return None
+        return f"{sum(values) / len(values):.1f}"
+
+    return {
+        "regime_transition_count": sum(
+            1 for record in records if record.get("regime_transition")
+        ),
+        "stale_bar_cycles": stale_bar_cycles,
+        "backfill_repair_cycles": backfill_repair_cycles,
+        "backfill_unchanged_cycles": backfill_unchanged_cycles,
+        "backfill_error_cycles": backfill_error_cycles,
+        "action_counts": _counts_payload(action_counts),
+        "adaptive_posture_counts": _counts_payload(adaptive_counts),
+        "top_entry_blocks": _counts_payload(entry_block_counts)[:6],
+        "exit_reason_counts": _counts_payload(exit_reason_counts),
+        "route_invalidation_exit_count": exit_reason_counts.get(
+            "route_invalidated_exit",
+            0,
+        ),
+        "route_invalidation_scaffold_count": route_invalidation_scaffold_count,
+        "trailing_stop_exit_count": exit_reason_counts.get(
+            "trailing_stop_breached",
+            0,
+        ),
+        "trend_trust": {
+            "observations": len(trust_scores),
+            "average_score": average(trust_scores),
+            "average_regime_age_minutes": average(trust_ages),
+            "max_recent_flips_60m": max(trust_flips) if trust_flips else None,
+            "label_counts": _counts_payload(trend_label_counts),
+        },
+    }
+
+
 def _extract_session_context(
     records: list[dict[str, Any]],
     log_date: str,
@@ -1803,6 +1979,11 @@ def _extract_session_context(
         (r.get("performance") for r in reversed(records) if r.get("performance")),
         None,
     )
+    session_metrics = _session_metrics_summary(
+        records,
+        lifecycle_records or [],
+        log_date,
+    )
     trend_trust = next(
         (r.get("trend_trust") for r in reversed(records) if r.get("trend_trust")),
         None,
@@ -1833,6 +2014,7 @@ def _extract_session_context(
         "error_count": len(error_records),
         "error_samples": error_samples,
         "performance": perf,
+        "session_metrics": session_metrics,
         "final_state": {
             "portfolio_value": last.get("portfolio_value") or last.get("account_value"),
             "buying_power": last.get("buying_power"),
@@ -1855,6 +2037,20 @@ def _trade_size_text(trade: dict[str, Any]) -> str:
 def _trade_price_text(trade: dict[str, Any]) -> str:
     price = _optional_text(trade.get("price"))
     return f" @ ${price}" if price else ""
+
+
+def _summary_counts_text(items: Any, limit: int = 4) -> str:
+    if not isinstance(items, list) or not items:
+        return "none"
+    parts = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        count = item.get("count")
+        if name is not None and count is not None:
+            parts.append(f"{name}={count}")
+    return ", ".join(parts) if parts else "none"
 
 
 def _display_date_text(date_text: str) -> str:
@@ -1979,6 +2175,7 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
     error_count = context.get("error_count", 0)
     error_samples = context.get("error_samples", [])
     performance = context.get("performance")
+    metrics = context.get("session_metrics")
     final = context.get("final_state", {})
 
     mode = (
@@ -2007,6 +2204,37 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
         f"SOXL PRICE RANGE: {market.get('price_range')} | OPENING REGIME: {market.get('initial_regime')}",
         "",
     ]
+
+    if isinstance(metrics, dict):
+        trend_metrics = metrics.get("trend_trust")
+        trend_metrics = trend_metrics if isinstance(trend_metrics, dict) else {}
+        parts.append("SESSION METRICS:")
+        parts.append(
+            f"  Regime transitions: {metrics.get('regime_transition_count')} | "
+            f"Stale bar cycles: {metrics.get('stale_bar_cycles')} | "
+            f"Backfill repairs: {metrics.get('backfill_repair_cycles')}"
+        )
+        parts.append(
+            "  Exits: "
+            f"route_invalidated={metrics.get('route_invalidation_exit_count')} | "
+            f"trailing_stop={metrics.get('trailing_stop_exit_count')}"
+        )
+        parts.append(
+            "  Adaptive posture counts: "
+            f"{_summary_counts_text(metrics.get('adaptive_posture_counts'))}"
+        )
+        parts.append(
+            "  Top entry blocks: "
+            f"{_summary_counts_text(metrics.get('top_entry_blocks'))}"
+        )
+        parts.append(
+            "  Trend Trust observations: "
+            f"{trend_metrics.get('observations')} | "
+            f"avg_score={trend_metrics.get('average_score')} | "
+            f"avg_age={trend_metrics.get('average_regime_age_minutes')}m | "
+            f"labels={_summary_counts_text(trend_metrics.get('label_counts'))}"
+        )
+        parts.append("")
 
     if transitions:
         parts.append(f"REGIME CHANGES ({len(transitions)}):")

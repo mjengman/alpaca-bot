@@ -634,6 +634,80 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual([trade["action"] for trade in context["trades"]], ["BUY", "SELL"])
         self.assertEqual(context["trades"][1]["bot"], MOMENTUM_BOT)
 
+    def test_session_context_includes_structured_session_metrics(self) -> None:
+        records = [
+            {
+                "timestamp": "2026-05-22T14:30:00Z",
+                "market_open": True,
+                "regime": "UPTREND",
+                "regime_transition": {"from": "WARMUP", "to": "UPTREND"},
+                "action_taken": "no_entry_signal",
+                "adaptive_posture": "BALANCED",
+                "trend_trust": {
+                    "score": 50,
+                    "label": "LOW",
+                    "regime_age_minutes": 1,
+                    "recent_flip_count_60m": 3,
+                },
+                "console_lines": [
+                    "[ENTRY] BLOCKED bot=MomentumBot symbol=SOXL reason=mode_requires_fresh_cross",
+                    "[DATA] BAR BACKFILL repaired symbols=SOXL",
+                ],
+                "config": {"dry_run": False},
+            },
+            {
+                "timestamp": "2026-05-22T14:31:00Z",
+                "market_open": True,
+                "regime": "UPTREND",
+                "action_taken": "wait_stale_market_data",
+                "adaptive_posture": "CONSERVATIVE",
+                "data_status": "STALE",
+                "trend_trust": {
+                    "score": 60,
+                    "label": "MODERATE",
+                    "regime_age_minutes": 3,
+                    "recent_flip_count_60m": 4,
+                },
+                "console_lines": [
+                    "[DATA] HEALTH bars=STALE (111s) quotes=LIVE (<1s)",
+                ],
+                "config": {"dry_run": False},
+            },
+        ]
+        lifecycle_records = [
+            {
+                "event_type": LIFECYCLE_ORDER_SUBMITTED,
+                "created_at": "2026-05-22T14:35:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "reason": "route_invalidated_exit",
+                "lifecycle_context": {"kind": "route_invalidation_exit"},
+            },
+            {
+                "event_type": LIFECYCLE_ORDER_SUBMITTED,
+                "created_at": "2026-05-22T14:40:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "reason": "trailing_stop_breached",
+            },
+        ]
+
+        context = _extract_session_context(records, "2026-05-22", lifecycle_records)
+        prompt = _build_summary_prompt(context)
+        metrics = context["session_metrics"]
+
+        self.assertEqual(metrics["regime_transition_count"], 1)
+        self.assertEqual(metrics["stale_bar_cycles"], 1)
+        self.assertEqual(metrics["backfill_repair_cycles"], 1)
+        self.assertEqual(metrics["route_invalidation_exit_count"], 1)
+        self.assertEqual(metrics["route_invalidation_scaffold_count"], 1)
+        self.assertEqual(metrics["trailing_stop_exit_count"], 1)
+        self.assertEqual(metrics["trend_trust"]["average_score"], "55.0")
+        self.assertIn("SESSION METRICS:", prompt)
+        self.assertIn("route_invalidated=1", prompt)
+        self.assertIn("avg_score=55.0", prompt)
+        self.assertIn("mode_requires_fresh_cross=1", prompt)
+
     def test_ai_origin_guard_allows_only_local_ui_origins(self) -> None:
         self.assertTrue(_is_allowed_ui_origin("http://127.0.0.1:8765"))
         self.assertTrue(_is_allowed_ui_origin("http://localhost:8765"))
