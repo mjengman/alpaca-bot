@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from bot import BotConfig
 from market_data import StreamingMarketDataService
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def config() -> BotConfig:
@@ -39,6 +43,16 @@ def config() -> BotConfig:
     )
 
 
+def market_timestamp(hour: int = 10, minute: int = 0) -> str:
+    timestamp = datetime.now(NY_TZ).replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+    return timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 class StreamingMarketDataServiceTest(unittest.TestCase):
     def test_stream_messages_cache_bars_trades_and_quotes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -47,12 +61,7 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
                 symbols=("SOXL", "SOXS"),
                 state_path=Path(tmpdir) / "stream-state.json",
             )
-            timestamp = (
-                datetime.now(timezone.utc)
-                .replace(second=0, microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
+            timestamp = market_timestamp()
 
             with service._lock:
                 service._handle_messages_locked(
@@ -94,12 +103,7 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
                 symbols=("SOXL",),
                 state_path=Path(tmpdir) / "stream-state.json",
             )
-            timestamp = (
-                datetime.now(timezone.utc)
-                .replace(second=0, microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
+            timestamp = market_timestamp()
 
             with service._lock:
                 service._handle_messages_locked(
@@ -120,12 +124,7 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
                 symbols=("SOXL",),
                 state_path=Path(tmpdir) / "stream-state.json",
             )
-            timestamp = (
-                datetime.now(timezone.utc)
-                .replace(second=0, microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
+            timestamp = market_timestamp()
             prune_calls: list[bool] = []
             save_calls: list[bool] = []
             service._prune_current_trading_day_locked = lambda: prune_calls.append(True)
@@ -143,6 +142,64 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
             self.assertEqual(save_calls, [])
             self.assertEqual(service.get_latest_trade("SOXL")["p"], 100.75)
             self.assertEqual(service.get_latest_quote("SOXL")["bp"], 100.7)
+
+    def test_premarket_bars_do_not_satisfy_regular_session_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+            premarket_timestamp = market_timestamp(9, 24)
+            regular_timestamp = market_timestamp(9, 30)
+
+            with service._lock:
+                service._handle_messages_locked(
+                    [
+                        {"T": "b", "S": "SOXL", "c": 99, "t": premarket_timestamp},
+                        {"T": "b", "S": "SOXL", "c": 100, "t": regular_timestamp},
+                    ]
+                )
+
+            bars = service.get_recent_bars("SOXL", 20)
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(bars[0]["t"], regular_timestamp)
+            self.assertEqual(bars[0]["c"], 100)
+            self.assertEqual(
+                service.status("SOXL", required_bars=2)["stream_bar_count"],
+                1,
+            )
+
+    def test_cached_premarket_bars_are_pruned_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "stream-state.json"
+            premarket_timestamp = market_timestamp(9, 24)
+            regular_timestamp = market_timestamp(9, 30)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "feed": "iex",
+                        "symbols": ["SOXL"],
+                        "bars": {
+                            "SOXL": [
+                                {"S": "SOXL", "c": 99, "t": premarket_timestamp},
+                                {"S": "SOXL", "c": 100, "t": regular_timestamp},
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=state_path,
+            )
+
+            bars = service.get_recent_bars("SOXL", 20)
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(bars[0]["t"], regular_timestamp)
 
 
 if __name__ == "__main__":

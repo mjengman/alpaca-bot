@@ -26,6 +26,8 @@ STREAM_STATE_PATH_DEFAULT = Path(__file__).resolve().with_name(
     ".market_data_state.json"
 )
 NY_TZ = ZoneInfo("America/New_York")
+REGULAR_SESSION_START_SECONDS = 9 * 60 * 60 + 30 * 60
+REGULAR_SESSION_END_SECONDS = 16 * 60 * 60
 STREAM_STATUS_LIVE = "LIVE"
 STREAM_STATUS_WARMING_UP = "WARMING_UP"
 STREAM_STATUS_CONNECTING = "CONNECTING"
@@ -106,7 +108,7 @@ class StreamingMarketDataService:
 
     def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
         with self._lock:
-            bars = self._bars.get(symbol.upper(), [])
+            bars = self._regular_session_bars_locked(symbol.upper())
             return [dict(bar) for bar in bars[-minutes:]]
 
     def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
@@ -122,7 +124,7 @@ class StreamingMarketDataService:
     def status(self, symbol: str, required_bars: int | None = None) -> dict[str, Any]:
         with self._lock:
             symbol = symbol.upper()
-            bars = self._bars.get(symbol, [])
+            bars = self._regular_session_bars_locked(symbol)
             latest_bar = bars[-1] if bars else None
             latest_bar_time = (
                 parse_market_timestamp(latest_bar.get("t")) if latest_bar else None
@@ -136,7 +138,11 @@ class StreamingMarketDataService:
                 parse_market_timestamp(latest_quote.get("t")) if latest_quote else None
             )
             bar_age = bar_end_age_seconds(latest_bar_time)
-            status = self._status_text_locked(symbol, required_bars, bar_age)
+            status = self._status_text_locked(
+                required_bars,
+                bar_age,
+                bar_count=len(bars),
+            )
 
             return {
                 "data_source": self.source_name,
@@ -292,9 +298,9 @@ class StreamingMarketDataService:
 
     def _status_text_locked(
         self,
-        symbol: str,
         required_bars: int | None,
         bar_age: float | None,
+        bar_count: int,
     ) -> str:
         if websocket is None:
             return STREAM_STATUS_MISSING_DEPENDENCY
@@ -306,7 +312,7 @@ class StreamingMarketDataService:
             return STREAM_STATUS_WARMING_UP
         if bar_age > MARKET_DATA_MAX_AGE_SECONDS:
             return STREAM_STATUS_STALE
-        if required_bars is not None and len(self._bars.get(symbol, [])) < required_bars:
+        if required_bars is not None and bar_count < required_bars:
             return STREAM_STATUS_WARMING_UP
         return STREAM_STATUS_LIVE
 
@@ -386,14 +392,33 @@ class StreamingMarketDataService:
             self._bars[symbol] = [
                 bar
                 for bar in bars
-                if self._bar_trading_date(bar) == today
+                if self._bar_is_regular_session_on_date(bar, today)
             ][-self.max_bars :]
 
-    def _bar_trading_date(self, bar: dict[str, Any]) -> Any:
+    def _regular_session_bars_locked(self, symbol: str) -> list[dict[str, Any]]:
+        today = datetime.now(NY_TZ).date()
+        return [
+            bar
+            for bar in self._bars.get(symbol, [])
+            if self._bar_is_regular_session_on_date(bar, today)
+        ]
+
+    def _bar_is_regular_session_on_date(self, bar: dict[str, Any], date: Any) -> bool:
         timestamp = parse_market_timestamp(bar.get("t"))
         if timestamp is None:
-            return None
-        return timestamp.astimezone(NY_TZ).date()
+            return False
+        local_timestamp = timestamp.astimezone(NY_TZ)
+        seconds_since_midnight = (
+            local_timestamp.hour * 60 * 60
+            + local_timestamp.minute * 60
+            + local_timestamp.second
+        )
+        return (
+            local_timestamp.date() == date
+            and REGULAR_SESSION_START_SECONDS
+            <= seconds_since_midnight
+            < REGULAR_SESSION_END_SECONDS
+        )
 
     def _on_error(self, _ws: Any, error: Any) -> None:
         with self._lock:
