@@ -855,6 +855,18 @@ button:disabled {
   opacity: 0.65;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .primary {
   background: var(--green);
   color: #ffffff;
@@ -1244,6 +1256,39 @@ button:disabled {
   background: var(--input);
   color: var(--ink);
   font-size: 0.82rem;
+}
+
+.icon-button {
+  width: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.copy-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-button[data-copy-state="success"] {
+  color: var(--green-deep);
+  border-color: rgba(37, 127, 91, 0.45);
+}
+
+.icon-button[data-copy-state="empty"] {
+  color: var(--amber);
+  border-color: rgba(162, 92, 18, 0.4);
+}
+
+.icon-button[data-copy-state="error"] {
+  color: var(--danger);
+  border-color: rgba(185, 73, 62, 0.45);
 }
 
 .log-toggle:hover:not(:disabled) {

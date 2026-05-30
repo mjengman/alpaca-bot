@@ -149,6 +149,7 @@ const els = {
   activityTab: document.querySelector("#activityTab"),
   narrativeTab: document.querySelector("#narrativeTab"),
   activityCopy: document.querySelector("#activityCopy"),
+  activityCopyLabel: document.querySelector("#activityCopyLabel"),
   activityExpand: document.querySelector("#activityExpand"),
   activityToggle: document.querySelector("#activityToggle"),
   narrativeGenerate: document.querySelector("#narrativeGenerate"),
@@ -1396,6 +1397,22 @@ function setupCollapsibleSections() {
   });
 }
 
+function setCopyButtonState(label, tooltip, stateName = "") {
+  if (!els.activityCopy) {
+    return;
+  }
+  els.activityCopy.setAttribute("aria-label", label);
+  els.activityCopy.dataset.tooltip = tooltip;
+  if (stateName) {
+    els.activityCopy.dataset.copyState = stateName;
+  } else {
+    delete els.activityCopy.dataset.copyState;
+  }
+  if (els.activityCopyLabel) {
+    els.activityCopyLabel.textContent = label;
+  }
+}
+
 async function copyActivityLog() {
   if (!els.activityCopy) {
     return;
@@ -1405,17 +1422,21 @@ async function copyActivityLog() {
   const text = isNarrative
     ? (state.narrativeText || "")
     : (state.logText || els.log?.textContent || "");
-  const originalText = els.activityCopy.textContent;
+  const originalLabel =
+    els.activityCopy.getAttribute("aria-label") || "Copy current tab text";
   const originalTooltip = els.activityCopy.dataset.tooltip;
+  const originalState = els.activityCopy.dataset.copyState || "";
 
   if (!text.trim()) {
-    els.activityCopy.textContent = "Empty";
-    els.activityCopy.dataset.tooltip = isNarrative
-      ? "There is no narrative to copy yet."
-      : "There is no activity log text to copy yet.";
+    setCopyButtonState(
+      "Nothing to copy",
+      isNarrative
+        ? "There is no narrative to copy yet."
+        : "There is no activity log text to copy yet.",
+      "empty",
+    );
     window.setTimeout(() => {
-      els.activityCopy.textContent = originalText;
-      els.activityCopy.dataset.tooltip = originalTooltip;
+      setCopyButtonState(originalLabel, originalTooltip, originalState);
     }, 1400);
     return;
   }
@@ -1434,17 +1455,16 @@ async function copyActivityLog() {
       document.execCommand("copy");
       textarea.remove();
     }
-    els.activityCopy.textContent = "Copied";
-    els.activityCopy.dataset.tooltip = isNarrative
-      ? "Narrative copied."
-      : "Activity log copied.";
+    setCopyButtonState(
+      "Copied",
+      isNarrative ? "Narrative copied." : "Activity log copied.",
+      "success",
+    );
   } catch {
-    els.activityCopy.textContent = "Failed";
-    els.activityCopy.dataset.tooltip = "Could not copy.";
+    setCopyButtonState("Copy failed", "Could not copy.", "error");
   } finally {
     window.setTimeout(() => {
-      els.activityCopy.textContent = originalText;
-      els.activityCopy.dataset.tooltip = originalTooltip;
+      setCopyButtonState(originalLabel, originalTooltip, originalState);
     }, 1400);
   }
 }
