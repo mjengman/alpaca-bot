@@ -826,65 +826,79 @@ Improve truth and operator confidence.
 Do not retune strategy behavior.
 ```
 
+Status as of 2026-05-31: P0, P1 telemetry/scaffolding, and P2 operator polish
+are implemented and pushed. P3 remains intentionally parked until more
+qualification evidence exists.
+
 ### P0: Before Qualification Round 2
 
-1. Regular-session warmup integrity
+1. [x] Regular-session warmup integrity
    - Ensure regular-session trading does not accidentally use premarket bars
      for the first actionable SMA context.
    - Decide what market world EdgeWalker is modeling at the open.
 
-2. Stale-bar repair / backfill
+2. [x] Stale-bar repair / backfill
    - If quotes/trades are live but bars are stale, attempt bounded recent-bar
      REST backfill.
    - Keep entries blocked until bar freshness is restored.
 
-3. Opening/open/closing/closed lifecycle visibility
+3. [x] Opening/open/closing/closed lifecycle visibility
    - Make position/order lifecycle state visible enough that live-money
      operation feels sane, especially while orders are pending or partially
      filled.
 
-4. Broker rejection classification cleanup
+4. [x] Broker rejection classification cleanup
    - Add distinct classification for opposite-side or wash-trade conflicts
      instead of mislabeling them as buying-power issues.
 
-5. P/L reconciliation confidence
+5. [x] P/L reconciliation confidence
    - Tighten or expose lifecycle P/L versus fill-paired P/L versus account
      movement so discrepancies are explainable.
 
 ### P1: Highest-Value Telemetry
 
-6. Trend Trust telemetry, shadow-only
+6. [x] Trend Trust telemetry, shadow-only
    - Log regime age, recent flip counts, regime hold time, and post-entry
      MFE/MAE where feasible.
    - Do not feed these metrics into decisions yet.
+   - Implemented: regime age, recent flip count, directional efficiency,
+     strength components, score/label, session summary.
+   - Remaining later: post-entry MFE/MAE.
 
-7. Route invalidation exit labeling
+7. [x] Route invalidation exit labeling
    - Keep the internal code compatible.
    - Surface the human label `route_invalidation_exit` in logs, narrative, or
      UI where practical.
 
-8. Route invalidation outcome scaffolding
+8. [x] Route invalidation outcome scaffolding
    - Start storing enough context to later classify defensive save, premature
      cut, neutral exit, and profitable handoff.
+   - Implemented as lifecycle context with pending outcome classification.
+   - Remaining later: automatic outcome classification.
 
-9. Session metrics summary
+9. [x] Session metrics summary
    - Summarize stale-bar count, max bar age, regime transitions, average regime
      age, short-lived regime count, and trade count by bot/mode.
+   - Implemented: regime transitions, stale-bar cycles, backfill repairs,
+     route-invalidation/trailing exits, Adaptive posture counts, top entry
+     blocks, and Trend Trust averages.
+   - Remaining later: max bar age, short-lived regime count, and richer
+     bot/mode breakdowns.
 
 ### P2: UI / Operator Polish
 
-10. Entry price + Trail exit comparison
+10. [x] Entry price + Trail exit comparison
     - Show entry price and trail exit together so risk state is easier to scan.
 
-11. Protected-position state
+11. [x] Protected-position state
     - Show when trail exit is at or above entry price.
     - This should feel like "risk improved," not a profit celebration.
 
-12. Audio cue for trail at or above entry
+12. [x] Audio cue for trail at or above entry
     - Trigger once per position.
     - Keep it subtle and procedural.
 
-13. Copy icon
+13. [x] Copy icon
     - Replace the `Copy` text button with a copy icon while preserving
       tooltip and state feedback.
 
@@ -900,3 +914,16 @@ Do not retune strategy behavior.
 16. Strategy threshold changes
     - Do not change regime thresholds, trail percent, ChopBot discount,
       cooldown, or mode rules in this sprint.
+
+### Qualification Round 2 Operating State
+
+- Run the second rotation without strategy-threshold changes.
+- Treat weekend changes as observability/data-integrity improvements, not as a
+  new strategy variant.
+- Watch whether regular-session-only warmup changes early-session behavior.
+- Watch whether REST bar backfill reduces "live market, stale interpretation"
+  pauses without loosening entry safety.
+- Use Trend Trust as shadow evidence only; do not feed it into Adaptive until
+  multiple sessions show how it behaves.
+- Continue recording manual operator notes, daily logs, lifecycle records, and
+  AAR updates.

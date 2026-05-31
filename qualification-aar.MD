@@ -659,3 +659,43 @@ Next session:
   and route-invalidation exit classification.
 - Judge the next Conservative sample against Day 1 to see whether separated
   time slices reveal consistent behavior.
+
+## Qualification Round 2 Readiness Note
+
+Date: 2026-05-31
+
+Status:
+
+- Weekend observability sprint completed and pushed before qualification round
+  2.
+- No strategy thresholds, sizing doctrine, trail percent, ChopBot discount,
+  cooldown, or Adaptive posture rules were changed.
+- Implemented changes are primarily operational-truth and operator-confidence
+  improvements: regular-session-only warmup, stale-bar REST backfill, lifecycle
+  visibility, partial-fill conflict classification, P/L reconciliation
+  confidence, Trend Trust shadow telemetry, route-invalidation context, session
+  metrics, and dashboard risk-state polish.
+
+What may affect observed behavior:
+
+- Opening behavior may change because premarket bars no longer satisfy
+  regular-session warmup.
+- Stale-bar recovery may improve because the runtime now attempts bounded REST
+  bar backfill before regime detection.
+
+What should not change:
+
+- Entry doctrine.
+- Exit doctrine.
+- Same-cycle reversal policy.
+- Adaptive decision rules.
+- Position sizing.
+- Strategy thresholds.
+
+Round 2 instruction:
+
+- Run Conservative, Balanced, Aggressive, and Adaptive again without strategy
+  retuning.
+- Treat Trend Trust and session metrics as shadow evidence only.
+- Use the second Conservative sample to compare separated time slices against
+  Day 1 rather than to declare a winner.

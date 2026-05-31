@@ -411,7 +411,7 @@ Acceptance criteria:
 
 ### 4. Add Data Freshness Session Telemetry
 
-Status: strongly consider
+Status: initial implementation complete; continue measuring
 
 Impact: high
 
@@ -432,13 +432,13 @@ Metrics:
 
 Acceptance criteria:
 
-- End-of-day summary shows whether data quality was clean, degraded, or
-  concerning.
-- Stale data is reported as a handled guardrail, not as silent non-trading.
+- [x] End-of-day summary shows whether stale-bar cycles occurred.
+- [x] Stale data is reported as a handled guardrail, not as silent non-trading.
+- [ ] Future enrichment: total stale duration, max bar age, and average bar age.
 
 ### 5. Add Regime Churn Metrics
 
-Status: strongly consider
+Status: initial implementation complete; continue measuring
 
 Impact: medium-high
 
@@ -459,9 +459,10 @@ Metrics:
 
 Acceptance criteria:
 
-- Daily narrative can call a day `trend`, `chop`, `regime churn`, or
-  `compression` based on metrics.
-- Threshold changes are based on measured churn, not vibes.
+- [x] Daily summary includes regime-transition count and Trend Trust averages.
+- [ ] Future enrichment: average regime hold time, short-lived regime count,
+  hysteresis hold count, and route changes per hour.
+- [ ] Threshold changes are based on measured churn, not vibes.
 
 ### 6. Preserve Stale-Exposure Doctrine
 
@@ -475,16 +476,19 @@ The `close_stale_position_no_same_cycle_reversal` behavior is a constitutional
 safety rule. It prevents immediate reversal chaos when ownership no longer
 matches the active regime.
 
-Recommended action:
+Implemented / recommended action:
 
 - Keep the rule.
-- Promote it to a named policy event.
+- Promote it to a named policy event. Initial human-facing label:
+  `route_invalidated_exit`.
 - Include it in the daily behavioral assessment whenever it triggers.
 
 Acceptance criteria:
 
-- Forced stale-position exits are easy to distinguish from strategy exits.
-- Same-cycle reversal blocks are visible as policy, not as missing trades.
+- [x] Route-invalidation exits are easy to distinguish from strategy exits.
+- [x] Same-cycle reversal blocks are visible as policy, not as missing trades.
+- [ ] Future enrichment: classify whether each exit became a defensive save,
+  premature cut, profitable handoff, or neutral exit.
 
 ### 7. Add Go-Live Risk Envelope Settings
 
@@ -516,7 +520,7 @@ Acceptance criteria:
 
 ### 8. Harden Partial-Fill Exit Handling
 
-Status: partially implemented; continue hardening
+Status: implemented for current qualification needs; continue watching
 
 Impact: high
 
@@ -524,9 +528,9 @@ Why:
 
 Aggressive day produced two broker-rejected exit attempts while an opening buy
 order was still partially filling. The initial open-buy sell guard has been
-implemented so same-symbol exits wait while a buy order is still open. The
-remaining live-readiness work is to make `OPENING`, `OPEN`, `CLOSING`, and
-`CLOSED` materially visible position lifecycle states.
+implemented so same-symbol exits wait while a buy order is still open.
+`OPENING`, `OPEN`, `CLOSING`, and `CLOSED` are now materially visible in the
+order-flow lifecycle state.
 
 Candidate behavior:
 
@@ -540,14 +544,14 @@ Candidate behavior:
 
 Acceptance criteria:
 
-- Partial entry fills do not create repeated rejected exit attempts.
-- The dashboard shows when a position is opening, open, closing, or closed.
-- Risk logs explain whether the bot is waiting for fill completion or taking an
-  allowed protective action.
+- [x] Partial entry fills do not create repeated rejected exit attempts.
+- [x] The dashboard shows when a position is opening, open, closing, or closed.
+- [ ] Continue watching whether repeated partial-fill blockage needs an
+  operator interrupt.
 
 ### 9. Tighten Broker Rejection And P/L Truth
 
-Status: strongly consider
+Status: initial implementation complete; continue reconciling
 
 Impact: high
 
@@ -568,14 +572,15 @@ Recommended action:
 
 Acceptance criteria:
 
-- Broker rejection categories match the actual failure cause.
-- P/L summaries can explain any gap between account movement and lifecycle
-  realized P/L.
-- Partial fills are not double-counted or mispaired in trade summaries.
+- [x] Broker rejection categories distinguish partial-fill/opposite-side
+  conflicts from buying-power limits.
+- [x] P/L summaries expose reconciliation confidence and notes.
+- [ ] Continue watching account movement versus lifecycle realized P/L around
+  partial fills.
 
 ### 10. Regular-Session Warmup Integrity
 
-Status: strongly consider
+Status: implemented
 
 Impact: medium-high
 
@@ -597,14 +602,14 @@ Candidate behavior:
 
 Acceptance criteria:
 
-- The operator can tell whether opening SMA context includes premarket bars.
-- A regular-session strategy does not accidentally start from a mixed
+- [x] Regular-session trading uses regular-session warmup bars only.
+- [x] A regular-session strategy does not accidentally start from a mixed
   premarket/regular opinion.
-- Warmup behavior is stable across pre-armed and exactly-at-open starts.
+- [ ] Future enrichment: expose warmup source explicitly in the UI/log summary.
 
 ### 11. Stale-Bar Repair / Backfill Investigation
 
-Status: strongly consider
+Status: initial implementation complete; continue watching
 
 Impact: high
 
@@ -627,10 +632,11 @@ Candidate behavior:
 
 Acceptance criteria:
 
-- Stale-bar episodes are summarized by count, duration, and recovery path.
-- The system distinguishes stream disconnect from bar aggregation lag.
-- Entry decisions remain blocked during stale interpretation.
-- Open-position risk management can continue from live quote/trade marks.
+- [x] Stale-bar episodes are summarized by count and backfill repair path.
+- [x] The system distinguishes stream disconnect from bar aggregation lag.
+- [x] Entry decisions remain blocked during stale interpretation.
+- [x] Open-position risk management can continue from live quote/trade marks.
+- [ ] Future enrichment: stale duration and max/average bar age.
 
 ## P1 Candidates After More Sessions
 
@@ -815,23 +821,25 @@ Watch:
 ## Go-Live Readiness Checklist
 
 - [ ] Fresh-cross doctrine explicitly accepted or revised.
-- [ ] Stale-bar telemetry summarized per session.
-- [ ] Regime churn metrics summarized per session.
+- [x] Stale-bar telemetry summarized per session.
+- [x] Regime churn metrics summarized per session.
 - [ ] Daily narrative includes behavioral assessment.
 - [ ] Daily narrative includes narrative confidence.
-- [ ] Stale-exposure exits are named policy events.
+- [x] Stale-exposure exits are named policy events.
 - [x] Initial open-buy sell guard prevents repeated opposite-side sell attempts
   while a same-symbol buy order is still open.
-- [ ] Opening, open, closing, and closed lifecycle states are visible to the
+- [x] Opening, open, closing, and closed lifecycle states are visible to the
   operator.
-- [ ] Broker rejection classification distinguishes buying-power limits from
+- [x] Broker rejection classification distinguishes buying-power limits from
   opposite-side or wash-trade conflicts.
-- [ ] Lifecycle P/L, fill-paired P/L, and account movement can be reconciled.
-- [ ] Opening warmup policy explicitly includes or excludes premarket bars.
-- [ ] Stale-bar episodes distinguish stream failure from
+- [x] Lifecycle P/L reconciliation confidence is visible.
+- [ ] Continue comparing lifecycle P/L, fill-paired P/L, and account movement
+  around partial fills.
+- [x] Opening warmup policy explicitly includes or excludes premarket bars.
+- [x] Stale-bar episodes distinguish stream failure from
   live-market/stale-interpretation lag.
 - [ ] Live risk envelope is configured and visible.
-- [ ] Live trading remains explicitly armed, typed-confirmation gated, and easy
+- [x] Live trading remains explicitly armed, typed-confirmation gated, and easy
   to disarm.
 - [ ] Final closeout state is clear: flat, stopped, and rearmed for next day.
 
@@ -886,3 +894,18 @@ Watch:
   candidate.
 - Added stale-bar repair/backfill investigation around the "live market, stale
   interpretation" state.
+
+2026-05-31:
+
+- Completed the weekend observability sprint before qualification round 2.
+- Implemented regular-session-only warmup, bounded stale-bar REST backfill,
+  visible position lifecycle states, partial-fill conflict classification, and
+  P/L reconciliation confidence.
+- Added shadow Trend Trust telemetry and structured session metrics without
+  feeding them into active decisions.
+- Added route-invalidation exit labeling and lifecycle context for later
+  defensive-save / premature-cut / profitable-handoff classification.
+- Added dashboard operator polish: entry price plus trail exit comparison,
+  protected-position state, one-time `Position_secured.wav` cue, and copy icon.
+- Strategy thresholds, Adaptive logic changes, and active Dynamic Controls
+  remain intentionally parked until more evidence exists.

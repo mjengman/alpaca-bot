@@ -62,14 +62,18 @@ Live trading uses separate live credentials and the live Alpaca trading URL. Rea
 Current paper-trading review is focused on operational truth before strategy
 optimization. A few concepts are now part of the project vocabulary:
 
-- Regime strength is not the same as Trend Trust. Future telemetry should track
-  regime age, recent flips, follow-through, directional efficiency, and
-  favorable/adverse excursion before changing thresholds.
+- Regime strength is not the same as Trend Trust. Shadow telemetry now tracks
+  regime age, recent flips, directional efficiency, and a score/label before
+  any threshold or Adaptive-logic changes.
 - Quotes/trades can be live while one-minute bars are stale. In that state the
   market is visible for risk management, but regime interpretation is degraded;
-  entries remain blocked.
-- Regular-session warmup should explicitly decide whether premarket bars are
-  included or excluded from the first actionable SMA context.
+  entries remain blocked. The stream service can attempt bounded REST backfill
+  to repair stale bars before regime detection.
+- Regular-session trading now uses regular-session warmup bars only, so
+  premarket bars do not accidentally satisfy the first actionable SMA context.
+- Route-invalidation exits are treated as policy events. Lifecycle records store
+  enough context to classify them later as defensive saves, premature cuts,
+  neutral exits, or profitable handoffs.
 - Dynamic Controls are a future shadow-first idea for bounded runtime
   adaptation inside operator-approved rails, not autonomous strategy mutation.
 
