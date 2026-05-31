@@ -48,7 +48,7 @@ const SOUND_LIBRARY = {
   botStarted: { file: "Bot_started.wav", volume: 0.42 },
   botDeactivated: { file: "Bot_deactivated.wav", volume: 0.42 },
   limitMovedUp: { file: "Limit_moved_up.wav", volume: 0.34 },
-  trailProtected: { file: "Limit_moved_up.wav", volume: 0.22 },
+  trailProtected: { file: "Position_secured.wav", volume: 0.34 },
   orderFilled: { file: "Order_filled.wav", volume: 0.46 },
   positionClosed: { file: "Position_closed.wav", volume: 0.46 },
   humanIntervention: {
