@@ -1,6 +1,6 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-05-30
+Last updated: 2026-06-01
 
 This file captures paper-trading qualification observations before they become
 tuning decisions. During the first full rotation through Conservative,
@@ -37,6 +37,11 @@ These are recurring observations, not tuning decisions.
 - Trend Trust appears more important than raw trend strength.
 - Regime age may be underrepresented in current confidence logic.
 - Churn count alone is insufficient to explain tradeability.
+- Fresh regime transitions can be low-trust but high-opportunity; Trend Trust
+  should measure environmental reliability while fresh-cross doctrine measures
+  timing opportunity.
+- Directional persistence may explain outcomes better than raw churn count,
+  trend strength, or regime classification alone.
 - Route invalidation exits dominate realized outcomes on churny sessions.
 - Adaptive appears disciplined, but may need stronger regime-maturity awareness.
 - `POLL_SEC` may be more important for exit precision than entry quality while
@@ -699,3 +704,81 @@ Round 2 instruction:
 - Treat Trend Trust and session metrics as shadow evidence only.
 - Use the second Conservative sample to compare separated time slices against
   Day 1 rather than to declare a winner.
+
+## 2026-06-01 AAR: Round 2 Conservative Mode
+
+Qualification day: Round 2 Day 1
+
+Mode: Conservative
+
+Session files:
+
+- `logs/edgewalker-2026-06-01.jsonl`
+- `logs/position_lifecycle.jsonl`
+
+Result:
+
+- Final realized P/L: `+$911.33`
+- Approximate account impact: `+0.92%` on a roughly `$100k` paper account
+- Cycles: `383`
+- Closed trades: `2`
+- Wins/losses: `2W / 0L`
+- Regime transitions: `23`
+- Market character: `CHURNY BUT TRADEABLE / DIRECTIONAL`
+- Session difficulty: `MODERATE-HIGH`
+- Interpretation confidence: `HIGH` for operational behavior; `MEDIUM` for
+  strategy conclusions because this is one separated Conservative sample.
+
+Bot performance:
+
+- MomentumBot: `+$718.53`, `1 trade`, `1W / 0L`
+- ChopBot: `$0.00`, `0 trades`
+- InverseBot: `+$192.80`, `1 trade`, `1W / 0L`
+
+Weekend-change validation:
+
+- Regular-session-only warmup passed. At the regular open, EdgeWalker started at
+  `0 / 20` bars and warmed up on regular-session bars instead of inheriting
+  premarket context.
+- Route invalidation behaved as intended. MomentumBot owned a profitable `SOXL`
+  position, the regime moved `UPTREND -> SIDEWAYS`, active ownership shifted to
+  ChopBot, and the runtime exited via
+  `close_route_invalidated_position_no_same_cycle_reversal`.
+- Position ownership and no-same-cycle-reversal doctrine held. The route
+  invalidation exit locked profit without immediately flipping into a new
+  position.
+- Trend Trust worked as telemetry, not authority. The Momentum entry had
+  `LOW` Trend Trust with a newborn regime and became the largest winner; the
+  Inverse entry had `MODERATE` Trend Trust and also won.
+- Adaptive shadow stayed non-invasive. Adaptive generated posture opinions but
+  did not mutate the active Conservative behavior.
+- Stale-bar handling remained safe under degraded data conditions. Stale data
+  appeared during the session, but stale-entry protections and live risk
+  management behaved coherently.
+
+Main behavioral fingerprint:
+
+- EdgeWalker stayed selective under churn: `23` regime transitions, `383`
+  cycles, and only `2` entries.
+- The day validated that safety and observability improvements did not neuter
+  participation.
+- The strongest lesson was not "nothing went wrong." It was that when data and
+  regimes became imperfect, the system degraded safely instead of acting
+  chaotically.
+
+Parked hypotheses:
+
+- Fresh regime transitions can be low-trust but high-opportunity.
+- Trend Trust should continue measuring environmental reliability, while
+  fresh-cross doctrine measures timing opportunity.
+- Trend Trust may become useful later for sizing, risk envelope, or operating
+  tempo, but this session argues against using it as a hard entry veto.
+- Stale-bar REST backfill improved visibility and safety, but did not eliminate
+  stale-bar episodes.
+
+Do not change yet:
+
+- Do not change strategy thresholds after this green Conservative sample.
+- Do not feed Trend Trust into active entry/exit decisions yet.
+- Do not loosen or tighten stale-bar behavior from one session.
+- Run Balanced tomorrow unchanged so Round 2 remains a clean comparison.

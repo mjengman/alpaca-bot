@@ -358,7 +358,14 @@ only whether it made money.
 Add sections:
 
 - `Session Identity`
+- `Scorecard`
+- `What The Logs Support`
+- `Bot Behavior`
+- `Operational Health`
 - `Behavioral Assessment`
+- `Interpretation`
+- `Watchlist`
+- `Bottom Line`
 - `Narrative Confidence`
 - `Key Policy Decisions`
 - `Top Constraints`
@@ -374,6 +381,12 @@ closed stale exposure when regime ownership no longer matched the open position.
 
 Acceptance criteria:
 
+- Narrative separates facts, interpretation, operational health, watchlist, and
+  confidence instead of blending them into a generic prose recap.
+- Narrative explicitly states the active mode and whether Adaptive was active or
+  shadow-only.
+- Narrative distinguishes execution health from data health, especially when
+  stale bars were observed but safely handled.
 - Narrative distinguishes market opportunity from system authorization.
 - Narrative identifies intentional inactivity.
 - Narrative confidence explains uncertainty, especially on low-trade days.

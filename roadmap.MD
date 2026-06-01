@@ -534,6 +534,17 @@ Goal: turn logs into readable operating summaries without replacing raw logs.
 
 Notes:
 
+- Narrative V2 should move toward an evidence-backed AAR format:
+  `Session Identity`, `Scorecard`, `What The Logs Support`, `Bot Behavior`,
+  `Operational Health`, `Interpretation`, `Watchlist`, `Bottom Line`, and
+  `Narrative Confidence`.
+- The narrative should separate broker/order execution health from data health.
+  For example, stale bars that were safely handled should not be summarized as
+  "no operational issues."
+- The narrative should explicitly state the active mode and whether Adaptive was
+  active or shadow-only, so routing behavior is not accidentally described as
+  Adaptive control.
+
 - Do not auto-send logs anywhere without explicit user action.
 - Redact secrets and avoid including API credentials.
 
