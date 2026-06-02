@@ -964,6 +964,42 @@ button:disabled {
   font-size: 1.05rem;
 }
 
+.price-stack-cell {
+  align-content: center;
+}
+
+.price-stack {
+  display: grid;
+  gap: 0;
+}
+
+.price-stack-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 3px 0;
+}
+
+.price-stack-row + .price-stack-row {
+  border-top: 1px solid var(--line);
+}
+
+.price-stack-row span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+}
+
+.price-stack-row strong {
+  flex: 0 0 auto;
+  overflow-wrap: normal;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .trail-compare-cell {
   align-content: center;
 }
@@ -981,9 +1017,11 @@ button:disabled {
 }
 
 .trail-compare-row strong {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  overflow-wrap: normal;
   text-align: right;
   font-size: 0.95rem;
+  white-space: nowrap;
 }
 
 .trail-protection-state {

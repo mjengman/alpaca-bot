@@ -898,6 +898,7 @@ class EdgeWalkerStatus:
     day_pl_percent: str | None
     source_symbol: str
     source_price: str | None
+    inverse_price: str | None
     fast_sma: str | None
     slow_sma: str | None
     gap_percent: str | None
@@ -2507,6 +2508,7 @@ class EdgeWalkerBot:
         effective_notional, _, _ = self._effective_position_notional(account)
         adaptive = self._adaptive_posture
         effective_directional_mode = self._current_effective_directional_mode()
+        inverse_price = self._latest_status_price(SOXS)
 
         return EdgeWalkerStatus(
             checked_at=checked_at,
@@ -2532,6 +2534,7 @@ class EdgeWalkerBot:
             day_pl_percent=self._decimal_text(day_pl_percent),
             source_symbol=SOXL,
             source_price=self._decimal_text(signal.price if signal else None),
+            inverse_price=self._decimal_text(inverse_price),
             fast_sma=self._decimal_text(signal.fast_sma if signal else None),
             slow_sma=self._decimal_text(signal.slow_sma if signal else None),
             gap_percent=self._decimal_text(signal.gap_percent if signal else None),
@@ -2616,6 +2619,37 @@ class EdgeWalkerBot:
             if self._position_qty(position) > 0:
                 return str(position.get("symbol") or symbol), position
         return None, None
+
+    def _latest_status_price(self, symbol: str) -> Decimal | None:
+        try:
+            current_mark = self._latest_status_market_mark(symbol)
+            if current_mark is not None:
+                return current_mark
+
+            data_source = self.market_data or self.client
+            bars = data_source.get_recent_bars(symbol, 1)
+            prices = latest_close_prices(bars)
+            if not prices:
+                return None
+            return prices[-1]
+        except (BotError, KeyError):
+            return None
+
+    def _latest_status_market_mark(self, symbol: str) -> Decimal | None:
+        data_source = self.market_data or self.client
+
+        quote = data_source.get_latest_quote(symbol)
+        if quote:
+            bid = optional_decimal_from_api(quote.get("bp"), "latest quote bid")
+            ask = optional_decimal_from_api(quote.get("ap"), "latest quote ask")
+            if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
+                return (bid + ask) / Decimal("2")
+
+        trade = data_source.get_latest_trade(symbol)
+        if trade:
+            return optional_decimal_from_api(trade.get("p"), "latest trade price")
+
+        return None
 
     def _effective_position_notional(
         self,

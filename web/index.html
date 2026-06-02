@@ -552,13 +552,22 @@
             >
             <strong id="buyingPowerValue">--</strong>
           </div>
-          <div>
+          <div class="price-stack-cell">
             <span
               class="has-tooltip"
-              data-tooltip="Latest SOXL one-minute close used as the regime source price."
-              >SOXL price</span
+              data-tooltip="Latest visible basket prices. SOXL is the regime source; SOXS is reserved for inverse-route price telemetry."
+              >Prices</span
             >
-            <strong id="sourcePriceValue">--</strong>
+            <div class="price-stack">
+              <div class="price-stack-row">
+                <span>SOXL</span>
+                <strong id="sourcePriceValue">--</strong>
+              </div>
+              <div class="price-stack-row">
+                <span>SOXS</span>
+                <strong id="inversePriceValue">--</strong>
+              </div>
+            </div>
           </div>
           <div>
             <span
@@ -677,7 +686,12 @@
               data-tooltip="Live Alpaca stream health. Edgewalker will not trade unless the stream is live and the latest completed one-minute bar is fresh."
               >Data</span
             >
-            <strong id="dataStatusValue">Waiting</strong>
+            <strong
+              id="dataStatusValue"
+              class="has-tooltip"
+              data-tooltip="Market data status has not loaded yet."
+              >Waiting</strong
+            >
           </div>
           <div class="metric">
             <span

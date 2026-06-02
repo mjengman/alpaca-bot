@@ -1,6 +1,6 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
 This file captures paper-trading qualification observations before they become
 tuning decisions. During the first full rotation through Conservative,
@@ -43,7 +43,15 @@ These are recurring observations, not tuning decisions.
 - Directional persistence may explain outcomes better than raw churn count,
   trend strength, or regime classification alone.
 - Route invalidation exits dominate realized outcomes on churny sessions.
+- Route invalidation P/L is now a first-class validation metric. On June 2,
+  route invalidation exits were net positive, suggesting the doctrine may be
+  protecting gains rather than merely interrupting trades.
+- Upside continuation quality and downside continuation quality may be
+  asymmetric. MomentumBot and InverseBot should not be assumed to be equally
+  effective mirror images across all market environments.
 - Adaptive appears disciplined, but may need stronger regime-maturity awareness.
+- Adaptive shadow should be evaluated primarily while flat; posture counts while
+  a position is open can mostly reflect paused entry-posture judgment.
 - `POLL_SEC` may be more important for exit precision than entry quality while
   regime logic remains one-minute-bar based.
 - Regular-session warmup integrity is a doctrine question: what market world is
@@ -782,3 +790,107 @@ Do not change yet:
 - Do not feed Trend Trust into active entry/exit decisions yet.
 - Do not loosen or tighten stale-bar behavior from one session.
 - Run Balanced tomorrow unchanged so Round 2 remains a clean comparison.
+
+## 2026-06-02 AAR: Round 2 Balanced Mode
+
+Qualification day: Round 2 Day 2
+
+Mode: Balanced
+
+Session files:
+
+- `logs/edgewalker-2026-06-02.jsonl`
+- `logs/position_lifecycle.jsonl`
+
+Result:
+
+- Final realized P/L: `+$1,291.63`
+- Approximate account impact: `+1.29%` on a roughly `$100k` paper account
+- Cycles: `383`
+- Closed trades: `15`
+- Wins/losses: `9W / 6L`
+- Regime transitions: `26`
+- Market character: `HIGH-TRANSITION / TRADEABLE UPSIDE CONTINUATION`
+- Session difficulty: `HIGH`
+- Data / broker health: no broker or stream errors; `356` live cycles, `21`
+  warmup cycles, and `6` stale-bar cycles
+- End state: flat into close, no pending orders
+- Interpretation confidence: `HIGH` for operational behavior; `MEDIUM` for
+  strategy conclusions because this is one separated Balanced sample.
+
+Bot performance:
+
+- MomentumBot: `+$2,142.17`, `8 trades`, `7W / 1L`
+- ChopBot: `-$59.18`, `1 trade`, `0W / 1L`
+- InverseBot: `-$791.36`, `6 trades`, `2W / 4L`
+
+Exit reason contribution:
+
+- Route invalidation exits: `13`, `+$813.71`
+- Trailing stop exits: `1`, `-$51.44`
+- Market close liquidation: `1`, `+$529.35`
+
+Main behavioral fingerprint:
+
+- This was not simply a "Balanced worked" day. It was a "MomentumBot worked"
+  day inside Balanced doctrine.
+- Balanced allowed participation, but the session outcome was carried by
+  persistent upside continuation captured by MomentumBot.
+- InverseBot struggled in the same high-transition environment, which suggests
+  upside continuation and downside continuation quality may be asymmetric.
+- EdgeWalker stayed selective enough to avoid re-entry chaos despite `26`
+  regime transitions.
+- The runtime spent most of the day managing open positions, not searching for
+  new entries.
+
+Adaptive shadow observations:
+
+- Adaptive selected `BALANCED` for `344` cycles, `CONSERVATIVE` for `12`, and
+  `AGGRESSIVE` for `1`.
+- The more meaningful flat/evaluable sample was `85` Balanced, `12`
+  Conservative, and `1` Aggressive. Open-position cycles mostly reflected
+  paused entry-posture judgment.
+- Adaptive largely agreed that Balanced doctrine fit the environment.
+- Conservative shadow calls clustered around weak/new regime transitions and
+  stale-bar constraints.
+- The single Aggressive shadow call did not imply broad aggression; Adaptive
+  remained restrained.
+
+What worked:
+
+- Route invalidation doctrine was materially validated. The `13`
+  route-invalidated exits were net positive by about `+$813.71`.
+- MomentumBot captured repeated upside continuation opportunities.
+- Entry filters remained active. The day included many blocked marginal setups,
+  especially ChopBot `price_above_mean` and `discount_insufficient` blocks.
+- Trend Trust remained useful telemetry without becoming a hard gatekeeper.
+- The operator spreadsheet auto-post workflow and config snapshot worked.
+
+What needs attention:
+
+- InverseBot underperformed. Do not tune from one day, but watch whether
+  downside continuation remains less reliable than upside continuation.
+- Route invalidation P/L should be tracked across sessions, not just exit
+  counts. Today suggests it may protect gains, but repeated evidence is needed.
+- Persistence telemetry remains the clearest next diagnostic frontier: how long
+  did the market continue rewarding the thesis after entry?
+- Narrative output must remain ledger-grounded. Bot-level counts and P/L should
+  come from lifecycle metrics, not model inference.
+
+Parked hypotheses:
+
+- Route invalidation may be one of EdgeWalker's strongest architectural edges
+  because it protects gains when thesis ownership changes.
+- Balanced is effective when the market rewards upside continuation, but the
+  mode label alone does not explain the result.
+- MomentumBot and InverseBot may need separate persistence-quality telemetry
+  rather than being treated as perfect mirror strategies.
+- Future Adaptive value may show up when it disagrees with the manual mode and
+  that disagreement proves correct in hindsight.
+
+Do not change yet:
+
+- Do not promote Balanced or alter thresholds from this green sample.
+- Do not change InverseBot filters after one weak downside-continuation day.
+- Do not feed Trend Trust into active entry/exit decisions yet.
+- Continue Round 2 unchanged; run Aggressive tomorrow as planned.

@@ -40,6 +40,7 @@ from server import (
     _extract_session_context,
     _format_regime_transition,
     _config_for_alpaca_environment,
+    _ground_narrative_sections,
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
@@ -47,6 +48,7 @@ from server import (
     build_operator_spreadsheet_daily_row,
     build_summary_prompt,
     config_from_payload,
+    generate_session_summary,
     lifecycle_performance_summary,
     OPERATOR_SPREADSHEET_COLUMNS,
     order_visibility_summary,
@@ -430,7 +432,31 @@ class ServerLoggingTest(unittest.TestCase):
                 "timestamp": "2026-06-01T20:00:00+00:00",
                 "market_open": True,
                 "portfolio_value": "1140",
-                "config": {"directional_mode": "BALANCED"},
+                "config": {
+                    "config_version": "v-test-config",
+                    "strategy_version": "v-test-strategy",
+                    "symbol": "SOXL",
+                    "position_sizing_mode": "DYNAMIC",
+                    "position_notional": "25",
+                    "position_allocation_percent": "50",
+                    "poll_seconds": 30,
+                    "trail_percent": "1.25",
+                    "fast_sma_minutes": 5,
+                    "slow_sma_minutes": 20,
+                    "regime_gap_threshold": "0.20",
+                    "regime_exit_gap_threshold": "0.10",
+                    "chop_entry_discount_percent": "0.50",
+                    "close_liquidate_minutes": 5,
+                    "directional_mode": "BALANCED",
+                    "directional_max_extension_percent": "0.50",
+                    "directional_strong_chase_max_extension_percent": "1.00",
+                    "directional_min_strength": "MODERATE",
+                    "directional_cooldown_minutes": 4,
+                    "adaptive_shadow_enabled": True,
+                    "dry_run": False,
+                    "active_environment": "paper",
+                    "data_feed": "iex",
+                },
                 "regime": "SIDEWAYS",
                 "regime_transition": {"from": "UPTREND", "to": "SIDEWAYS"},
                 "data_status": "STALE",
@@ -489,6 +515,29 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["market_close_exits"], 1)
         self.assertEqual(row["market_close_pl"], 40.0)
         self.assertEqual(row["reconciliation_confidence"], "HIGH")
+        self.assertEqual(row["config_version"], "v-test-config")
+        self.assertEqual(row["strategy_version"], "v-test-strategy")
+        self.assertEqual(row["symbol_primary"], "SOXL")
+        self.assertEqual(row["symbol_inverse"], "SOXS")
+        self.assertEqual(row["position_sizing_mode"], "DYNAMIC")
+        self.assertEqual(row["position_notional"], 25.0)
+        self.assertEqual(row["position_allocation_percent"], 50.0)
+        self.assertEqual(row["poll_seconds"], 30)
+        self.assertEqual(row["trail_percent"], 1.25)
+        self.assertEqual(row["fast_sma_minutes"], 5)
+        self.assertEqual(row["slow_sma_minutes"], 20)
+        self.assertEqual(row["regime_gap_percent"], 0.2)
+        self.assertEqual(row["regime_exit_gap_percent"], 0.1)
+        self.assertEqual(row["chop_discount_percent"], 0.5)
+        self.assertEqual(row["close_liquidate_minutes"], 5)
+        self.assertEqual(row["directional_max_extension_percent"], 0.5)
+        self.assertEqual(row["directional_strong_chase_max_extension_percent"], 1.0)
+        self.assertEqual(row["directional_min_strength"], "MODERATE")
+        self.assertEqual(row["directional_cooldown_minutes"], 4)
+        self.assertTrue(row["adaptive_shadow_enabled"])
+        self.assertFalse(row["dry_run"])
+        self.assertEqual(row["active_environment"], "paper")
+        self.assertEqual(row["data_feed"], "iex")
         self.assertEqual(row["operator_notes"], "round 2 conservative")
 
     def test_order_visibility_summary_lists_pending_and_recent_events(self) -> None:
@@ -880,6 +929,120 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(parsed["tldr"], "Brief read.")
         self.assertEqual(parsed["bottom_line"], "Useful session.")
 
+    def test_ground_narrative_sections_uses_lifecycle_bot_stats(self) -> None:
+        sections = _parse_narrative_response(
+            json.dumps(
+                {
+                    "tldr": "Brief read.",
+                    "bot_performance": {
+                        "MomentumBot": "Executed 10 trades with 5 wins and 5 losses.",
+                        "ChopBot": "Engaged in 2 trades, both losses.",
+                        "InverseBot": "Traded 5 times with 4 wins and 1 loss.",
+                    },
+                }
+            )
+        )
+        performance = {
+            "bot_performance": [
+                {
+                    "bot": MOMENTUM_BOT,
+                    "realized_pl": "2142.171078",
+                    "trade_count": 8,
+                    "wins": 7,
+                    "losses": 1,
+                    "win_rate_percent": "87.5",
+                    "last_trade_realized_pl": "529.351248",
+                    "last_trade_symbol": "SOXL",
+                },
+                {
+                    "bot": CHOP_BOT,
+                    "realized_pl": "-59.181182",
+                    "trade_count": 1,
+                    "wins": 0,
+                    "losses": 1,
+                    "win_rate_percent": "0",
+                    "last_trade_realized_pl": "-59.181182",
+                    "last_trade_symbol": "SOXL",
+                },
+                {
+                    "bot": INVERSE_BOT,
+                    "realized_pl": "-791.362640",
+                    "trade_count": 6,
+                    "wins": 2,
+                    "losses": 4,
+                    "win_rate_percent": "33.33333333333333333333333333",
+                    "last_trade_realized_pl": "-285.716729",
+                    "last_trade_symbol": "SOXS",
+                },
+            ]
+        }
+
+        grounded = _ground_narrative_sections(sections, {"performance": performance})
+
+        self.assertIn("8 closed trades, 7W/1L", grounded["bot_performance"][MOMENTUM_BOT])
+        self.assertIn("realized P/L $2,142.17", grounded["bot_performance"][MOMENTUM_BOT])
+        self.assertIn("1 closed trade, 0W/1L", grounded["bot_performance"][CHOP_BOT])
+        self.assertIn("6 closed trades, 2W/4L", grounded["bot_performance"][INVERSE_BOT])
+
+    def test_generate_session_summary_reuses_matching_cache(self) -> None:
+        log_records = [
+            {
+                "timestamp": "2026-06-02T13:30:00+00:00",
+                "market_open": True,
+                "portfolio_value": "1000",
+                "config": {"directional_mode": "BALANCED", "dry_run": False},
+                "regime": "UPTREND",
+                "source_price": "250",
+                "console_lines": [],
+            },
+            {
+                "timestamp": "2026-06-02T20:00:00+00:00",
+                "market_open": True,
+                "portfolio_value": "1010",
+                "config": {"directional_mode": "BALANCED", "dry_run": False},
+                "regime": "SIDEWAYS",
+                "cycle_id": 382,
+                "source_price": "260",
+                "console_lines": [],
+            },
+        ]
+
+        class FakeLifecycleLedger:
+            def read_all(self) -> list[dict[str, object]]:
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            log_path = root / "edgewalker-2026-06-02.jsonl"
+            log_path.write_text(
+                "\n".join(json.dumps(record) for record in log_records),
+                encoding="utf-8",
+            )
+            cache_path = root / ".narrative_cache.json"
+            with (
+                patch("server.LOGS_ROOT", root),
+                patch("server.NARRATIVE_CACHE_PATH", cache_path),
+                patch("server.LifecycleLedger", FakeLifecycleLedger),
+                patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}),
+                patch(
+                    "server._call_openai",
+                    return_value='{"tldr": "Cached read.", "bottom_line": "Done."}',
+                ) as call_openai,
+            ):
+                first = generate_session_summary("2026-06-02", "1D")
+                second = generate_session_summary("2026-06-02", "1D")
+                cache_only = generate_session_summary(
+                    "2026-06-02",
+                    "1D",
+                    cache_only=True,
+                )
+
+        self.assertEqual(call_openai.call_count, 1)
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertTrue(cache_only["cached"])
+        self.assertEqual(second["narrative"]["tldr"], "Cached read.")
+
     def test_environment_settings_round_trip_masks_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_path = Path(tmpdir) / ".env"
@@ -1066,11 +1229,16 @@ class ServerLoggingTest(unittest.TestCase):
         runner._save_activity_log = lambda: None
         fast_config = replace(config(), poll_seconds=0)
 
-        runner._arm_until_market_open(
-            fast_config,
-            stop_event,
-            datetime(2026, 5, 22, 13, 30, 0, tzinfo=timezone.utc),
-        )
+        with patch.object(
+            BotRunner,
+            "_operator_spreadsheet_auto_post_date",
+            return_value=None,
+        ):
+            runner._arm_until_market_open(
+                fast_config,
+                stop_event,
+                datetime(2026, 5, 22, 13, 30, 0, tzinfo=timezone.utc),
+            )
 
         self.assertFalse(stop_event.is_set())
         self.assertTrue(runner._running)

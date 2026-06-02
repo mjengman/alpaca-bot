@@ -64,10 +64,12 @@ HOST = "127.0.0.1"
 PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 OPERATOR_SPREADSHEET_POST_STATE_PATH = PROJECT_ROOT / ".operator_spreadsheet_posts.json"
+NARRATIVE_CACHE_PATH = PROJECT_ROOT / ".narrative_cache.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
+NARRATIVE_GROUNDING_VERSION = "ledger-grounded-v2"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
@@ -99,6 +101,29 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "market_close_exits",
     "market_close_pl",
     "reconciliation_confidence",
+    "config_version",
+    "strategy_version",
+    "symbol_primary",
+    "symbol_inverse",
+    "position_sizing_mode",
+    "position_notional",
+    "position_allocation_percent",
+    "poll_seconds",
+    "trail_percent",
+    "fast_sma_minutes",
+    "slow_sma_minutes",
+    "regime_gap_percent",
+    "regime_exit_gap_percent",
+    "chop_discount_percent",
+    "close_liquidate_minutes",
+    "directional_max_extension_percent",
+    "directional_strong_chase_max_extension_percent",
+    "directional_min_strength",
+    "directional_cooldown_minutes",
+    "adaptive_shadow_enabled",
+    "dry_run",
+    "active_environment",
+    "data_feed",
     "operator_notes",
     "daily_narrative",
 ]
@@ -366,6 +391,10 @@ class BotRunner:
             return
 
         with self._lock:
+            if not hasattr(self, "_spreadsheet_auto_posted_dates"):
+                self._spreadsheet_auto_posted_dates = set()
+            if not hasattr(self, "_spreadsheet_auto_post_attempted_dates"):
+                self._spreadsheet_auto_post_attempted_dates = set()
             if (
                 target_date in self._spreadsheet_auto_posted_dates
                 or target_date in self._spreadsheet_auto_post_attempted_dates
@@ -1452,9 +1481,21 @@ def _current_ny_activity(
 
 
 def _config_log_payload(config: BotConfig) -> dict[str, Any]:
+    values = _read_env_values()
     return {
+        "config_version": _env_first(
+            values,
+            "OPERATOR_CONFIG_VERSION",
+            default="v1",
+        ),
+        "strategy_version": _env_first(
+            values,
+            "OPERATOR_STRATEGY_VERSION",
+            default="v1",
+        ),
         "symbol": config.symbol,
         "dry_run": config.dry_run,
+        "active_environment": current_alpaca_environment(),
         "poll_seconds": config.poll_seconds,
         "position_notional": str(config.position_notional),
         "position_sizing_mode": config.position_sizing_mode,
@@ -2260,6 +2301,78 @@ def _bottom_pl_bot(bot_pl: dict[str, Decimal]) -> str:
     return min(losses, key=lambda item: item[1])[0]
 
 
+def _narrative_money(value: Any) -> str:
+    decimal_value = _decimal_from_value(value) or Decimal("0")
+    sign = "-" if decimal_value < 0 else ""
+    return f"{sign}${abs(decimal_value):,.2f}"
+
+
+def _narrative_percent(value: Any) -> str:
+    decimal_value = _decimal_from_value(value) or Decimal("0")
+    return f"{decimal_value.quantize(Decimal('0.01'))}%"
+
+
+def _ledger_bot_performance_sections(
+    performance: dict[str, Any] | None,
+) -> dict[str, str]:
+    if not isinstance(performance, dict):
+        return {}
+
+    items = performance.get("bot_performance")
+    if not isinstance(items, list):
+        return {}
+
+    by_bot = {
+        _optional_text(item.get("bot")): item
+        for item in items
+        if isinstance(item, dict) and _optional_text(item.get("bot"))
+    }
+    sections: dict[str, str] = {}
+    for bot in BOT_PERFORMANCE_ORDER:
+        item = by_bot.get(bot)
+        if not item:
+            sections[bot] = "No closed trades; realized P/L $0.00."
+            continue
+
+        trade_count = int(item.get("trade_count") or 0)
+        realized_pl = _narrative_money(item.get("realized_pl"))
+        if trade_count <= 0:
+            sections[bot] = f"No closed trades; realized P/L {realized_pl}."
+            continue
+
+        wins = int(item.get("wins") or 0)
+        losses = int(item.get("losses") or 0)
+        win_rate = _narrative_percent(item.get("win_rate_percent"))
+        trade_word = "trade" if trade_count == 1 else "trades"
+        last_trade_pl = _decimal_from_value(item.get("last_trade_realized_pl"))
+        last_trade_symbol = _optional_text(item.get("last_trade_symbol"))
+        last_trade = ""
+        if last_trade_pl is not None and last_trade_symbol:
+            last_trade = (
+                f" Last closed trade: {_narrative_money(last_trade_pl)} "
+                f"{last_trade_symbol}."
+            )
+
+        sections[bot] = (
+            f"{trade_count} closed {trade_word}, {wins}W/{losses}L, "
+            f"{win_rate} win rate, realized P/L {realized_pl}."
+            f"{last_trade}"
+        )
+
+    return sections
+
+
+def _ground_narrative_sections(
+    sections: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    grounded = dict(sections)
+    bot_sections = _ledger_bot_performance_sections(context.get("performance"))
+    if bot_sections:
+        grounded["bot_performance"] = bot_sections
+    return grounded
+
+
 def _narrative_for_spreadsheet(summary: dict[str, Any]) -> str:
     sections = summary.get("narrative")
     if not isinstance(sections, dict):
@@ -2303,6 +2416,34 @@ def _narrative_for_spreadsheet(summary: dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+def _config_snapshot_text(
+    config: dict[str, Any],
+    key: str,
+    default: str = "",
+) -> str:
+    return _optional_text(config.get(key)) or default
+
+
+def _config_snapshot_number(
+    config: dict[str, Any],
+    key: str,
+    default: Any = 0,
+) -> float:
+    return _rounded_number(config.get(key) if key in config else default)
+
+
+def _config_snapshot_int(
+    config: dict[str, Any],
+    key: str,
+    default: int = 0,
+) -> int:
+    value = config.get(key) if key in config else default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def build_operator_spreadsheet_daily_row(
     date: str | None = None,
     *,
@@ -2324,6 +2465,7 @@ def build_operator_spreadsheet_daily_row(
 
     first = records[0]
     last = records[-1]
+    last_config = last.get("config") if isinstance(last.get("config"), dict) else {}
     starting_account = _decimal_from_value(
         first.get("portfolio_value") or first.get("account_value")
     ) or Decimal("0")
@@ -2416,6 +2558,76 @@ def build_operator_spreadsheet_daily_row(
         ),
         "reconciliation_confidence": performance.get("reconciliation_confidence")
         or "",
+        "config_version": _config_snapshot_text(
+            last_config,
+            "config_version",
+            _env_first(_read_env_values(), "OPERATOR_CONFIG_VERSION", default="v1"),
+        ),
+        "strategy_version": _config_snapshot_text(
+            last_config,
+            "strategy_version",
+            _env_first(_read_env_values(), "OPERATOR_STRATEGY_VERSION", default="v1"),
+        ),
+        "symbol_primary": _config_snapshot_text(last_config, "symbol", SOXL),
+        "symbol_inverse": SOXS,
+        "position_sizing_mode": _config_snapshot_text(
+            last_config,
+            "position_sizing_mode",
+        ),
+        "position_notional": _config_snapshot_number(
+            last_config,
+            "position_notional",
+        ),
+        "position_allocation_percent": _config_snapshot_number(
+            last_config,
+            "position_allocation_percent",
+        ),
+        "poll_seconds": _config_snapshot_int(last_config, "poll_seconds"),
+        "trail_percent": _config_snapshot_number(last_config, "trail_percent"),
+        "fast_sma_minutes": _config_snapshot_int(last_config, "fast_sma_minutes"),
+        "slow_sma_minutes": _config_snapshot_int(last_config, "slow_sma_minutes"),
+        "regime_gap_percent": _config_snapshot_number(
+            last_config,
+            "regime_gap_threshold",
+        ),
+        "regime_exit_gap_percent": _config_snapshot_number(
+            last_config,
+            "regime_exit_gap_threshold",
+        ),
+        "chop_discount_percent": _config_snapshot_number(
+            last_config,
+            "chop_entry_discount_percent",
+        ),
+        "close_liquidate_minutes": _config_snapshot_int(
+            last_config,
+            "close_liquidate_minutes",
+        ),
+        "directional_max_extension_percent": _config_snapshot_number(
+            last_config,
+            "directional_max_extension_percent",
+        ),
+        "directional_strong_chase_max_extension_percent": _config_snapshot_number(
+            last_config,
+            "directional_strong_chase_max_extension_percent",
+        ),
+        "directional_min_strength": _config_snapshot_text(
+            last_config,
+            "directional_min_strength",
+        ),
+        "directional_cooldown_minutes": _config_snapshot_int(
+            last_config,
+            "directional_cooldown_minutes",
+        ),
+        "adaptive_shadow_enabled": bool(
+            last_config.get("adaptive_shadow_enabled", False)
+        ),
+        "dry_run": bool(last_config.get("dry_run", False)),
+        "active_environment": _config_snapshot_text(
+            last_config,
+            "active_environment",
+            current_alpaca_environment(),
+        ),
+        "data_feed": _config_snapshot_text(last_config, "data_feed"),
         "operator_notes": operator_notes,
         "daily_narrative": daily_narrative,
     }
@@ -2844,6 +3056,11 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
         parts.append(
             f"  Wins/Losses: {performance.get('session_wins')}/{performance.get('session_losses')}"
         )
+        bot_sections = _ledger_bot_performance_sections(performance)
+        if bot_sections:
+            parts.append("  Bot performance source of truth:")
+            for bot, text in bot_sections.items():
+                parts.append(f"    {bot}: {text}")
         parts.append("")
 
     trend_trust = final.get("trend_trust")
@@ -2886,6 +3103,8 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
         '  "bottom_line": "Plain-English judgment of how the session went overall."',
         "}",
         "",
+        "The REALIZED PERFORMANCE section is the source of truth for trade counts, wins/losses, bot P/L, and bot-level summaries.",
+        "Do not recount trade actions or invent bot statistics. Use the exact bot performance facts provided above.",
         "Be direct and operator-facing. If exact bot-level P/L is not available, say what can be inferred from behavior and do not invent profitability.",
         "For analysis, do not claim optimal settings. Recommend parameter changes only when repeated evidence supports them; otherwise suggest what to watch next session.",
     ]
@@ -2918,6 +3137,158 @@ def _call_openai(prompt: str, api_key: str) -> str:
         raise BotError(f"OpenAI API error {exc.code}: {body[:300]}") from exc
     except urllib.error.URLError as exc:
         raise BotError(f"OpenAI connection error: {exc.reason}") from exc
+
+
+def _load_narrative_cache() -> dict[str, Any]:
+    if not NARRATIVE_CACHE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(NARRATIVE_CACHE_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_narrative_cache(cache: dict[str, Any]) -> None:
+    NARRATIVE_CACHE_PATH.write_text(
+        json.dumps(cache, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _narrative_cache_key(
+    timeframe: str,
+    date_label: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> str:
+    if timeframe == "1D":
+        return f"1D:{date_label}"
+    if timeframe == "CUSTOM":
+        return f"CUSTOM:{start_date or ''}:{end_date or ''}"
+    return f"{timeframe}:{start_date or ''}:{end_date or ''}:{date_label}"
+
+
+def _narrative_cache_signature(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _one_day_summary_signature(
+    records: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> str:
+    first = records[0] if records else {}
+    last = records[-1] if records else {}
+    performance = context.get("performance")
+    return _narrative_cache_signature(
+        {
+            "grounding_version": NARRATIVE_GROUNDING_VERSION,
+            "cycle_count": len(records),
+            "first_timestamp": first.get("timestamp"),
+            "last_timestamp": last.get("timestamp"),
+            "last_cycle_id": last.get("cycle_id"),
+            "session_realized_pl": (
+                performance.get("session_realized_pl")
+                if isinstance(performance, dict)
+                else None
+            ),
+            "session_trade_count": (
+                performance.get("session_trade_count")
+                if isinstance(performance, dict)
+                else None
+            ),
+        }
+    )
+
+
+def _period_summary_signature(context: dict[str, Any]) -> str:
+    days = context.get("days")
+    day_signatures = []
+    if isinstance(days, list):
+        for day in days:
+            if not isinstance(day, dict):
+                continue
+            session = day.get("session")
+            performance = day.get("performance")
+            day_signatures.append(
+                {
+                    "date": (
+                        session.get("date") if isinstance(session, dict) else None
+                    ),
+                    "cycle_count": (
+                        session.get("total_cycles")
+                        if isinstance(session, dict)
+                        else None
+                    ),
+                    "end": session.get("end") if isinstance(session, dict) else None,
+                    "session_realized_pl": (
+                        performance.get("session_realized_pl")
+                        if isinstance(performance, dict)
+                        else None
+                    ),
+                    "session_trade_count": (
+                        performance.get("session_trade_count")
+                        if isinstance(performance, dict)
+                        else None
+                    ),
+                }
+            )
+    return _narrative_cache_signature(
+        {
+            "day_count": context.get("day_count"),
+            "total_cycles": context.get("total_cycles"),
+            "total_trades": context.get("total_trades"),
+            "days": day_signatures,
+        }
+    )
+
+
+def _cached_narrative_summary(
+    cache_key: str,
+    signature: str,
+) -> dict[str, Any] | None:
+    cache = _load_narrative_cache()
+    entry = cache.get(cache_key)
+    if not isinstance(entry, dict) or entry.get("signature") != signature:
+        return None
+    summary = entry.get("summary")
+    if not isinstance(summary, dict):
+        return None
+    cached = dict(summary)
+    cached["cached"] = True
+    cached["available"] = True
+    return cached
+
+
+def _store_narrative_summary(
+    cache_key: str,
+    signature: str,
+    summary: dict[str, Any],
+) -> None:
+    cache = _load_narrative_cache()
+    cache[cache_key] = {
+        "signature": signature,
+        "saved_at": now_iso(),
+        "summary": summary,
+    }
+    _save_narrative_cache(cache)
+
+
+def _summary_cache_miss_payload(
+    *,
+    timeframe: str,
+    date_label: str,
+    display_date: str,
+    cycle_count: int,
+) -> dict[str, Any]:
+    return {
+        "available": False,
+        "cached": False,
+        "timeframe": timeframe,
+        "date": date_label,
+        "display_date": display_date,
+        "cycle_count": cycle_count,
+    }
 
 
 def _date_range_for_timeframe(timeframe: str) -> tuple[str, str]:
@@ -3087,13 +3458,10 @@ def generate_session_summary(
     timeframe: str = "1D",
     start_date: str | None = None,
     end_date: str | None = None,
+    *,
+    force: bool = False,
+    cache_only: bool = False,
 ) -> dict[str, Any]:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise BotError(
-            "OPENAI_API_KEY is not configured. Add it to your .env file."
-        )
-
     if timeframe not in VALID_TIMEFRAMES:
         raise BotError(
             f"Invalid timeframe. Must be one of: {', '.join(sorted(VALID_TIMEFRAMES))}"
@@ -3109,16 +3477,44 @@ def generate_session_summary(
             target_date,
             LifecycleLedger().read_all(),
         )
+        cache_key = _narrative_cache_key("1D", target_date)
+        signature = _one_day_summary_signature(records, context)
+        if not force:
+            cached = _cached_narrative_summary(cache_key, signature)
+            if cached is not None:
+                return cached
+        if cache_only:
+            return _summary_cache_miss_payload(
+                timeframe="1D",
+                date_label=target_date,
+                display_date=_display_date_label(target_date),
+                cycle_count=len(records),
+            )
+
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise BotError(
+                "OPENAI_API_KEY is not configured. Add it to your .env file."
+            )
         prompt = _build_summary_prompt(context)
         raw_narrative = _call_openai(prompt, api_key)
-        return {
+        narrative_sections = _ground_narrative_sections(
+            _parse_narrative_response(raw_narrative),
+            context,
+        )
+        summary = {
+            "available": True,
+            "cached": False,
+            "timeframe": "1D",
             "summary": raw_narrative,
-            "narrative": _parse_narrative_response(raw_narrative),
+            "narrative": narrative_sections,
             "date": target_date,
             "display_date": _display_date_label(target_date),
             "cycle_count": len(records),
             "generated_at": now_iso(),
         }
+        _store_narrative_summary(cache_key, signature, summary)
+        return summary
 
     # Multi-day and custom timeframes
     if timeframe == "CUSTOM":
@@ -3133,14 +3529,41 @@ def generate_session_summary(
     context = _extract_period_context(log_files, LifecycleLedger().read_all())
     if not context["days"]:
         raise BotError(f"No usable session data found for {timeframe}.")
-    prompt = _build_period_prompt(context, timeframe, (start_date, end_date))
-    raw_narrative = _call_openai(prompt, api_key)
     actual_start = context["days"][0]["session"]["date"]
     actual_end = context["days"][-1]["session"]["date"]
     date_label = (
         f"{actual_start} to {actual_end}" if actual_start != actual_end else actual_start
     )
-    return {
+    cache_key = _narrative_cache_key(
+        timeframe,
+        date_label,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    signature = _period_summary_signature(context)
+    if not force:
+        cached = _cached_narrative_summary(cache_key, signature)
+        if cached is not None:
+            return cached
+    if cache_only:
+        return _summary_cache_miss_payload(
+            timeframe=timeframe,
+            date_label=date_label,
+            display_date=_display_date_label(date_label),
+            cycle_count=int(context["total_cycles"] or 0),
+        )
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise BotError(
+            "OPENAI_API_KEY is not configured. Add it to your .env file."
+        )
+    prompt = _build_period_prompt(context, timeframe, (start_date, end_date))
+    raw_narrative = _call_openai(prompt, api_key)
+    summary = {
+        "available": True,
+        "cached": False,
+        "timeframe": timeframe,
         "summary": raw_narrative,
         "narrative": _parse_narrative_response(raw_narrative),
         "date": date_label,
@@ -3148,6 +3571,8 @@ def generate_session_summary(
         "cycle_count": context["total_cycles"],
         "generated_at": now_iso(),
     }
+    _store_narrative_summary(cache_key, signature, summary)
+    return summary
 
 
 def build_summary_prompt(
@@ -3289,12 +3714,34 @@ class AppHandler(BaseHTTPRequestHandler):
                 end_date = _optional_text(
                     payload.get("end_date") or payload.get("endDate")
                 )
+                force = _payload_bool(payload.get("force"), default=False)
                 self.send_json(
                     generate_session_summary(
                         date_str,
                         timeframe,
                         start_date=start_date,
                         end_date=end_date,
+                        force=force,
+                    )
+                )
+                return
+            if self.path == "/api/summary/cache":
+                self.require_local_ui_request("AI narrative requests")
+                date_str = _optional_text(payload.get("date"))
+                timeframe = str(payload.get("timeframe", "1D")).strip().upper()
+                start_date = _optional_text(
+                    payload.get("start_date") or payload.get("startDate")
+                )
+                end_date = _optional_text(
+                    payload.get("end_date") or payload.get("endDate")
+                )
+                self.send_json(
+                    generate_session_summary(
+                        date_str,
+                        timeframe,
+                        start_date=start_date,
+                        end_date=end_date,
+                        cache_only=True,
                     )
                 )
                 return

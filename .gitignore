@@ -3,6 +3,7 @@
 .bot_activity.json
 .market_data_state.json
 .operator_spreadsheet_posts.json
+.narrative_cache.json
 logs/
 __pycache__/
 *.pyc

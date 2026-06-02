@@ -20,6 +20,7 @@ const state = {
   narrativeDisplayDate: null,
   narrativeCycles: null,
   narrativeLoading: false,
+  narrativeCacheLoading: false,
   activeEnvironment: "paper",
   liveTradingArmed: false,
   liveCredentialsReady: false,
@@ -38,7 +39,7 @@ const AUDIOSCAPE_KEY = "edgewalker-audioscape-enabled";
 const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
 const SECTION_COLLAPSED_PREFIX = "edgewalker-section-collapsed:";
-const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v1";
+const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v2";
 const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
@@ -150,6 +151,7 @@ const els = {
   dayPl: document.querySelector("#dayPlValue"),
   buyingPower: document.querySelector("#buyingPowerValue"),
   sourcePrice: document.querySelector("#sourcePriceValue"),
+  inversePrice: document.querySelector("#inversePriceValue"),
   gap: document.querySelector("#gapValue"),
   position: document.querySelector("#positionValue"),
   positionPl: document.querySelector("#positionPlValue"),
@@ -496,6 +498,7 @@ function renderDataHealth(status) {
 
   if (!status) {
     els.dataStatus.textContent = "Waiting";
+    els.dataStatus.dataset.tooltip = "Market data status has not loaded yet.";
     els.dataStatus.classList.add("data-warn");
     return;
   }
@@ -515,13 +518,15 @@ function renderDataHealth(status) {
   const feed = status.data_feed ? status.data_feed.toUpperCase() : null;
   const age = formatAgeSeconds(status.bar_age_seconds);
   const pieces = [label];
-  if (feed) {
-    pieces.push(feed);
-  }
   if (age) {
     pieces.push(age);
   }
   els.dataStatus.textContent = pieces.join(" · ");
+  els.dataStatus.dataset.tooltip = [
+    `Status: ${label}`,
+    feed ? `Feed: ${feed}` : null,
+    age ? `Latest completed bar age: ${age}` : null,
+  ].filter(Boolean).join(" · ");
 
   if (rawStatus === "LIVE") {
     els.dataStatus.classList.add("data-live");
@@ -1633,6 +1638,9 @@ function switchTab(tab) {
   if (els.activityExpand) {
     els.activityExpand.disabled = state.logCollapsed;
   }
+  if (!isActivity) {
+    loadServerNarrativeCacheForSelection();
+  }
 }
 
 function localDateInputValue(date = new Date()) {
@@ -1706,6 +1714,16 @@ function applyNarrativeSnapshot(snapshot) {
     : legacyNarrativeText(snapshot.text);
 }
 
+function applyNarrativeData(data) {
+  state.narrativeSections = normalizeNarrativeSections(data.narrative);
+  state.narrativeDate = data.date;
+  state.narrativeDisplayDate = data.display_date;
+  state.narrativeCycles = data.cycle_count;
+  state.narrativeText = state.narrativeSections
+    ? narrativeCopyText()
+    : legacyNarrativeText(data.summary);
+}
+
 function currentNarrativeSnapshot() {
   return {
     text: state.narrativeText,
@@ -1754,6 +1772,45 @@ function restoreNarrativeForSelection() {
   }
   renderNarrative();
   updateNarrativeGenerateButton();
+  if (!snapshot) {
+    loadServerNarrativeCacheForSelection();
+  }
+}
+
+async function loadServerNarrativeCacheForSelection() {
+  if (
+    state.narrativeCacheLoading ||
+    state.narrativeLoading ||
+    state.narrativeText ||
+    state.narrativeSections
+  ) {
+    return;
+  }
+
+  state.narrativeCacheLoading = true;
+  try {
+    const payload = { timeframe: state.narrativeTimeframe };
+    if (state.narrativeTimeframe === "CUSTOM") {
+      ensureCustomDateDefaults();
+      payload.start_date = state.narrativeCustomStart;
+      payload.end_date = state.narrativeCustomEnd;
+    }
+    const data = await request("/api/summary/cache", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!data.available) {
+      return;
+    }
+    applyNarrativeData(data);
+    saveCurrentNarrativeToCache();
+    renderNarrative();
+    updateNarrativeGenerateButton();
+  } catch {
+    // Server-side narrative cache is optional; absence should not interrupt the UI.
+  } finally {
+    state.narrativeCacheLoading = false;
+  }
 }
 
 function renderNarrative() {
@@ -1877,6 +1934,9 @@ async function generateNarrative() {
   }
   try {
     const payload = { timeframe: state.narrativeTimeframe };
+    if (state.narrativeText || state.narrativeSections) {
+      payload.force = true;
+    }
     if (state.narrativeTimeframe === "CUSTOM") {
       state.narrativeCustomStart =
         els.customStartDate?.value || state.narrativeCustomStart;
@@ -1889,13 +1949,7 @@ async function generateNarrative() {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    state.narrativeSections = normalizeNarrativeSections(data.narrative);
-    state.narrativeDate = data.date;
-    state.narrativeDisplayDate = data.display_date;
-    state.narrativeCycles = data.cycle_count;
-    state.narrativeText = state.narrativeSections
-      ? narrativeCopyText()
-      : legacyNarrativeText(data.summary);
+    applyNarrativeData(data);
     saveCurrentNarrativeToCache();
     renderNarrative();
   } catch (error) {
@@ -1996,7 +2050,7 @@ function formatPrice(value) {
   }
   return `$${parsed.toLocaleString([], {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
+    maximumFractionDigits: 2,
   })}`;
 }
 
@@ -2017,6 +2071,17 @@ function formatQty(value) {
   return parsed.toLocaleString([], {
     minimumFractionDigits: 0,
     maximumFractionDigits: 6,
+  });
+}
+
+function formatPositionQty(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return null;
+  }
+  return parsed.toLocaleString([], {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
   });
 }
 
@@ -2089,6 +2154,11 @@ function renderDecision(status) {
   els.portfolio.textContent = formatMoney(status.portfolio_value);
   els.buyingPower.textContent = formatMoney(status.buying_power);
   els.sourcePrice.textContent = formatPrice(status.source_price);
+  if (els.inversePrice) {
+    els.inversePrice.textContent = formatPrice(
+      status.inverse_price || status.symbol_prices?.SOXS,
+    );
+  }
   els.gap.textContent = formatPercent(status.gap_percent);
 
   const dayPlText = `${formatMoney(status.day_pl)} ${formatPercent(status.day_pl_percent)}`;
@@ -2096,12 +2166,8 @@ function renderDecision(status) {
   setTone(els.dayPl, status.day_pl);
 
   if (status.position_symbol && status.position_qty) {
-    const qty = formatQty(status.position_qty) || status.position_qty;
-    const marketValue = formatMoney(status.position_market_value);
-    const owner = status.position_owner
-      ? `${formatLabel(status.position_owner)}, `
-      : "";
-    els.position.textContent = `${status.position_symbol} ${qty} (${owner}${marketValue})`;
+    const qty = formatPositionQty(status.position_qty) || status.position_qty;
+    els.position.textContent = `${status.position_symbol} ${qty}`;
   } else {
     els.position.textContent = "Flat";
   }

@@ -936,5 +936,11 @@ qualification evidence exists.
   pauses without loosening entry safety.
 - Use Trend Trust as shadow evidence only; do not feed it into Adaptive until
   multiple sessions show how it behaves.
+- Track route invalidation P/L, not only route invalidation count, because exit
+  doctrine is only validated by what it saves or costs.
+- Watch MomentumBot and InverseBot separately for continuation quality;
+  directional strategies may not behave as perfect mirrors.
+- Evaluate Adaptive shadow primarily while flat/evaluable. While a position is
+  open, posture telemetry often reflects paused entry-posture judgment.
 - Continue recording manual operator notes, daily logs, lifecycle records, and
   AAR updates.

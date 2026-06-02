@@ -99,7 +99,16 @@ notes, but have not yet become approved tuning decisions.
 - Regime age may be underrepresented in current confidence calculations.
 - Churn count alone is insufficient to explain performance.
 - Route invalidation exits dominate realized outcomes on churny sessions.
+- Route invalidation P/L may be more important than route invalidation count.
+  June 2 showed `13` route-invalidated exits with about `+$813.71` net P/L,
+  suggesting the doctrine may protect gains when thesis ownership changes.
+- MomentumBot and InverseBot should not be assumed to be perfect mirror
+  strategies. Upside continuation quality and downside continuation quality may
+  differ materially across sessions.
 - Adaptive appears disciplined, but may lack regime-maturity awareness.
+- Adaptive shadow should be interpreted on flat/evaluable cycles first. While a
+  position is open, posture telemetry often reflects paused entry-posture
+  judgment rather than an independent mode-selection opinion.
 - `POLL_SEC` may be an exit-quality and perception lever rather than an
   entry-quality lever.
 - Regular-session warmup integrity is a doctrine question, not just a data
