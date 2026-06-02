@@ -44,9 +44,11 @@ from server import (
     _most_recent_log_date,
     _parse_narrative_response,
     alpaca_environment_settings,
+    build_operator_spreadsheet_daily_row,
     build_summary_prompt,
     config_from_payload,
     lifecycle_performance_summary,
+    OPERATOR_SPREADSHEET_COLUMNS,
     order_visibility_summary,
     save_alpaca_environment_settings,
     set_live_trading_armed,
@@ -368,6 +370,126 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(by_bot[INVERSE_BOT]["losses"], 1)
         self.assertEqual(by_bot[CHOP_BOT]["realized_pl"], "0")
         self.assertEqual(by_bot[CHOP_BOT]["trade_count"], 0)
+
+    def test_operator_spreadsheet_daily_row_builds_exit_reason_columns(self) -> None:
+        lifecycle_records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-01T13:40:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": MOMENTUM_BOT,
+                "order_id": "buy-1",
+                "fill_delta_qty": "10",
+                "filled_avg_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-01T14:10:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": MOMENTUM_BOT,
+                "order_id": "sell-1",
+                "fill_delta_qty": "10",
+                "filled_avg_price": "110",
+                "reason": "route_invalidated_exit",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-01T15:00:00+00:00",
+                "symbol": "SOXS",
+                "side": "buy",
+                "bot": INVERSE_BOT,
+                "order_id": "buy-2",
+                "fill_delta_qty": "20",
+                "filled_avg_price": "10",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-01T20:00:00+00:00",
+                "symbol": "SOXS",
+                "side": "sell",
+                "bot": INVERSE_BOT,
+                "order_id": "sell-2",
+                "fill_delta_qty": "20",
+                "filled_avg_price": "12",
+                "reason": "market_close_liquidation",
+            },
+        ]
+        log_records = [
+            {
+                "timestamp": "2026-06-01T13:30:00+00:00",
+                "market_open": True,
+                "portfolio_value": "1000",
+                "config": {"directional_mode": "BALANCED"},
+                "regime": "UPTREND",
+                "trend_trust": {"score": 40, "regime_age_minutes": 0},
+                "console_lines": [],
+            },
+            {
+                "timestamp": "2026-06-01T20:00:00+00:00",
+                "market_open": True,
+                "portfolio_value": "1140",
+                "config": {"directional_mode": "BALANCED"},
+                "regime": "SIDEWAYS",
+                "regime_transition": {"from": "UPTREND", "to": "SIDEWAYS"},
+                "data_status": "STALE",
+                "stream_error": True,
+                "trend_trust": {"score": 60, "regime_age_minutes": 30},
+                "console_lines": ["[DATA] HEALTH bars=STALE (93s)"],
+            },
+        ]
+
+        class FakeLifecycleLedger:
+            def read_all(self) -> list[dict[str, object]]:
+                return lifecycle_records
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_root = Path(tmpdir)
+            log_path = logs_root / "edgewalker-2026-06-01.jsonl"
+            log_path.write_text(
+                "\n".join(json.dumps(record) for record in log_records),
+                encoding="utf-8",
+            )
+            with patch("server.LOGS_ROOT", logs_root), patch(
+                "server.LifecycleLedger",
+                FakeLifecycleLedger,
+            ):
+                payload = build_operator_spreadsheet_daily_row(
+                    "2026-06-01",
+                    operator_notes="round 2 conservative",
+                    include_daily_narrative=False,
+                )
+
+        row = payload["row"]
+
+        self.assertEqual(payload["columns"], OPERATOR_SPREADSHEET_COLUMNS)
+        self.assertEqual(len(payload["values"]), len(OPERATOR_SPREADSHEET_COLUMNS))
+        self.assertEqual(row["date"], "2026-06-01")
+        self.assertEqual(row["mode"], "BALANCED")
+        self.assertEqual(row["starting_account_value"], 1000.0)
+        self.assertEqual(row["ending_account_value"], 1140.0)
+        self.assertEqual(row["realized_pl_dollars"], 140.0)
+        self.assertEqual(row["account_change_percent"], 14.0)
+        self.assertEqual(row["account_result_status"], "GREEN")
+        self.assertEqual(row["closed_trades"], 2)
+        self.assertEqual(row["wins"], 2)
+        self.assertEqual(row["losses"], 0)
+        self.assertEqual(row["momentum_pl"], 100.0)
+        self.assertEqual(row["inverse_pl"], 40.0)
+        self.assertEqual(row["top_pl_bot"], MOMENTUM_BOT)
+        self.assertEqual(row["bottom_pl_bot"], "")
+        self.assertEqual(row["regime_transitions"], 1)
+        self.assertEqual(row["cycles"], 2)
+        self.assertEqual(row["stale_cycles"], 1)
+        self.assertEqual(row["stream_error_cycles"], 1)
+        self.assertEqual(row["session_trend_trust_avg"], 50.0)
+        self.assertEqual(row["route_invalidation_exits"], 1)
+        self.assertEqual(row["route_invalidation_pl"], 100.0)
+        self.assertEqual(row["market_close_exits"], 1)
+        self.assertEqual(row["market_close_pl"], 40.0)
+        self.assertEqual(row["reconciliation_confidence"], "HIGH")
+        self.assertEqual(row["operator_notes"], "round 2 conservative")
 
     def test_order_visibility_summary_lists_pending_and_recent_events(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
@@ -775,6 +897,12 @@ class ServerLoggingTest(unittest.TestCase):
                     "api_key_id": "live-key-1234",
                     "api_secret_key": "live-secret-5678",
                 },
+                "operator_spreadsheet": {
+                    "spreadsheet_url": "https://docs.google.com/spreadsheets/d/example",
+                    "post_endpoint_url": "https://script.google.com/macros/s/example/exec",
+                    "auto_post_enabled": True,
+                    "include_daily_narrative": True,
+                },
             }
 
             with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
@@ -786,8 +914,10 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(loaded["active_environment"], "live")
         self.assertEqual(settings["paper"]["api_key_id_masked"], "********1234")
         self.assertEqual(settings["live"]["api_secret_key_masked"], "********5678")
+        self.assertTrue(settings["operator_spreadsheet"]["auto_post_enabled"])
         self.assertNotIn("paper-secret-5678", json.dumps(settings))
         self.assertIn("ALPACA_LIVE_API_KEY_ID=live-key-1234", env_text)
+        self.assertIn("OPERATOR_SPREADSHEET_AUTO_POST=true", env_text)
 
     def test_environment_settings_normalizes_bare_alpaca_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -956,6 +1086,49 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(
             [line for _, line in runner._activity_log],
             [runner._last_output[0]],
+        )
+
+    def test_runner_auto_posts_operator_spreadsheet_once_after_close(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        stop_event = threading.Event()
+        runner._config = config()
+        runner._lock = threading.Lock()
+        runner._stop_event = stop_event
+        runner._running = True
+        runner._next_run_at = None
+        runner._next_run_reason = None
+        runner._market_idle_logged_for = "old"
+        runner._last_stopped_at = None
+        runner._last_output = ["previous"]
+        runner._last_error = None
+        runner._activity_log = []
+        runner._spreadsheet_auto_posted_dates = set()
+        runner._spreadsheet_auto_post_attempted_dates = set()
+        runner._save_activity_log = lambda: None
+        runner._save_spreadsheet_posted_dates = lambda: None
+        fast_config = replace(config(), poll_seconds=0)
+        next_open = datetime(2026, 6, 3, 13, 30, 0, tzinfo=timezone.utc)
+
+        with (
+            patch.object(
+                BotRunner,
+                "_operator_spreadsheet_auto_post_date",
+                return_value="2026-06-02",
+            ),
+            patch(
+                "server.post_operator_spreadsheet_daily_row",
+                return_value={"narrative_error": None},
+            ) as post_daily_row,
+        ):
+            runner._arm_until_market_open(fast_config, stop_event, next_open)
+            runner._arm_until_market_open(fast_config, stop_event, next_open)
+
+        self.assertEqual(post_daily_row.call_count, 1)
+        post_daily_row.assert_called_once_with({"date": "2026-06-02"})
+        self.assertIn("2026-06-02", runner._spreadsheet_auto_posted_dates)
+        self.assertIn(
+            "[SPREADSHEET] Auto-posted daily row for 2026-06-02.",
+            [line for _, line in runner._activity_log],
         )
 
     def test_config_payload_accepts_directional_controls(self) -> None:

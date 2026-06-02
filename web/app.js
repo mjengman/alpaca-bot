@@ -70,6 +70,11 @@ const els = {
   settingsClose: document.querySelector("#settingsClose"),
   settingsMessage: document.querySelector("#settingsMessage"),
   settingsSave: document.querySelector("#settingsSave"),
+  operatorSpreadsheetOpen: document.querySelector("#operatorSpreadsheetOpen"),
+  operatorSpreadsheetDialog: document.querySelector("#operatorSpreadsheetDialog"),
+  operatorSpreadsheetClose: document.querySelector("#operatorSpreadsheetClose"),
+  spreadsheetMessage: document.querySelector("#spreadsheetMessage"),
+  spreadsheetSave: document.querySelector("#spreadsheetSave"),
   activeEnvironment: document.querySelector("#activeEnvironmentInput"),
   dataBaseUrl: document.querySelector("#dataBaseUrlInput"),
   dataFeed: document.querySelector("#dataFeedInput"),
@@ -85,6 +90,15 @@ const els = {
   liveArmInput: document.querySelector("#liveArmInput"),
   liveArmButton: document.querySelector("#liveArmButton"),
   liveDisarmButton: document.querySelector("#liveDisarmButton"),
+  spreadsheetUrl: document.querySelector("#spreadsheetUrlInput"),
+  spreadsheetPostEndpoint: document.querySelector("#spreadsheetPostEndpointInput"),
+  spreadsheetIncludeNarrative: document.querySelector(
+    "#spreadsheetIncludeNarrativeInput",
+  ),
+  spreadsheetAutoPost: document.querySelector("#spreadsheetAutoPostInput"),
+  spreadsheetOperatorNotes: document.querySelector("#spreadsheetOperatorNotesInput"),
+  openOperatorSpreadsheet: document.querySelector("#openOperatorSpreadsheet"),
+  postSpreadsheetDailyRow: document.querySelector("#postSpreadsheetDailyRow"),
   operatorGuideOpen: document.querySelector("#operatorGuideOpen"),
   operatorGuideDialog: document.querySelector("#operatorGuideDialog"),
   operatorGuideClose: document.querySelector("#operatorGuideClose"),
@@ -1083,6 +1097,15 @@ function setSettingsMessage(message, tone = "neutral") {
   }
 }
 
+function setSpreadsheetMessage(message, tone = "neutral") {
+  if (!els.spreadsheetMessage) return;
+  els.spreadsheetMessage.textContent = message || "";
+  els.spreadsheetMessage.classList.remove("is-success", "is-danger", "is-warning");
+  if (tone !== "neutral") {
+    els.spreadsheetMessage.classList.add(`is-${tone}`);
+  }
+}
+
 function applySettings(settings) {
   if (!settings) return;
   state.activeEnvironment = settings.active_environment || "paper";
@@ -1104,6 +1127,23 @@ function applySettings(settings) {
   }
   if (els.liveTradingUrl) {
     els.liveTradingUrl.value = settings.live?.trading_base_url || "";
+  }
+  if (els.spreadsheetUrl) {
+    els.spreadsheetUrl.value =
+      settings.operator_spreadsheet?.spreadsheet_url || "";
+  }
+  if (els.spreadsheetPostEndpoint) {
+    els.spreadsheetPostEndpoint.value =
+      settings.operator_spreadsheet?.post_endpoint_url || "";
+  }
+  if (els.spreadsheetIncludeNarrative) {
+    els.spreadsheetIncludeNarrative.checked =
+      settings.operator_spreadsheet?.include_daily_narrative !== false;
+  }
+  if (els.spreadsheetAutoPost) {
+    els.spreadsheetAutoPost.checked = Boolean(
+      settings.operator_spreadsheet?.auto_post_enabled,
+    );
   }
 
   const secretFields = [
@@ -1152,27 +1192,36 @@ function settingsPayloadFromForm() {
       api_key_id: els.liveApiKey?.value || "",
       api_secret_key: els.liveApiSecret?.value || "",
     },
+    operator_spreadsheet: {
+      spreadsheet_url: els.spreadsheetUrl?.value || "",
+      post_endpoint_url: els.spreadsheetPostEndpoint?.value || "",
+      auto_post_enabled: Boolean(els.spreadsheetAutoPost?.checked),
+      include_daily_narrative: Boolean(els.spreadsheetIncludeNarrative?.checked),
+    },
   };
 }
 
-async function saveSettings({ rethrow = false } = {}) {
-  if (!els.settingsSave) return;
-  els.settingsSave.disabled = true;
-  setSettingsMessage("Saving settings...");
+async function saveSettings({
+  rethrow = false,
+  messageSetter = setSettingsMessage,
+  button = els.settingsSave,
+} = {}) {
+  if (button) button.disabled = true;
+  messageSetter("Saving settings...");
   try {
     const settings = await request("/api/settings", {
       method: "POST",
       body: JSON.stringify(settingsPayloadFromForm()),
     });
     applySettings(settings);
-    setSettingsMessage("Settings saved.", "success");
+    messageSetter("Settings saved.", "success");
   } catch (error) {
-    setSettingsMessage(error.message, "danger");
+    messageSetter(error.message, "danger");
     if (rethrow) {
       throw error;
     }
   } finally {
-    els.settingsSave.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -1234,6 +1283,104 @@ async function disarmLiveTrading() {
     setSettingsMessage(error.message, "danger");
   } finally {
     if (els.liveDisarmButton) els.liveDisarmButton.disabled = false;
+  }
+}
+
+function openOperatorSpreadsheet() {
+  const url = (els.spreadsheetUrl?.value || "").trim();
+  if (!url) {
+    setSpreadsheetMessage("Add an Operator Spreadsheet URL first.", "warning");
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
+function saveSpreadsheetSettings() {
+  return saveSettings({
+    messageSetter: setSpreadsheetMessage,
+    button: els.spreadsheetSave,
+  });
+}
+
+async function postSpreadsheetDailyRow() {
+  if (els.postSpreadsheetDailyRow) {
+    els.postSpreadsheetDailyRow.disabled = true;
+  }
+  setSpreadsheetMessage("Saving spreadsheet settings...");
+  try {
+    await saveSettings({
+      rethrow: true,
+      messageSetter: setSpreadsheetMessage,
+      button: els.spreadsheetSave,
+    });
+    setSpreadsheetMessage("Posting latest daily row...");
+    const result = await request("/api/spreadsheet/post", {
+      method: "POST",
+      body: JSON.stringify({
+        post_endpoint_url: els.spreadsheetPostEndpoint?.value || "",
+        operator_notes: els.spreadsheetOperatorNotes?.value || "",
+        include_daily_narrative: Boolean(els.spreadsheetIncludeNarrative?.checked),
+      }),
+    });
+    const narrativeWarning = result.narrative_error
+      ? ` Narrative was skipped: ${result.narrative_error.slice(0, 120)}`
+      : "";
+    setSpreadsheetMessage(
+      `Posted ${result.date || "latest session"} to Operator Spreadsheet.${narrativeWarning}`,
+      result.narrative_error ? "warning" : "success",
+    );
+    if (els.spreadsheetOperatorNotes) {
+      els.spreadsheetOperatorNotes.value = "";
+    }
+  } catch (error) {
+    setSpreadsheetMessage(error.message, "danger");
+  } finally {
+    if (els.postSpreadsheetDailyRow) {
+      els.postSpreadsheetDailyRow.disabled = false;
+    }
+  }
+}
+
+function setupOperatorSpreadsheetModal() {
+  if (!els.operatorSpreadsheetDialog || !els.operatorSpreadsheetOpen) return;
+  const closeSpreadsheet = () => {
+    if (els.operatorSpreadsheetDialog.open) {
+      els.operatorSpreadsheetDialog.close();
+    }
+  };
+
+  els.operatorSpreadsheetOpen.addEventListener("click", async () => {
+    hideTooltip();
+    setSpreadsheetMessage("Loading spreadsheet settings...");
+    if (typeof els.operatorSpreadsheetDialog.showModal === "function") {
+      els.operatorSpreadsheetDialog.showModal();
+    } else {
+      els.operatorSpreadsheetDialog.setAttribute("open", "");
+    }
+    try {
+      await loadSettings();
+      setSpreadsheetMessage("");
+    } catch (error) {
+      setSpreadsheetMessage(error.message, "danger");
+    }
+  });
+
+  if (els.operatorSpreadsheetClose) {
+    els.operatorSpreadsheetClose.addEventListener("click", closeSpreadsheet);
+  }
+  els.operatorSpreadsheetDialog.addEventListener("click", (event) => {
+    if (event.target === els.operatorSpreadsheetDialog) {
+      closeSpreadsheet();
+    }
+  });
+  if (els.spreadsheetSave) {
+    els.spreadsheetSave.addEventListener("click", saveSpreadsheetSettings);
+  }
+  if (els.openOperatorSpreadsheet) {
+    els.openOperatorSpreadsheet.addEventListener("click", openOperatorSpreadsheet);
+  }
+  if (els.postSpreadsheetDailyRow) {
+    els.postSpreadsheetDailyRow.addEventListener("click", postSpreadsheetDailyRow);
   }
 }
 
@@ -2451,6 +2598,7 @@ setupAudioscapePreference();
 setupSettingsMenu();
 setupUiSounds();
 setupSettingsModal();
+setupOperatorSpreadsheetModal();
 setupOperatorGuide();
 setupCollapsibleSections();
 setupActivityLog();

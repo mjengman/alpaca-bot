@@ -63,6 +63,7 @@ ASSETS_ROOT = PROJECT_ROOT / "assets"
 HOST = "127.0.0.1"
 PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
+OPERATOR_SPREADSHEET_POST_STATE_PATH = PROJECT_ROOT / ".operator_spreadsheet_posts.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
@@ -70,6 +71,37 @@ BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
+OPERATOR_SPREADSHEET_COLUMNS = [
+    "date",
+    "mode",
+    "starting_account_value",
+    "ending_account_value",
+    "realized_pl_dollars",
+    "account_change_percent",
+    "account_result_status",
+    "closed_trades",
+    "wins",
+    "losses",
+    "momentum_pl",
+    "chop_pl",
+    "inverse_pl",
+    "top_pl_bot",
+    "bottom_pl_bot",
+    "regime_transitions",
+    "cycles",
+    "stale_cycles",
+    "stream_error_cycles",
+    "session_trend_trust_avg",
+    "route_invalidation_exits",
+    "route_invalidation_pl",
+    "trailing_stop_exits",
+    "trailing_stop_pl",
+    "market_close_exits",
+    "market_close_pl",
+    "reconciliation_confidence",
+    "operator_notes",
+    "daily_narrative",
+]
 ALLOWED_UI_ORIGINS = {
     f"http://{HOST}:{PORT}",
     f"http://localhost:{PORT}",
@@ -159,6 +191,8 @@ class BotRunner:
         self._last_error: str | None = startup_error
         self._market_idle_logged_for: str | None = None
         self._last_regime: str | None = None
+        self._spreadsheet_auto_posted_dates = self._load_spreadsheet_posted_dates()
+        self._spreadsheet_auto_post_attempted_dates: set[str] = set()
 
     def _initial_config(self) -> tuple[BotConfig, str | None]:
         try:
@@ -299,6 +333,8 @@ class BotRunner:
                 self._append_activity_locked([line])
                 self._market_idle_logged_for = idle_key
 
+        self._maybe_auto_post_operator_spreadsheet(next_open)
+
         wait_seconds = config.poll_seconds
         if next_open is not None:
             seconds_to_open = max(
@@ -320,6 +356,106 @@ class BotRunner:
             self._next_run_at = next_run.isoformat(timespec="seconds")
             self._next_run_reason = "poll"
             self._append_activity_locked(lines)
+
+    def _maybe_auto_post_operator_spreadsheet(
+        self,
+        next_open: datetime | None,
+    ) -> None:
+        target_date = self._operator_spreadsheet_auto_post_date(next_open)
+        if not target_date:
+            return
+
+        with self._lock:
+            if (
+                target_date in self._spreadsheet_auto_posted_dates
+                or target_date in self._spreadsheet_auto_post_attempted_dates
+            ):
+                return
+            self._spreadsheet_auto_post_attempted_dates.add(target_date)
+
+        try:
+            result = post_operator_spreadsheet_daily_row({"date": target_date})
+        except BotError as exc:
+            self._record_operator_spreadsheet_auto_post(
+                f"[SPREADSHEET] Auto-post failed for {target_date}: {exc}",
+                error=str(exc),
+            )
+            return
+
+        with self._lock:
+            self._spreadsheet_auto_posted_dates.add(target_date)
+            self._save_spreadsheet_posted_dates()
+
+        narrative_note = (
+            " Narrative skipped."
+            if result.get("narrative_error")
+            else ""
+        )
+        self._record_operator_spreadsheet_auto_post(
+            f"[SPREADSHEET] Auto-posted daily row for {target_date}.{narrative_note}"
+        )
+
+    def _operator_spreadsheet_auto_post_date(
+        self,
+        next_open: datetime | None,
+    ) -> str | None:
+        settings = operator_spreadsheet_settings()
+        if not settings.get("auto_post_enabled"):
+            return None
+        if not _optional_text(settings.get("post_endpoint_url")):
+            return None
+
+        now_ny = datetime.now(NY_TZ)
+        today = now_ny.date().isoformat()
+        if next_open is not None:
+            next_open_day = next_open.astimezone(NY_TZ).date().isoformat()
+            if next_open_day == today:
+                return None
+        elif now_ny.hour < 16:
+            return None
+
+        latest_log_date = _most_recent_log_date(market_open_only=True)
+        if latest_log_date != today:
+            return None
+        return today
+
+    def _record_operator_spreadsheet_auto_post(
+        self,
+        line: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        with self._lock:
+            if error:
+                self._last_error = error
+            self._last_output = [line, *self._last_output[:39]]
+            self._append_activity_locked([line])
+
+    def _load_spreadsheet_posted_dates(self) -> set[str]:
+        if not OPERATOR_SPREADSHEET_POST_STATE_PATH.exists():
+            return set()
+        try:
+            payload = json.loads(
+                OPERATOR_SPREADSHEET_POST_STATE_PATH.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError):
+            return set()
+        if isinstance(payload, dict):
+            posted_dates = payload.get("posted_dates")
+            if isinstance(posted_dates, list):
+                return {date for date in posted_dates if isinstance(date, str)}
+        if isinstance(payload, list):
+            return {date for date in payload if isinstance(date, str)}
+        return set()
+
+    def _save_spreadsheet_posted_dates(self) -> None:
+        payload = {
+            "posted_dates": sorted(self._spreadsheet_auto_posted_dates),
+        }
+        OPERATOR_SPREADSHEET_POST_STATE_PATH.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
 
     def _run_cycle(self, config: BotConfig) -> None:
         output = io.StringIO()
@@ -926,6 +1062,14 @@ def _env_bool_text(value: str | None) -> bool:
     return bool(value and value.strip().lower() in {"1", "true", "yes", "on"})
 
 
+def _payload_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return _env_bool_text(str(value))
+
+
 def _is_secret_placeholder(value: str | None) -> bool:
     return value in (None, "", SECRET_PLACEHOLDER)
 
@@ -1033,6 +1177,28 @@ def _live_trading_guard_required(url: str) -> bool:
     return current_alpaca_environment() == "live" or _is_live_trading_url(url)
 
 
+def operator_spreadsheet_settings(values: dict[str, str] | None = None) -> dict[str, Any]:
+    values = values or _read_env_values()
+    return {
+        "spreadsheet_url": _env_first(values, "OPERATOR_SPREADSHEET_URL"),
+        "post_endpoint_url": _env_first(values, "OPERATOR_SPREADSHEET_POST_URL"),
+        "auto_post_enabled": _env_bool_text(
+            _env_first(
+                values,
+                "OPERATOR_SPREADSHEET_AUTO_POST",
+                default="false",
+            )
+        ),
+        "include_daily_narrative": _env_bool_text(
+            _env_first(
+                values,
+                "OPERATOR_SPREADSHEET_INCLUDE_NARRATIVE",
+                default="true",
+            )
+        ),
+    }
+
+
 def alpaca_environment_settings() -> dict[str, Any]:
     values = _read_env_values()
     active_environment = current_alpaca_environment()
@@ -1049,6 +1215,7 @@ def alpaca_environment_settings() -> dict[str, Any]:
     return {
         "active_environment": active_environment,
         "live_trading_armed": live_trading_armed(),
+        "operator_spreadsheet": operator_spreadsheet_settings(values),
         "data_base_url": normalize_alpaca_base_url(
             _env_first(
                 values,
@@ -1109,6 +1276,30 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
             payload.get("data_feed") or payload.get("dataFeed") or "iex"
         ).strip(),
     }
+
+    spreadsheet = payload.get("operator_spreadsheet") or payload.get(
+        "operatorSpreadsheet"
+    )
+    if not isinstance(spreadsheet, dict):
+        spreadsheet = {}
+    updates["OPERATOR_SPREADSHEET_URL"] = _optional_text(
+        spreadsheet.get("spreadsheet_url") or spreadsheet.get("spreadsheetUrl")
+    ) or ""
+    updates["OPERATOR_SPREADSHEET_POST_URL"] = _optional_text(
+        spreadsheet.get("post_endpoint_url") or spreadsheet.get("postEndpointUrl")
+    ) or ""
+    auto_post_enabled = spreadsheet.get("auto_post_enabled")
+    if auto_post_enabled is None:
+        auto_post_enabled = spreadsheet.get("autoPostEnabled")
+    updates["OPERATOR_SPREADSHEET_AUTO_POST"] = (
+        "true" if _payload_bool(auto_post_enabled, default=False) else "false"
+    )
+    include_daily_narrative = spreadsheet.get("include_daily_narrative")
+    if include_daily_narrative is None:
+        include_daily_narrative = spreadsheet.get("includeDailyNarrative")
+    updates["OPERATOR_SPREADSHEET_INCLUDE_NARRATIVE"] = (
+        "true" if _payload_bool(include_daily_narrative, default=True) else "false"
+    )
 
     for env_name, prefix in (("paper", "ALPACA_PAPER"), ("live", "ALPACA_LIVE")):
         section = payload.get(env_name)
@@ -1930,6 +2121,379 @@ def _session_metrics_summary(
     }
 
 
+def _decimal_from_value(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _rounded_number(value: Any, places: str = "0.01") -> float:
+    decimal_value = _decimal_from_value(value) or Decimal("0")
+    return float(decimal_value.quantize(Decimal(places)))
+
+
+def _realized_trades_for_date(
+    lifecycle_records: list[dict[str, Any]],
+    log_date: str,
+) -> list[dict[str, Any]]:
+    lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    realized_trades: list[dict[str, Any]] = []
+
+    for record in lifecycle_records:
+        if record.get("event_type") not in {
+            LIFECYCLE_PARTIAL_FILL,
+            LIFECYCLE_FULL_FILL,
+        }:
+            continue
+        created_at = _record_created_at(record)
+        if created_at is None or _ny_date_text(created_at) != log_date:
+            continue
+
+        symbol = record.get("symbol")
+        side = str(record.get("side") or "").lower()
+        fill_qty = _record_decimal(record, "fill_delta_qty") or _record_decimal(
+            record,
+            "filled_qty",
+        )
+        fill_price = _record_decimal(record, "filled_avg_price")
+        if not isinstance(symbol, str) or side not in {"buy", "sell"}:
+            continue
+        if fill_qty is None or fill_qty <= 0 or fill_price is None:
+            continue
+
+        if side == "buy":
+            lots_by_symbol.setdefault(symbol, []).append(
+                {
+                    "qty": fill_qty,
+                    "price": fill_price,
+                    "bot": record.get("bot"),
+                    "created_at": created_at,
+                    "order_id": record.get("order_id"),
+                }
+            )
+            continue
+
+        remaining = fill_qty
+        matched_qty = Decimal("0")
+        cost_basis = Decimal("0")
+        matched_lot_bots: list[tuple[str | None, Decimal]] = []
+        lots = lots_by_symbol.setdefault(symbol, [])
+        while remaining > 0 and lots:
+            lot = lots[0]
+            lot_qty = lot["qty"]
+            consumed_qty = min(remaining, lot_qty)
+            matched_qty += consumed_qty
+            cost_basis += consumed_qty * lot["price"]
+            matched_lot_bots.append((_optional_text(lot.get("bot")), consumed_qty))
+            remaining -= consumed_qty
+            lot["qty"] = lot_qty - consumed_qty
+            if lot["qty"] <= 0:
+                lots.pop(0)
+
+        if matched_qty <= 0:
+            continue
+
+        proceeds = matched_qty * fill_price
+        realized_pl = proceeds - cost_basis
+        avg_entry_price = cost_basis / matched_qty
+        realized_pl_percent = (
+            realized_pl / cost_basis * Decimal("100")
+            if cost_basis > 0
+            else None
+        )
+        realized_trades.append(
+            {
+                "symbol": symbol,
+                "bot": _optional_text(record.get("bot"))
+                or _dominant_bot(matched_lot_bots),
+                "qty": format_decimal(matched_qty),
+                "avg_entry_price": format_decimal(avg_entry_price),
+                "exit_price": format_decimal(fill_price),
+                "realized_pl": format_decimal(realized_pl),
+                "realized_pl_percent": (
+                    format_decimal(realized_pl_percent)
+                    if realized_pl_percent is not None
+                    else None
+                ),
+                "exit_reason": record.get("reason"),
+                "exit_order_id": record.get("order_id"),
+                "closed_at": created_at.astimezone(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            }
+        )
+
+    return realized_trades
+
+
+def _bot_pl_map(performance: dict[str, Any] | None) -> dict[str, Decimal]:
+    bot_pl = {bot: Decimal("0") for bot in BOT_PERFORMANCE_ORDER}
+    if not isinstance(performance, dict):
+        return bot_pl
+    items = performance.get("bot_performance")
+    if not isinstance(items, list):
+        return bot_pl
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        bot = _optional_text(item.get("bot"))
+        if not bot:
+            continue
+        bot_pl[bot] = _decimal_from_value(item.get("realized_pl")) or Decimal("0")
+    return bot_pl
+
+
+def _top_pl_bot(bot_pl: dict[str, Decimal]) -> str:
+    active = [(bot, value) for bot, value in bot_pl.items() if value != 0]
+    if not active:
+        return ""
+    return max(active, key=lambda item: item[1])[0]
+
+
+def _bottom_pl_bot(bot_pl: dict[str, Decimal]) -> str:
+    losses = [(bot, value) for bot, value in bot_pl.items() if value < 0]
+    if not losses:
+        return ""
+    return min(losses, key=lambda item: item[1])[0]
+
+
+def _narrative_for_spreadsheet(summary: dict[str, Any]) -> str:
+    sections = summary.get("narrative")
+    if not isinstance(sections, dict):
+        return _narrative_text(summary.get("summary"))
+
+    parts: list[str] = []
+    display_date = _narrative_text(summary.get("display_date") or summary.get("date"))
+    cycles = summary.get("cycle_count")
+    if display_date:
+        parts.append(
+            f"{display_date} · {cycles or '?'} cycles"
+            if cycles is not None
+            else display_date
+        )
+
+    if sections.get("tldr"):
+        parts.append(f"TL;DR: {_narrative_text(sections.get('tldr'))}")
+    if sections.get("highlight"):
+        parts.append(f"Highlight: {_narrative_text(sections.get('highlight'))}")
+
+    bot_performance = sections.get("bot_performance")
+    if isinstance(bot_performance, dict) and bot_performance:
+        bot_lines = [
+            f"{bot}: {_narrative_text(text)}"
+            for bot, text in bot_performance.items()
+            if _narrative_text(text)
+        ]
+        if bot_lines:
+            parts.append("Bot Performance:\n" + "\n".join(bot_lines))
+
+    section_labels = (
+        ("Market Conditions", "market_conditions"),
+        ("Operational Issues", "operational_issues"),
+        ("Analysis", "analysis"),
+        ("Bottom Line", "bottom_line"),
+    )
+    for label, key in section_labels:
+        text = _narrative_text(sections.get(key))
+        if text:
+            parts.append(f"{label}: {text}")
+    return "\n\n".join(parts)
+
+
+def build_operator_spreadsheet_daily_row(
+    date: str | None = None,
+    *,
+    operator_notes: str = "",
+    include_daily_narrative: bool = False,
+) -> dict[str, Any]:
+    target_date, log_path = _resolve_1d_log_path(date)
+    records = _load_log_records(log_path)
+    if not records:
+        raise BotError(f"Session log for {target_date} is empty.")
+
+    lifecycle_records = LifecycleLedger().read_all()
+    performance = lifecycle_performance_summary(
+        lifecycle_records,
+        datetime.fromisoformat(target_date).replace(tzinfo=NY_TZ),
+    )
+    session_metrics = _session_metrics_summary(records, lifecycle_records, target_date)
+    realized_trades = _realized_trades_for_date(lifecycle_records, target_date)
+
+    first = records[0]
+    last = records[-1]
+    starting_account = _decimal_from_value(
+        first.get("portfolio_value") or first.get("account_value")
+    ) or Decimal("0")
+    ending_account = _decimal_from_value(
+        last.get("portfolio_value") or last.get("account_value")
+    ) or Decimal("0")
+    realized_pl = _decimal_from_value(performance.get("session_realized_pl")) or Decimal(
+        "0"
+    )
+    account_change_percent = (
+        realized_pl / starting_account * Decimal("100")
+        if starting_account > 0
+        else Decimal("0")
+    )
+    if realized_pl > 0:
+        result_status = "GREEN"
+    elif realized_pl < 0:
+        result_status = "RED"
+    else:
+        result_status = "FLAT"
+
+    bot_pl = _bot_pl_map(performance)
+    exit_reason_counts: dict[str, int] = {}
+    exit_reason_pl: dict[str, Decimal] = {}
+    for trade in realized_trades:
+        reason = _optional_text(trade.get("exit_reason")) or "UNKNOWN"
+        _increment_count(exit_reason_counts, reason)
+        exit_reason_pl[reason] = exit_reason_pl.get(reason, Decimal("0")) + (
+            _decimal_from_value(trade.get("realized_pl")) or Decimal("0")
+        )
+
+    daily_narrative = ""
+    narrative_error = None
+    if include_daily_narrative:
+        try:
+            daily_narrative = _narrative_for_spreadsheet(
+                generate_session_summary(target_date, "1D")
+            )
+        except BotError as exc:
+            narrative_error = str(exc)
+
+    row = {
+        "date": target_date,
+        "mode": last.get("config", {}).get("directional_mode")
+        or last.get("directional_mode")
+        or "",
+        "starting_account_value": _rounded_number(starting_account),
+        "ending_account_value": _rounded_number(ending_account),
+        "realized_pl_dollars": _rounded_number(realized_pl),
+        "account_change_percent": _rounded_number(account_change_percent),
+        "account_result_status": result_status,
+        "closed_trades": int(performance.get("session_trade_count") or 0),
+        "wins": int(performance.get("session_wins") or 0),
+        "losses": int(performance.get("session_losses") or 0),
+        "momentum_pl": _rounded_number(bot_pl.get(MOMENTUM_BOT)),
+        "chop_pl": _rounded_number(bot_pl.get(CHOP_BOT)),
+        "inverse_pl": _rounded_number(bot_pl.get(INVERSE_BOT)),
+        "top_pl_bot": _top_pl_bot(bot_pl),
+        "bottom_pl_bot": _bottom_pl_bot(bot_pl),
+        "regime_transitions": int(
+            session_metrics.get("regime_transition_count") or 0
+        ),
+        "cycles": len(records),
+        "stale_cycles": int(session_metrics.get("stale_bar_cycles") or 0),
+        "stream_error_cycles": sum(
+            1
+            for record in records
+            if record.get("data_status") == "ERROR" or record.get("stream_error")
+        ),
+        "session_trend_trust_avg": _rounded_number(
+            session_metrics.get("trend_trust", {}).get("average_score")
+        ),
+        "route_invalidation_exits": int(
+            exit_reason_counts.get("route_invalidated_exit", 0)
+        ),
+        "route_invalidation_pl": _rounded_number(
+            exit_reason_pl.get("route_invalidated_exit")
+        ),
+        "trailing_stop_exits": int(
+            exit_reason_counts.get("trailing_stop_breached", 0)
+        ),
+        "trailing_stop_pl": _rounded_number(
+            exit_reason_pl.get("trailing_stop_breached")
+        ),
+        "market_close_exits": int(
+            exit_reason_counts.get("market_close_liquidation", 0)
+        ),
+        "market_close_pl": _rounded_number(
+            exit_reason_pl.get("market_close_liquidation")
+        ),
+        "reconciliation_confidence": performance.get("reconciliation_confidence")
+        or "",
+        "operator_notes": operator_notes,
+        "daily_narrative": daily_narrative,
+    }
+
+    return {
+        "date": target_date,
+        "columns": OPERATOR_SPREADSHEET_COLUMNS,
+        "row": {column: row.get(column, "") for column in OPERATOR_SPREADSHEET_COLUMNS},
+        "values": [row.get(column, "") for column in OPERATOR_SPREADSHEET_COLUMNS],
+        "narrative_error": narrative_error,
+    }
+
+
+def post_operator_spreadsheet_daily_row(payload: dict[str, Any]) -> dict[str, Any]:
+    settings = operator_spreadsheet_settings()
+    endpoint_url = _optional_text(
+        payload.get("post_endpoint_url")
+        or payload.get("postEndpointUrl")
+        or settings.get("post_endpoint_url")
+    )
+    if not endpoint_url:
+        raise BotError("Add an Operator Spreadsheet post endpoint URL first.")
+
+    include_daily_narrative = _payload_bool(
+        payload.get("include_daily_narrative")
+        if payload.get("include_daily_narrative") is not None
+        else payload.get("includeDailyNarrative"),
+        default=bool(settings.get("include_daily_narrative")),
+    )
+    row_payload = build_operator_spreadsheet_daily_row(
+        _optional_text(payload.get("date")),
+        operator_notes=_optional_text(payload.get("operator_notes")) or "",
+        include_daily_narrative=include_daily_narrative,
+    )
+
+    body = json.dumps(row_payload["row"]).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint_url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+            status_code = response.status
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        raise BotError(
+            f"Spreadsheet post failed with HTTP {exc.code}: {response_body[:240]}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise BotError(f"Spreadsheet post failed: {exc.reason}") from exc
+
+    try:
+        parsed_response = json.loads(response_body)
+    except json.JSONDecodeError as exc:
+        raise BotError(
+            "Spreadsheet endpoint did not return JSON. "
+            f"Response started with: {response_body[:240]}"
+        ) from exc
+
+    if isinstance(parsed_response, dict) and parsed_response.get("status") == "error":
+        raise BotError(
+            f"Spreadsheet endpoint error: {parsed_response.get('message') or 'unknown'}"
+        )
+
+    return {
+        "status": "posted",
+        "http_status": status_code,
+        "endpoint_response": parsed_response,
+        "row": row_payload["row"],
+        "columns": row_payload["columns"],
+        "date": row_payload["date"],
+        "narrative_error": row_payload.get("narrative_error"),
+    }
+
+
 def _extract_session_context(
     records: list[dict[str, Any]],
     log_date: str,
@@ -2685,6 +3249,26 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.require_local_ui_request()
                 environment = str(payload.get("environment", "paper"))
                 self.send_json(test_alpaca_connection(environment))
+                return
+            if self.path == "/api/spreadsheet/row":
+                self.require_local_ui_request("operator spreadsheet requests")
+                self.send_json(
+                    build_operator_spreadsheet_daily_row(
+                        _optional_text(payload.get("date")),
+                        operator_notes=_optional_text(payload.get("operator_notes"))
+                        or "",
+                        include_daily_narrative=_payload_bool(
+                            payload.get("include_daily_narrative")
+                            if payload.get("include_daily_narrative") is not None
+                            else payload.get("includeDailyNarrative"),
+                            default=False,
+                        ),
+                    )
+                )
+                return
+            if self.path == "/api/spreadsheet/post":
+                self.require_local_ui_request("operator spreadsheet requests")
+                self.send_json(post_operator_spreadsheet_daily_row(payload))
                 return
             if self.path == "/api/live-arm":
                 self.require_local_ui_request()

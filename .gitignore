@@ -2,6 +2,7 @@
 .bot_state.json
 .bot_activity.json
 .market_data_state.json
+.operator_spreadsheet_posts.json
 logs/
 __pycache__/
 *.pyc

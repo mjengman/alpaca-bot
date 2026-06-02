@@ -73,6 +73,13 @@
                 <button id="settingsOpen" type="button" class="menu-action">
                   Broker Readiness
                 </button>
+                <button
+                  id="operatorSpreadsheetOpen"
+                  type="button"
+                  class="menu-action"
+                >
+                  Operator Spreadsheet
+                </button>
                 <button id="operatorGuideOpen" type="button" class="menu-action">
                   Operator Guide
                 </button>
@@ -1117,6 +1124,100 @@
           <div class="settings-actions">
             <button id="settingsSave" type="button" class="primary">
               Save Settings
+            </button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="operatorSpreadsheetDialog"
+      class="settings-modal spreadsheet-modal"
+      aria-labelledby="operatorSpreadsheetTitle"
+    >
+      <div class="settings-card">
+        <div class="guide-head">
+          <div>
+            <p class="eyebrow">SESSION EXPORT</p>
+            <h2 id="operatorSpreadsheetTitle">Operator Spreadsheet</h2>
+          </div>
+          <button
+            id="operatorSpreadsheetClose"
+            type="button"
+            class="log-toggle"
+            aria-label="Close operator spreadsheet"
+          >
+            Close
+          </button>
+        </div>
+
+        <div class="settings-body">
+          <p id="spreadsheetMessage" class="settings-message" role="status"></p>
+
+          <section class="settings-group operator-spreadsheet-group">
+            <div class="settings-group-head">
+              <h3>Daily Session Row</h3>
+              <div class="settings-group-actions">
+                <button
+                  id="openOperatorSpreadsheet"
+                  type="button"
+                  class="log-toggle"
+                >
+                  Open Sheet
+                </button>
+                <button
+                  id="postSpreadsheetDailyRow"
+                  type="button"
+                  class="log-toggle"
+                >
+                  Post Daily Row
+                </button>
+              </div>
+            </div>
+            <label class="settings-field">
+              <span>Sheet URL</span>
+              <input
+                id="spreadsheetUrlInput"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Operator spreadsheet URL"
+              />
+            </label>
+            <label class="settings-field">
+              <span>Post Endpoint</span>
+              <input
+                id="spreadsheetPostEndpointInput"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Operator spreadsheet post endpoint URL"
+              />
+            </label>
+            <label class="switch compact-switch spreadsheet-narrative-switch">
+              <input id="spreadsheetIncludeNarrativeInput" type="checkbox" />
+              <span class="track"></span>
+              <span class="switch-label">Include daily narrative</span>
+            </label>
+            <label class="switch compact-switch spreadsheet-narrative-switch">
+              <input id="spreadsheetAutoPostInput" type="checkbox" />
+              <span class="track"></span>
+              <span class="switch-label">Auto-post after close</span>
+            </label>
+            <label class="settings-field">
+              <span>Operator Notes</span>
+              <textarea
+                id="spreadsheetOperatorNotesInput"
+                rows="3"
+                spellcheck="true"
+                aria-label="Operator notes for the spreadsheet daily row"
+              ></textarea>
+            </label>
+          </section>
+
+          <div class="settings-actions">
+            <button id="spreadsheetSave" type="button" class="primary">
+              Save Spreadsheet Settings
             </button>
           </div>
         </div>
