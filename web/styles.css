@@ -944,16 +944,17 @@ button:disabled {
 }
 
 .price-stack-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  gap: 4px;
+  justify-items: center;
   min-width: 0;
-  padding: 3px 0;
+  padding: 5px 0 7px;
+  text-align: center;
 }
 
 .price-stack-row + .price-stack-row {
   border-top: 1px solid var(--line);
+  padding-top: 7px;
 }
 
 .price-stack-row span {
@@ -964,49 +965,51 @@ button:disabled {
 }
 
 .price-stack-row strong {
-  flex: 0 0 auto;
   overflow-wrap: normal;
-  text-align: right;
+  text-align: center;
+  font-size: 1rem;
+  line-height: 1;
   white-space: nowrap;
 }
 
+.position-risk-cell,
 .trail-compare-cell {
+  width: min(100%, 136px);
   align-content: center;
+  justify-items: stretch;
 }
 
+.position-risk-row,
 .trail-compare-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  gap: 4px;
+  justify-items: center;
   min-width: 0;
+  padding: 5px 0 7px;
+  text-align: center;
 }
 
+.position-risk-row + .position-risk-row,
+.trail-compare-row + .trail-compare-row {
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+}
+
+.position-risk-row span,
 .trail-compare-row span {
   min-width: 0;
-}
-
-.trail-compare-row strong {
-  flex: 0 0 auto;
-  overflow-wrap: normal;
-  text-align: right;
-  font-size: 0.95rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
   white-space: nowrap;
 }
 
-.trail-protection-state {
-  color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0;
-}
-
-.trail-protection-state.is-protected {
-  color: var(--green-deep);
-}
-
-.trail-protection-state.is-building {
-  color: var(--amber);
+.position-risk-row strong,
+.trail-compare-row strong {
+  overflow-wrap: normal;
+  text-align: center;
+  font-size: 1rem;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .decision-lead strong {

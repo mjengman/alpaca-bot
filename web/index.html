@@ -529,18 +529,21 @@
             <strong id="buyingPowerValue">--</strong>
           </div>
           <div class="price-stack-cell">
-            <span
-              class="has-tooltip"
-              data-tooltip="Latest visible basket prices. SOXL is the regime source; SOXS is reserved for inverse-route price telemetry."
-              >Prices</span
-            >
             <div class="price-stack">
               <div class="price-stack-row">
-                <span>SOXL</span>
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Latest SOXL price. SOXL is the regime source for Edgewalker routing."
+                  >SOXL</span
+                >
                 <strong id="sourcePriceValue">--</strong>
               </div>
               <div class="price-stack-row">
-                <span>SOXS</span>
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Latest SOXS price. SOXS is used for inverse-route execution telemetry."
+                  >SOXS</span
+                >
                 <strong id="inversePriceValue">--</strong>
               </div>
             </div>
@@ -561,13 +564,23 @@
             >
             <strong id="positionValue">Flat</strong>
           </div>
-          <div>
-            <span
-              class="has-tooltip"
-              data-tooltip="Unrealized P/L on the open basket position when Alpaca reports one."
-              >Position P/L</span
-            >
-            <strong id="positionPlValue">--</strong>
+          <div class="position-risk-cell">
+            <div class="position-risk-row">
+              <span
+                class="has-tooltip"
+                data-tooltip="Unrealized P/L on the open basket position when Alpaca reports one."
+                >Position P/L</span
+              >
+              <strong id="positionPlValue">--</strong>
+            </div>
+            <div class="position-risk-row">
+              <span
+                class="has-tooltip"
+                data-tooltip="Approximate worst-case P/L if the current bot-managed exit price fills as shown. Does not account for slippage."
+                >Max loss</span
+              >
+              <strong id="maxLossValue">--</strong>
+            </div>
           </div>
           <div class="trail-compare-cell">
             <div class="trail-compare-row">
@@ -582,13 +595,10 @@
               <span
                 class="has-tooltip"
                 data-tooltip="Current bot-managed trailing exit price for the open position, if there is one."
-                >Trail exit</span
+                >Exit price</span
               >
               <strong id="trailExitValue">--</strong>
             </div>
-            <small id="trailProtectionValue" class="trail-protection-state"
-              >--</small
-            >
           </div>
         </div>
         </div>

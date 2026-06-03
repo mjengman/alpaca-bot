@@ -156,9 +156,9 @@ const els = {
   gap: document.querySelector("#gapValue"),
   position: document.querySelector("#positionValue"),
   positionPl: document.querySelector("#positionPlValue"),
+  maxLoss: document.querySelector("#maxLossValue"),
   entryPrice: document.querySelector("#entryPriceValue"),
   trailExit: document.querySelector("#trailExitValue"),
-  trailProtection: document.querySelector("#trailProtectionValue"),
   orderSummary: document.querySelector("#orderSummaryValue"),
   orderEvents: document.querySelector("#orderEventsList"),
   error: document.querySelector("#errorText"),
@@ -958,6 +958,20 @@ function trailProtectionState(status) {
     return { label: "Trail >= entry", protected: true, active: true };
   }
   return { label: "Trail below entry", protected: false, active: true };
+}
+
+function maxLossAtTrail(status) {
+  const qty = numberOrNull(status?.position_qty);
+  const entryPrice = numberOrNull(status?.position_avg_entry_price);
+  const trailPrice = numberOrNull(status?.trailing_exit_price);
+  if (!status?.position_symbol || qty === null || qty <= 0) {
+    return null;
+  }
+  if (entryPrice === null || trailPrice === null) {
+    return null;
+  }
+  const projectedPl = (trailPrice - entryPrice) * qty;
+  return Math.min(0, projectedPl);
 }
 
 function hydrateAudioBaselines(data) {
@@ -2187,17 +2201,23 @@ function renderDecision(status) {
     status.position_unrealized_pl === null ? "--" : positionPlText;
   setTone(els.positionPl, status.position_unrealized_pl);
 
+  const maxLoss = maxLossAtTrail(status);
+  els.maxLoss.textContent = maxLoss === null ? "--" : formatMoney(maxLoss);
+  if (maxLoss === null) {
+    setTone(els.maxLoss, null);
+  } else if (maxLoss === 0) {
+    els.maxLoss.classList.remove("is-negative", "is-neutral");
+    els.maxLoss.classList.add("is-positive");
+  } else {
+    setTone(els.maxLoss, maxLoss);
+  }
+
   els.entryPrice.textContent = status.position_avg_entry_price
     ? formatPrice(status.position_avg_entry_price)
     : "--";
   els.trailExit.textContent = status.trailing_exit_price
     ? formatPrice(status.trailing_exit_price)
     : "--";
-  const protection = trailProtectionState(status);
-  els.trailProtection.textContent = protection.label;
-  els.trailProtection.className = `trail-protection-state ${
-    protection.active ? (protection.protected ? "is-protected" : "is-building") : ""
-  }`.trim();
 }
 
 function escapeHtml(value) {
