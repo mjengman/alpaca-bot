@@ -32,6 +32,7 @@ const state = {
   lastTrailingExitPrice: null,
   protectionPositionSignature: null,
   trailProtectionPlayed: false,
+  dryRun: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -238,7 +239,7 @@ function payloadFromForm() {
     adaptiveShadowEnabled: els.adaptiveShadow ? els.adaptiveShadow.checked : true,
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
-    dryRun: els.dryRun.checked,
+    dryRun: state.dryRun,
   };
 }
 
@@ -439,7 +440,10 @@ function hydrateForm(data) {
   }
   els.fast.value = data.fast_sma_minutes || "5";
   els.slow.value = data.slow_sma_minutes || "20";
-  els.dryRun.checked = Boolean(data.dry_run);
+  state.dryRun = Boolean(data.dry_run);
+  if (els.dryRun) {
+    els.dryRun.checked = state.dryRun;
+  }
   syncSizingControls();
   state.hydrated = true;
 }
@@ -1169,7 +1173,7 @@ function applySettings(settings) {
     els.liveArmStatus.classList.toggle("is-armed", state.liveTradingArmed);
   }
   renderMode(
-    els.dryRun?.checked ?? true,
+    state.dryRun,
     state.activeEnvironment,
     state.liveTradingArmed,
     state.liveCredentialsReady,
@@ -1266,7 +1270,10 @@ async function armLiveTrading() {
     });
     applySettings(settings);
     if (els.liveArmInput) els.liveArmInput.value = "";
-    setSettingsMessage("Live trading armed. Keep Dry run on until go-live.", "warning");
+    setSettingsMessage(
+      "Live trading armed. Confirm the active environment before starting the loop.",
+      "warning",
+    );
   } catch (error) {
     setSettingsMessage(error.message, "danger");
   } finally {
@@ -2507,7 +2514,7 @@ function render(data) {
   }
   syncSizingControls();
 
-  const isDryRun = state.running ? Boolean(data.dry_run) : els.dryRun.checked;
+  const isDryRun = state.running ? Boolean(data.dry_run) : state.dryRun;
   renderMode(
     isDryRun,
     state.activeEnvironment,
@@ -2646,14 +2653,17 @@ if (els.notional) {
   });
 }
 
-els.dryRun.addEventListener("change", () => {
-  renderMode(
-    els.dryRun.checked,
-    state.activeEnvironment,
-    state.liveTradingArmed,
-    state.liveCredentialsReady,
-  );
-});
+if (els.dryRun) {
+  els.dryRun.addEventListener("change", () => {
+    state.dryRun = els.dryRun.checked;
+    renderMode(
+      state.dryRun,
+      state.activeEnvironment,
+      state.liveTradingArmed,
+      state.liveCredentialsReady,
+    );
+  });
+}
 
 if (els.themeToggle) {
   els.themeToggle.addEventListener("change", toggleTheme);

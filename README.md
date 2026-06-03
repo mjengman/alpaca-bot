@@ -53,7 +53,7 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 - Market-hours guard: no fresh entry orders are submitted while Alpaca reports the market is closed
 - Market-close behavior: the repeating browser runner switches itself off after Alpaca reports the regular market is closed
 
-The bot defaults to `ALPACA_ENVIRONMENT=paper` and `DRY_RUN=true`, so it will show what it would do without placing orders. Turn off Dry run in the UI when you want the paper account to place orders.
+The bot defaults to `ALPACA_ENVIRONMENT=paper` and `DRY_RUN=false`, so the paper account places paper orders by default. Set `DRY_RUN=true` in `.env` only when you explicitly want the bot to print intended orders without sending them to Alpaca.
 
 Live trading uses separate live credentials and the live Alpaca trading URL. Real live-order submission is blocked unless `LIVE_TRADING_ARMED=true`, which the Settings modal only enables after live credentials are configured and a typed `LIVE` confirmation is entered. The same modal can disarm live trading. Keep paper trading as the default workflow until live-readiness checks are complete.
 

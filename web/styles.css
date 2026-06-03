@@ -690,45 +690,6 @@ h2 {
   opacity: 0.62;
 }
 
-.advanced-settings {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
-
-.advanced-settings summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 0.78rem;
-  font-weight: 900;
-  list-style: none;
-  text-transform: uppercase;
-}
-
-.advanced-settings summary::-webkit-details-marker {
-  display: none;
-}
-
-.advanced-settings summary::after {
-  content: "v";
-  font-size: 0.72rem;
-  transform: translateY(-1px);
-}
-
-.advanced-settings[open] summary::after {
-  content: "^";
-}
-
-.advanced-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
-
 .field input,
 .field select {
   width: 100%;
@@ -865,6 +826,11 @@ h2 {
   gap: 10px;
 }
 
+.controls-action-row {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 button {
   min-height: 44px;
   border: 1px solid transparent;
@@ -940,9 +906,12 @@ button:disabled {
 .decision-lead > div,
 .decision-grid > div {
   display: grid;
+  align-content: center;
+  justify-items: center;
   gap: 8px;
   min-width: 0;
   padding: 12px 16px;
+  text-align: center;
 }
 
 .decision-lead > div:not(:last-child),
@@ -969,6 +938,7 @@ button:disabled {
 }
 
 .price-stack {
+  width: min(100%, 136px);
   display: grid;
   gap: 0;
 }
@@ -1181,6 +1151,9 @@ button:disabled {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
 }
 
 .telemetry-panel .metric:last-child {
@@ -1194,10 +1167,13 @@ button:disabled {
 
 .bot-performance-card {
   display: grid;
+  align-content: center;
+  justify-items: center;
   gap: 8px;
   min-width: 0;
   min-height: 128px;
   padding: 14px 16px;
+  text-align: center;
 }
 
 .bot-performance-card:not(:last-child) {
@@ -1221,6 +1197,8 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+  width: 100%;
+  justify-items: center;
 }
 
 .bot-performance-stats span,

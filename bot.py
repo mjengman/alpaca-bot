@@ -344,7 +344,7 @@ class BotConfig:
             directional_cooldown_minutes=directional_cooldown_minutes,
             adaptive_shadow_enabled=env_bool("ADAPTIVE_SHADOW_ENABLED", True),
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
-            dry_run=env_bool("DRY_RUN", True),
+            dry_run=env_bool("DRY_RUN", False),
         )
 
 

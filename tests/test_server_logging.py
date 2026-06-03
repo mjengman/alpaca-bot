@@ -1103,7 +1103,7 @@ class ServerLoggingTest(unittest.TestCase):
 
             with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
                 settings = save_alpaca_environment_settings(payload)
-                parsed = config_from_payload({})
+                parsed = config_from_payload({"dryRun": True})
                 env_text = env_path.read_text()
 
         self.assertEqual(settings["data_base_url"], "https://data.alpaca.markets/v2")

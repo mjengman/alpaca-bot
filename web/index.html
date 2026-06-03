@@ -56,6 +56,20 @@
                   <span class="track"></span>
                   <span class="switch-label">Audioscape</span>
                 </label>
+                <label class="switch menu-switch">
+                  <input
+                    id="adaptiveShadowInput"
+                    type="checkbox"
+                    checked
+                    aria-label="Adaptive shadow mode"
+                  />
+                  <span class="track"></span>
+                  <span
+                    class="switch-label has-tooltip"
+                    data-tooltip="When enabled, Adaptive logs the posture it would select while manual directional modes remain in control."
+                    >Adaptive shadow</span
+                  >
+                </label>
                 <label class="switch menu-switch is-disabled">
                   <input
                     id="notificationsToggle"
@@ -342,127 +356,89 @@
               aria-label="Slow SMA"
             />
           </label>
+
+          <label class="field">
+            <span
+              class="has-tooltip"
+              data-tooltip="Balanced-mode maximum percent above the traded symbol's fast SMA where a directional bot may enter."
+              >Max ext %</span
+            >
+            <input
+              id="directionalMaxExtensionInput"
+              type="number"
+              min="0"
+              step="0.01"
+              value="0.50"
+              aria-label="Directional max extension percent"
+            />
+          </label>
+
+          <label class="field">
+            <span
+              class="has-tooltip"
+              data-tooltip="Aggressive-mode maximum percent above the traded symbol's fast SMA for strong directional chase entries."
+              >Chase ext %</span
+            >
+            <input
+              id="directionalStrongChaseInput"
+              type="number"
+              min="0"
+              step="0.01"
+              value="1.00"
+              aria-label="Directional strong chase max extension percent"
+            />
+          </label>
+
+          <label class="field">
+            <span
+              class="has-tooltip"
+              data-tooltip="Minimum SOXL trend strength required before Balanced or Aggressive directional continuation entries."
+              >Min strength</span
+            >
+            <select
+              id="directionalMinStrengthInput"
+              aria-label="Directional minimum strength"
+            >
+              <option value="WEAK">Weak</option>
+              <option value="MODERATE" selected>Moderate</option>
+              <option value="STRONG">Strong</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span
+              class="has-tooltip"
+              data-tooltip="Minutes to wait after a directional entry before allowing that same bot and symbol to enter again."
+              >Cooldown min</span
+            >
+            <input
+              id="directionalCooldownInput"
+              type="number"
+              min="0"
+              step="1"
+              value="5"
+              aria-label="Directional cooldown minutes"
+            />
+          </label>
         </div>
 
-        <details class="advanced-settings">
-          <summary
-            class="has-tooltip"
-            data-tooltip="Fine-tune directional trend thresholds without crowding the main controls."
-          >
-            Advanced directional
-          </summary>
-          <div class="advanced-grid">
-            <label class="field">
-              <span
-                class="has-tooltip"
-                data-tooltip="Balanced-mode maximum percent above the traded symbol's fast SMA where a directional bot may enter."
-                >Max ext %</span
-              >
-              <input
-                id="directionalMaxExtensionInput"
-                type="number"
-                min="0"
-                step="0.01"
-                value="0.50"
-                aria-label="Directional max extension percent"
-              />
-            </label>
-            <label class="field">
-              <span
-                class="has-tooltip"
-                data-tooltip="Aggressive-mode maximum percent above the traded symbol's fast SMA for strong directional chase entries."
-                >Chase ext %</span
-              >
-              <input
-                id="directionalStrongChaseInput"
-                type="number"
-                min="0"
-                step="0.01"
-                value="1.00"
-                aria-label="Directional strong chase max extension percent"
-              />
-            </label>
-            <label class="field">
-              <span
-                class="has-tooltip"
-                data-tooltip="Minimum SOXL trend strength required before Balanced or Aggressive directional continuation entries."
-                >Min strength</span
-              >
-              <select
-                id="directionalMinStrengthInput"
-                aria-label="Directional minimum strength"
-              >
-                <option value="WEAK">Weak</option>
-                <option value="MODERATE" selected>Moderate</option>
-                <option value="STRONG">Strong</option>
-              </select>
-            </label>
-            <label class="field">
-              <span
-                class="has-tooltip"
-                data-tooltip="Minutes to wait after a directional entry before allowing that same bot and symbol to enter again."
-                >Cooldown min</span
-              >
-              <input
-                id="directionalCooldownInput"
-                type="number"
-                min="0"
-                step="1"
-                value="5"
-                aria-label="Directional cooldown minutes"
-              />
-            </label>
-            <label class="switch compact-switch">
-              <input
-                id="adaptiveShadowInput"
-                type="checkbox"
-                checked
-                aria-label="Adaptive shadow mode"
-              />
-              <span class="track"></span>
-              <span
-                class="switch-label has-tooltip"
-                data-tooltip="When enabled, Adaptive logs the posture it would select while manual directional modes remain in control."
-                >Adaptive shadow</span
-              >
-            </label>
-          </div>
-        </details>
-
-          <div class="switch-row">
-            <label class="switch">
-              <input
-                id="dryRunInput"
-                type="checkbox"
-                checked
-                aria-label="Dry run"
-              />
-              <span class="track"></span>
-              <span
-                class="switch-label has-tooltip"
-                data-tooltip="When enabled, the bot prints intended orders without sending them to Alpaca."
-                >Dry run</span
-              >
-            </label>
-
-            <div class="button-row">
-              <button
-                id="runOnceButton"
-                type="button"
-                class="secondary has-tooltip"
-                data-tooltip="Run one evaluation cycle without starting the repeating loop."
-              >
-                Check now
-              </button>
-              <button
-                id="toggleButton"
-                type="button"
-                class="primary has-tooltip"
-                data-tooltip="Start the repeating bot loop with the current settings."
-              >
-                Turn On
-              </button>
-            </div>
+          <div class="button-row controls-action-row">
+            <button
+              id="runOnceButton"
+              type="button"
+              class="secondary has-tooltip"
+              data-tooltip="Run one evaluation cycle without starting the repeating loop."
+            >
+              Check now
+            </button>
+            <button
+              id="toggleButton"
+              type="button"
+              class="primary has-tooltip"
+              data-tooltip="Start the repeating bot loop with the current settings."
+            >
+              Turn On
+            </button>
           </div>
         </div>
       </section>
@@ -678,7 +654,7 @@
               data-tooltip="Shows whether the bot is simulating orders or sending paper orders to Alpaca."
               >Mode</span
             >
-            <strong id="modeValue">Dry run</strong>
+            <strong id="modeValue">Paper orders</strong>
           </div>
           <div class="metric">
             <span
