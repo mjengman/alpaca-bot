@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-05-30
+Last updated: 2026-06-04
 
 Go-live target: 2026-06-04
 
@@ -43,6 +43,7 @@ Strong evidence:
 
 - Consistent behavior across many sessions and market conditions
 - Replay or structured timeline confirms the causal chain
+- Research replay reproduces the broad behavioral fingerprint of known sessions
 - Lifecycle ledger, telemetry, and narrative all support the same conclusion
 - Proposed change has clear acceptance criteria and bounded risk
 
@@ -51,6 +52,40 @@ Decision standard:
 - Weak evidence can justify watching or instrumenting.
 - Moderate evidence can justify controlled tests or configuration changes.
 - Strong evidence can justify doctrine changes or live-risk-envelope updates.
+
+## Research Track
+
+Research Mode creates a parallel evidence track for comparing configurations on
+the same historical tape. It should accelerate hypothesis testing without
+becoming an optimizer.
+
+Operating rules:
+
+- Run the exact EdgeWalker bot/router/doctrine stack against historical bars.
+- Use the simulated broker only; Research Mode must not call the live or paper
+  order path.
+- Treat research rows as experiment evidence, not trading truth.
+- Compare behavioral fingerprints before trusting P/L differences.
+- Do not toggle specialist bots on/off as a shortcut; compare strategy-control
+  configurations first.
+- Do not promote a configuration from one backtest day alone.
+
+Validation standard:
+
+- Baseline replay should broadly match known sessions in trade count, dominant
+  bot, dominant exit reasons, regime-transition shape, and P/L direction.
+- Exact P/L matching is not required in V1 because live fills, spreads, partial
+  fills, and stream timing differ from bar replay.
+- Research evidence becomes stronger when replay, lifecycle logs, sheet rows,
+  and operator AARs tell the same story.
+
+Current V1 assumptions:
+
+- Historical data source: Alpaca one-minute bars.
+- Perception model: completed prior bars.
+- Fill model: `next_bar_open`.
+- Slippage: explicit basis-point field.
+- Output: research spreadsheet rows without daily narrative generation.
 
 ## Qualification Mode Rotation
 

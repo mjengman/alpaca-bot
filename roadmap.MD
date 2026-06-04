@@ -983,10 +983,12 @@ V1 scope:
    - Simulated fills use `next_bar_open`.
    - Slippage is explicit and recorded in the research row.
 
-5. [x] Post to a separate research spreadsheet endpoint.
+5. [x] Post to a separate research spreadsheet tab.
    - Research rows include backtest metadata before the daily performance and
      configuration snapshot fields.
    - Do not generate a daily narrative for research rows.
+   - Reuse the normal spreadsheet post endpoint when Apps Script routes by
+     `is_backtest=true`; keep the research endpoint override optional.
 
 6. [ ] Validate baseline fidelity before trusting experiments.
    - Replay known sessions with the production configuration.

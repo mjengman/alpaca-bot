@@ -77,6 +77,39 @@ optimization. A few concepts are now part of the project vocabulary:
 - Dynamic Controls are a future shadow-first idea for bounded runtime
   adaptation inside operator-approved rails, not autonomous strategy mutation.
 
+## Research Mode
+
+Research Mode is the in-app backtest lab. It replays historical one-minute
+SOXL/SOXS bars against the current Strategy Controls configuration while using a
+simulated broker instead of the live or paper Alpaca trading path.
+
+Use it for evidence, not doctrine:
+
+- Enable Research Mode from the App Settings menu.
+- Research controls appear inside Strategy Controls only while Research Mode is
+  enabled.
+- Choose a backtest date, data feed, fill model, slippage, and preset labels.
+- Click `Run Backtest` to replay the selected regular session and post a
+  research row if a spreadsheet endpoint is configured.
+
+V1 assumptions:
+
+- Historical bars come from Alpaca one-minute bars.
+- Strategy perception uses completed prior bars.
+- Simulated fills use `next_bar_open`.
+- Slippage is explicit and recorded in the research row.
+- Research rows do not generate a daily narrative.
+- Research runs are blocked while the live/paper loop is running.
+
+Spreadsheet setup:
+
+- `Sheet URL` and `Post Endpoint` remain the primary spreadsheet settings.
+- `Research Sheet URL` is used by the `Open Research` button.
+- `Research Endpoint Override` is optional. When blank, Research Mode reuses the
+  normal `Post Endpoint`.
+- The Apps Script should route rows with `is_backtest=true` into the research
+  tab and live/paper rows into the daily session tab.
+
 ## Useful Commands
 
 ```bash
