@@ -540,6 +540,125 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["data_feed"], "iex")
         self.assertEqual(row["operator_notes"], "round 2 conservative")
 
+    def test_operator_spreadsheet_daily_row_uses_final_environment(self) -> None:
+        lifecycle_records = [
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-04T12:45:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": MOMENTUM_BOT,
+                "order_id": "paper-buy",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-04T12:46:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": MOMENTUM_BOT,
+                "order_id": "paper-sell",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "200",
+                "reason": "trailing_stop_breached",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-04T13:40:00+00:00",
+                "symbol": "SOXL",
+                "side": "buy",
+                "bot": MOMENTUM_BOT,
+                "order_id": "live-buy",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "10",
+            },
+            {
+                "event_type": LIFECYCLE_FULL_FILL,
+                "created_at": "2026-06-04T14:00:00+00:00",
+                "symbol": "SOXL",
+                "side": "sell",
+                "bot": MOMENTUM_BOT,
+                "order_id": "live-sell",
+                "fill_delta_qty": "1",
+                "filled_avg_price": "10.08",
+                "reason": "route_invalidated_exit",
+            },
+        ]
+        log_records = [
+            {
+                "timestamp": "2026-06-04T12:44:13Z",
+                "market_open": False,
+                "portfolio_value": "92119.38",
+                "config": {
+                    "directional_mode": "ADAPTIVE",
+                    "active_environment": "paper",
+                    "dry_run": False,
+                },
+                "stream_error": True,
+                "trend_trust": {"score": 10},
+                "console_lines": ["[DATA] HEALTH bars=STALE (120s)"],
+            },
+            {
+                "timestamp": "2026-06-04T12:51:36Z",
+                "market_open": False,
+                "portfolio_value": "100",
+                "config": {
+                    "directional_mode": "ADAPTIVE",
+                    "active_environment": "live",
+                    "dry_run": False,
+                },
+                "trend_trust": {"score": 40},
+                "console_lines": [],
+            },
+            {
+                "timestamp": "2026-06-04T20:00:00Z",
+                "market_open": True,
+                "portfolio_value": "100.02",
+                "config": {
+                    "directional_mode": "ADAPTIVE",
+                    "active_environment": "live",
+                    "dry_run": False,
+                },
+                "regime_transition": {"from": "UPTREND", "to": "DOWNTREND"},
+                "trend_trust": {"score": 60},
+                "console_lines": [],
+            },
+        ]
+
+        class FakeLifecycleLedger:
+            def read_all(self) -> list[dict[str, object]]:
+                return lifecycle_records
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_root = Path(tmpdir)
+            log_path = logs_root / "edgewalker-2026-06-04.jsonl"
+            log_path.write_text(
+                "\n".join(json.dumps(record) for record in log_records),
+                encoding="utf-8",
+            )
+            with patch("server.LOGS_ROOT", logs_root), patch(
+                "server.LifecycleLedger",
+                FakeLifecycleLedger,
+            ):
+                payload = build_operator_spreadsheet_daily_row("2026-06-04")
+
+        row = payload["row"]
+
+        self.assertEqual(row["starting_account_value"], 100.0)
+        self.assertEqual(row["ending_account_value"], 100.02)
+        self.assertEqual(row["realized_pl_dollars"], 0.08)
+        self.assertEqual(row["account_change_percent"], 0.08)
+        self.assertEqual(row["closed_trades"], 1)
+        self.assertEqual(row["route_invalidation_exits"], 1)
+        self.assertEqual(row["route_invalidation_pl"], 0.08)
+        self.assertEqual(row["trailing_stop_exits"], 0)
+        self.assertEqual(row["cycles"], 2)
+        self.assertEqual(row["stale_cycles"], 0)
+        self.assertEqual(row["stream_error_cycles"], 0)
+        self.assertEqual(row["session_trend_trust_avg"], 50.0)
+        self.assertEqual(row["active_environment"], "live")
+
     def test_order_visibility_summary_lists_pending_and_recent_events(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
         pending_orders = {

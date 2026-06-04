@@ -1856,6 +1856,98 @@ def _load_log_records(log_path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _parse_datetime_text(raw: Any, *, default_tz: ZoneInfo | timezone) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=default_tz)
+    return parsed
+
+
+def _log_record_timestamp(record: dict[str, Any]) -> datetime | None:
+    timestamp = _parse_datetime_text(record.get("timestamp"), default_tz=timezone.utc)
+    if timestamp is not None:
+        return timestamp
+    created_at = _record_created_at(record)
+    if created_at is not None:
+        return created_at
+    return _parse_datetime_text(record.get("checked_at"), default_tz=NY_TZ)
+
+
+def _record_active_environment(record: dict[str, Any]) -> str | None:
+    config = record.get("config")
+    raw = None
+    if isinstance(config, dict):
+        raw = config.get("active_environment")
+    if raw is None:
+        raw = record.get("active_environment")
+    value = _optional_text(raw)
+    if not value:
+        return None
+    value = value.lower()
+    if value not in {"paper", "live", "research"}:
+        return None
+    return value
+
+
+def _records_for_export_environment(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None]:
+    export_environment = next(
+        (
+            environment
+            for record in reversed(records)
+            if (environment := _record_active_environment(record))
+        ),
+        None,
+    )
+    if not export_environment:
+        return records, None
+
+    filtered = [
+        record
+        for record in records
+        if (environment := _record_active_environment(record)) is None
+        or environment == export_environment
+    ]
+    return filtered or records, export_environment
+
+
+def _records_time_window(
+    records: list[dict[str, Any]],
+) -> tuple[datetime | None, datetime | None]:
+    timestamps = [
+        timestamp
+        for record in records
+        if (timestamp := _log_record_timestamp(record)) is not None
+    ]
+    if not timestamps:
+        return None, None
+    return min(timestamps), max(timestamps)
+
+
+def _lifecycle_records_within_window(
+    lifecycle_records: list[dict[str, Any]],
+    start: datetime | None,
+    end: datetime | None,
+) -> list[dict[str, Any]]:
+    if start is None or end is None:
+        return lifecycle_records
+    end_with_grace = end + timedelta(minutes=10)
+    filtered = []
+    for record in lifecycle_records:
+        created_at = _record_created_at(record)
+        if created_at is None:
+            continue
+        if start <= created_at <= end_with_grace:
+            filtered.append(record)
+    return filtered
+
+
 def _log_has_market_open(log_path: Path) -> bool:
     return any(bool(record.get("market_open")) for record in _load_log_records(log_path))
 
@@ -2502,17 +2594,27 @@ def build_operator_spreadsheet_daily_row(
     records = _load_log_records(log_path)
     if not records:
         raise BotError(f"Session log for {target_date} is empty.")
+    export_records, export_environment = _records_for_export_environment(records)
+    export_start, export_end = _records_time_window(export_records)
 
-    lifecycle_records = LifecycleLedger().read_all()
+    lifecycle_records = _lifecycle_records_within_window(
+        LifecycleLedger().read_all(),
+        export_start,
+        export_end,
+    )
     performance = lifecycle_performance_summary(
         lifecycle_records,
         datetime.fromisoformat(target_date).replace(tzinfo=NY_TZ),
     )
-    session_metrics = _session_metrics_summary(records, lifecycle_records, target_date)
+    session_metrics = _session_metrics_summary(
+        export_records,
+        lifecycle_records,
+        target_date,
+    )
     realized_trades = _realized_trades_for_date(lifecycle_records, target_date)
 
-    first = records[0]
-    last = records[-1]
+    first = export_records[0]
+    last = export_records[-1]
     last_config = last.get("config") if isinstance(last.get("config"), dict) else {}
     starting_account = _decimal_from_value(
         first.get("portfolio_value") or first.get("account_value")
@@ -2576,11 +2678,11 @@ def build_operator_spreadsheet_daily_row(
         "regime_transitions": int(
             session_metrics.get("regime_transition_count") or 0
         ),
-        "cycles": len(records),
+        "cycles": len(export_records),
         "stale_cycles": int(session_metrics.get("stale_bar_cycles") or 0),
         "stream_error_cycles": sum(
             1
-            for record in records
+            for record in export_records
             if record.get("data_status") == "ERROR" or record.get("stream_error")
         ),
         "session_trend_trust_avg": _rounded_number(
@@ -2673,7 +2775,7 @@ def build_operator_spreadsheet_daily_row(
         "active_environment": _config_snapshot_text(
             last_config,
             "active_environment",
-            current_alpaca_environment(),
+            export_environment or current_alpaca_environment(),
         ),
         "data_feed": _config_snapshot_text(last_config, "data_feed"),
         "operator_notes": operator_notes,
