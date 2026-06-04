@@ -944,3 +944,56 @@ qualification evidence exists.
   open, posture telemetry often reflects paused entry-posture judgment.
 - Continue recording manual operator notes, daily logs, lifecycle records, and
   AAR updates.
+
+## Research Mode / Backtest Lab
+
+Objective: create a parallel research track that can replay historical sessions
+against the current Strategy Controls configuration without touching the live or
+paper broker path.
+
+Guiding rule:
+
+```text
+Research Mode informs tuning.
+It does not dictate live doctrine by itself.
+```
+
+V1 scope:
+
+1. [x] Use the real EdgeWalker strategy stack where practical.
+   - Replace live streaming data with historical one-minute bars.
+   - Replace Alpaca trading with a simulated broker.
+   - Keep the same bots, router, lifecycle doctrine, and strategy controls.
+
+2. [x] Keep Research Mode visually separate from live operation.
+   - Add a Research Mode toggle in App Settings.
+   - Show replay controls inside Strategy Controls only while Research Mode is
+     enabled.
+   - Keep live/paper action buttons hidden while Research Mode controls are
+     active.
+
+3. [x] Preserve a hard safety invariant.
+   - Research runs must be incapable of calling the live broker order path.
+   - The simulated broker satisfies the runtime interface but never submits
+     real orders.
+
+4. [x] Use honest V1 replay assumptions.
+   - Historical bars come from Alpaca one-minute bars.
+   - Strategy perception uses completed prior bars.
+   - Simulated fills use `next_bar_open`.
+   - Slippage is explicit and recorded in the research row.
+
+5. [x] Post to a separate research spreadsheet endpoint.
+   - Research rows include backtest metadata before the daily performance and
+     configuration snapshot fields.
+   - Do not generate a daily narrative for research rows.
+
+6. [ ] Validate baseline fidelity before trusting experiments.
+   - Replay known sessions with the production configuration.
+   - Compare broad behavioral fingerprint: trade count, dominant bot,
+     dominant exit reasons, regime-transition shape, and P/L direction.
+   - Treat exact P/L matching as a later goal, not a V1 requirement.
+
+7. [ ] Add MFE/MAE telemetry once baseline replay is usable.
+   - The central research question is whether entries find profitable
+     persistence, not merely whether regimes are real.

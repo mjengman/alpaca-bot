@@ -33,6 +33,8 @@ const state = {
   protectionPositionSignature: null,
   trailProtectionPlayed: false,
   dryRun: false,
+  researchModeEnabled: false,
+  researchBusy: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -94,12 +96,17 @@ const els = {
   liveDisarmButton: document.querySelector("#liveDisarmButton"),
   spreadsheetUrl: document.querySelector("#spreadsheetUrlInput"),
   spreadsheetPostEndpoint: document.querySelector("#spreadsheetPostEndpointInput"),
+  researchSpreadsheetUrl: document.querySelector("#researchSpreadsheetUrlInput"),
+  researchSpreadsheetPostEndpoint: document.querySelector(
+    "#researchSpreadsheetPostEndpointInput",
+  ),
   spreadsheetIncludeNarrative: document.querySelector(
     "#spreadsheetIncludeNarrativeInput",
   ),
   spreadsheetAutoPost: document.querySelector("#spreadsheetAutoPostInput"),
   spreadsheetOperatorNotes: document.querySelector("#spreadsheetOperatorNotesInput"),
   openOperatorSpreadsheet: document.querySelector("#openOperatorSpreadsheet"),
+  openResearchSpreadsheet: document.querySelector("#openResearchSpreadsheet"),
   postSpreadsheetDailyRow: document.querySelector("#postSpreadsheetDailyRow"),
   operatorGuideOpen: document.querySelector("#operatorGuideOpen"),
   operatorGuideDialog: document.querySelector("#operatorGuideDialog"),
@@ -107,6 +114,7 @@ const els = {
   themeToggle: document.querySelector("#themeToggle"),
   audioscapeToggle: document.querySelector("#audioscapeToggle"),
   notificationsToggle: document.querySelector("#notificationsToggle"),
+  researchMode: document.querySelector("#researchModeInput"),
   statusPill: document.querySelector("#statusPill"),
   statusText: document.querySelector("#statusText"),
   symbol: document.querySelector("#symbolInput"),
@@ -132,6 +140,16 @@ const els = {
   fast: document.querySelector("#fastInput"),
   slow: document.querySelector("#slowInput"),
   dryRun: document.querySelector("#dryRunInput"),
+  controlsActionRow: document.querySelector("#controlsActionRow"),
+  researchControls: document.querySelector("#researchControls"),
+  researchMessage: document.querySelector("#researchMessage"),
+  backtestDate: document.querySelector("#backtestDateInput"),
+  backtestFeed: document.querySelector("#backtestFeedInput"),
+  backtestFillModel: document.querySelector("#backtestFillModelInput"),
+  backtestSlippage: document.querySelector("#backtestSlippageInput"),
+  backtestPresetName: document.querySelector("#backtestPresetNameInput"),
+  backtestPresetVersion: document.querySelector("#backtestPresetVersionInput"),
+  runBacktest: document.querySelector("#runBacktestButton"),
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
   mode: document.querySelector("#modeValue"),
@@ -1129,6 +1147,28 @@ function setSpreadsheetMessage(message, tone = "neutral") {
   }
 }
 
+function setResearchMessage(message, tone = "neutral") {
+  if (!els.researchMessage) return;
+  els.researchMessage.textContent = message || "";
+  els.researchMessage.classList.remove("is-success", "is-danger", "is-warning");
+  if (tone !== "neutral") {
+    els.researchMessage.classList.add(`is-${tone}`);
+  }
+}
+
+function renderResearchMode() {
+  if (els.researchMode) {
+    els.researchMode.checked = state.researchModeEnabled;
+  }
+  if (els.researchControls) {
+    els.researchControls.hidden = !state.researchModeEnabled;
+  }
+  if (els.controlsActionRow) {
+    els.controlsActionRow.hidden = state.researchModeEnabled;
+  }
+  document.body.classList.toggle("research-mode", state.researchModeEnabled);
+}
+
 function applySettings(settings) {
   if (!settings) return;
   state.activeEnvironment = settings.active_environment || "paper";
@@ -1159,6 +1199,18 @@ function applySettings(settings) {
     els.spreadsheetPostEndpoint.value =
       settings.operator_spreadsheet?.post_endpoint_url || "";
   }
+  if (els.researchSpreadsheetUrl) {
+    els.researchSpreadsheetUrl.value =
+      settings.operator_spreadsheet?.research_spreadsheet_url || "";
+  }
+  if (els.researchSpreadsheetPostEndpoint) {
+    els.researchSpreadsheetPostEndpoint.value =
+      settings.operator_spreadsheet?.research_post_endpoint_url || "";
+  }
+  state.researchModeEnabled = Boolean(
+    settings.operator_spreadsheet?.research_mode_enabled,
+  );
+  renderResearchMode();
   if (els.spreadsheetIncludeNarrative) {
     els.spreadsheetIncludeNarrative.checked =
       settings.operator_spreadsheet?.include_daily_narrative !== false;
@@ -1218,6 +1270,9 @@ function settingsPayloadFromForm() {
     operator_spreadsheet: {
       spreadsheet_url: els.spreadsheetUrl?.value || "",
       post_endpoint_url: els.spreadsheetPostEndpoint?.value || "",
+      research_spreadsheet_url: els.researchSpreadsheetUrl?.value || "",
+      research_post_endpoint_url: els.researchSpreadsheetPostEndpoint?.value || "",
+      research_mode_enabled: Boolean(els.researchMode?.checked),
       auto_post_enabled: Boolean(els.spreadsheetAutoPost?.checked),
       include_daily_narrative: Boolean(els.spreadsheetIncludeNarrative?.checked),
     },
@@ -1321,11 +1376,100 @@ function openOperatorSpreadsheet() {
   window.open(url, "_blank", "noopener");
 }
 
+function openResearchSpreadsheet() {
+  const url = (els.researchSpreadsheetUrl?.value || "").trim();
+  if (!url) {
+    setSpreadsheetMessage("Add a Research Spreadsheet URL first.", "warning");
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
 function saveSpreadsheetSettings() {
   return saveSettings({
     messageSetter: setSpreadsheetMessage,
     button: els.spreadsheetSave,
   });
+}
+
+function defaultBacktestDate() {
+  const now = new Date();
+  const candidate = new Date(now);
+  if (candidate.getHours() < 16) {
+    candidate.setDate(candidate.getDate() - 1);
+  }
+  while (candidate.getDay() === 0 || candidate.getDay() === 6) {
+    candidate.setDate(candidate.getDate() - 1);
+  }
+  const month = String(candidate.getMonth() + 1).padStart(2, "0");
+  const day = String(candidate.getDate()).padStart(2, "0");
+  return `${candidate.getFullYear()}-${month}-${day}`;
+}
+
+function ensureBacktestDefaults() {
+  if (els.backtestDate && !els.backtestDate.value) {
+    els.backtestDate.value = defaultBacktestDate();
+  }
+  if (els.backtestFeed && !els.backtestFeed.value) {
+    els.backtestFeed.value = els.dataFeed?.value || "iex";
+  }
+  if (els.backtestFillModel && !els.backtestFillModel.value) {
+    els.backtestFillModel.value = "next_bar_open";
+  }
+  if (els.backtestPresetName && !els.backtestPresetName.value) {
+    els.backtestPresetName.value = "Current Controls";
+  }
+  if (els.backtestPresetVersion && !els.backtestPresetVersion.value) {
+    els.backtestPresetVersion.value = "v1";
+  }
+}
+
+async function runBacktest() {
+  ensureBacktestDefaults();
+  if (!els.backtestDate?.value) {
+    setResearchMessage("Choose a backtest date first.", "warning");
+    return;
+  }
+  state.researchBusy = true;
+  if (els.runBacktest) {
+    els.runBacktest.disabled = true;
+  }
+  setResearchMessage("Saving settings...");
+  try {
+    await saveSettings({
+      rethrow: true,
+      messageSetter: setResearchMessage,
+      button: null,
+    });
+    setResearchMessage("Running historical replay...");
+    const payload = {
+      ...payloadFromForm(),
+      backtest_date: els.backtestDate.value,
+      data_feed: els.backtestFeed?.value || els.dataFeed?.value || "iex",
+      fill_model: els.backtestFillModel?.value || "next_bar_open",
+      slippage_bps: els.backtestSlippage?.value || "0",
+      preset_name: els.backtestPresetName?.value || "Current Controls",
+      preset_version: els.backtestPresetVersion?.value || "v1",
+      research_post_endpoint_url:
+        els.researchSpreadsheetPostEndpoint?.value || "",
+    };
+    const result = await request("/api/research/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const postedText = result.posted ? " Posted to research sheet." : "";
+    setResearchMessage(
+      `Backtest complete: ${formatMoney(result.row?.realized_pl_dollars || 0)} across ${result.trade_count || 0} trades.${postedText}`,
+      "success",
+    );
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+  } finally {
+    state.researchBusy = false;
+    if (els.runBacktest) {
+      els.runBacktest.disabled = false;
+    }
+  }
 }
 
 async function postSpreadsheetDailyRow() {
@@ -1405,6 +1549,9 @@ function setupOperatorSpreadsheetModal() {
   if (els.openOperatorSpreadsheet) {
     els.openOperatorSpreadsheet.addEventListener("click", openOperatorSpreadsheet);
   }
+  if (els.openResearchSpreadsheet) {
+    els.openResearchSpreadsheet.addEventListener("click", openResearchSpreadsheet);
+  }
   if (els.postSpreadsheetDailyRow) {
     els.postSpreadsheetDailyRow.addEventListener("click", postSpreadsheetDailyRow);
   }
@@ -1455,6 +1602,16 @@ function setupSettingsModal() {
   if (els.liveDisarmButton) {
     els.liveDisarmButton.addEventListener("click", disarmLiveTrading);
   }
+}
+
+async function persistResearchModeToggle() {
+  state.researchModeEnabled = Boolean(els.researchMode?.checked);
+  renderResearchMode();
+  ensureBacktestDefaults();
+  await saveSettings({
+    messageSetter: () => {},
+    button: null,
+  });
 }
 
 function saveLogCollapsed(collapsed) {
@@ -2527,6 +2684,9 @@ function render(data) {
     input.disabled = settingsLocked;
     input.closest(".switch")?.classList.toggle("is-disabled", settingsLocked);
   });
+  if (els.runBacktest) {
+    els.runBacktest.disabled = state.running || state.busy || state.researchBusy;
+  }
   if (els.adaptiveShadowLabel) {
     els.adaptiveShadowLabel.dataset.tooltip = settingsLocked
       ? "Stop Edgewalker before changing Adaptive shadow telemetry."
@@ -2642,6 +2802,10 @@ els.runOnce.addEventListener("click", () => {
   postAction("/api/run-once");
 });
 
+if (els.runBacktest) {
+  els.runBacktest.addEventListener("click", runBacktest);
+}
+
 if (els.symbol) {
   els.symbol.addEventListener("input", () => {
     els.symbol.value = els.symbol.value.toUpperCase();
@@ -2685,6 +2849,12 @@ if (els.dryRun) {
   });
 }
 
+if (els.researchMode) {
+  els.researchMode.addEventListener("change", () => {
+    persistResearchModeToggle();
+  });
+}
+
 if (els.themeToggle) {
   els.themeToggle.addEventListener("change", toggleTheme);
 }
@@ -2699,4 +2869,11 @@ setupOperatorGuide();
 setupCollapsibleSections();
 setupActivityLog();
 setupTooltips();
+ensureBacktestDefaults();
+renderResearchMode();
+loadSettings().catch((error) => {
+  if (els.error) {
+    els.error.textContent = error.message;
+  }
+});
 startRefreshLoop();

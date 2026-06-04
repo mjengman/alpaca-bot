@@ -70,6 +70,19 @@
                     >Adaptive shadow</span
                   >
                 </label>
+                <label class="switch menu-switch">
+                  <input
+                    id="researchModeInput"
+                    type="checkbox"
+                    aria-label="Research mode"
+                  />
+                  <span class="track"></span>
+                  <span
+                    class="switch-label has-tooltip"
+                    data-tooltip="Reveal historical replay controls and route runs through the simulated research engine."
+                    >Research mode</span
+                  >
+                </label>
                 <label class="switch menu-switch is-disabled">
                   <input
                     id="notificationsToggle"
@@ -422,7 +435,105 @@
           </label>
         </div>
 
-          <div class="button-row controls-action-row">
+          <div id="researchControls" class="research-controls" hidden>
+            <div class="research-controls-head">
+              <div>
+                <p class="eyebrow">RESEARCH MODE</p>
+                <strong>Historical Replay</strong>
+              </div>
+              <p id="researchMessage" class="research-message" role="status"></p>
+            </div>
+            <div class="control-grid research-control-grid">
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Regular-session date to replay from Alpaca historical one-minute bars."
+                  >Backtest date</span
+                >
+                <input
+                  id="backtestDateInput"
+                  type="date"
+                  aria-label="Backtest date"
+                />
+              </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Historical data feed used for the replay request."
+                  >Data feed</span
+                >
+                <select id="backtestFeedInput" aria-label="Backtest data feed">
+                  <option value="iex" selected>IEX</option>
+                  <option value="sip">SIP</option>
+                </select>
+              </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="V1 uses the next bar open after the strategy decision for simulated fills."
+                  >Fill model</span
+                >
+                <select id="backtestFillModelInput" aria-label="Backtest fill model">
+                  <option value="next_bar_open" selected>Next bar open</option>
+                </select>
+              </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Optional execution penalty added to buys and sells in basis points."
+                  >Slippage bps</span
+                >
+                <input
+                  id="backtestSlippageInput"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value="0"
+                  aria-label="Backtest slippage basis points"
+                />
+              </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Label for this configuration in the research spreadsheet."
+                  >Preset name</span
+                >
+                <input
+                  id="backtestPresetNameInput"
+                  type="text"
+                  value="Current Controls"
+                  autocomplete="off"
+                  aria-label="Backtest preset name"
+                />
+              </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Optional version label for this research preset."
+                  >Preset version</span
+                >
+                <input
+                  id="backtestPresetVersionInput"
+                  type="text"
+                  value="v1"
+                  autocomplete="off"
+                  aria-label="Backtest preset version"
+                />
+              </label>
+            </div>
+            <div class="button-row research-action-row">
+              <button
+                id="runBacktestButton"
+                type="button"
+                class="primary has-tooltip"
+                data-tooltip="Replay the selected day with current controls and post the row to the research endpoint if configured."
+              >
+                Run Backtest
+              </button>
+            </div>
+          </div>
+
+          <div id="controlsActionRow" class="button-row controls-action-row">
             <button
               id="runOnceButton"
               type="button"
@@ -1166,6 +1277,13 @@
                   Open Sheet
                 </button>
                 <button
+                  id="openResearchSpreadsheet"
+                  type="button"
+                  class="log-toggle"
+                >
+                  Open Research
+                </button>
+                <button
                   id="postSpreadsheetDailyRow"
                   type="button"
                   class="log-toggle"
@@ -1192,6 +1310,27 @@
                 autocomplete="off"
                 spellcheck="false"
                 aria-label="Operator spreadsheet post endpoint URL"
+              />
+            </label>
+            <label class="settings-field">
+              <span>Research Sheet URL</span>
+              <input
+                id="researchSpreadsheetUrlInput"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Research spreadsheet URL"
+              />
+            </label>
+            <label class="settings-field">
+              <span>Research Endpoint Override</span>
+              <input
+                id="researchSpreadsheetPostEndpointInput"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Optional; uses Post Endpoint when blank"
+                aria-label="Optional research spreadsheet post endpoint override"
               />
             </label>
             <label class="switch compact-switch spreadsheet-narrative-switch">

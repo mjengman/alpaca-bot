@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +56,11 @@ from bot import (
     parse_clock_time,
 )
 from market_data import StreamingMarketDataService
+from research import (
+    RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
+    ResearchRunRequest,
+    run_research_backtest,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -126,6 +132,19 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "data_feed",
     "operator_notes",
     "daily_narrative",
+]
+RESEARCH_SPREADSHEET_COLUMNS = [
+    "is_backtest",
+    "run_id",
+    "run_timestamp",
+    "backtest_date",
+    "fill_model",
+    "slippage_bps",
+    "preset_name",
+    "preset_version",
+    "entry_regime_age_median",
+    "early_entry_count",
+    *OPERATOR_SPREADSHEET_COLUMNS,
 ]
 ALLOWED_UI_ORIGINS = {
     f"http://{HOST}:{PORT}",
@@ -1211,6 +1230,21 @@ def operator_spreadsheet_settings(values: dict[str, str] | None = None) -> dict[
     return {
         "spreadsheet_url": _env_first(values, "OPERATOR_SPREADSHEET_URL"),
         "post_endpoint_url": _env_first(values, "OPERATOR_SPREADSHEET_POST_URL"),
+        "research_spreadsheet_url": _env_first(
+            values,
+            "OPERATOR_RESEARCH_SPREADSHEET_URL",
+        ),
+        "research_post_endpoint_url": _env_first(
+            values,
+            "OPERATOR_RESEARCH_SPREADSHEET_POST_URL",
+        ),
+        "research_mode_enabled": _env_bool_text(
+            _env_first(
+                values,
+                "EDGEWALKER_RESEARCH_MODE",
+                default="false",
+            )
+        ),
         "auto_post_enabled": _env_bool_text(
             _env_first(
                 values,
@@ -1317,6 +1351,20 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
     updates["OPERATOR_SPREADSHEET_POST_URL"] = _optional_text(
         spreadsheet.get("post_endpoint_url") or spreadsheet.get("postEndpointUrl")
     ) or ""
+    updates["OPERATOR_RESEARCH_SPREADSHEET_URL"] = _optional_text(
+        spreadsheet.get("research_spreadsheet_url")
+        or spreadsheet.get("researchSpreadsheetUrl")
+    ) or ""
+    updates["OPERATOR_RESEARCH_SPREADSHEET_POST_URL"] = _optional_text(
+        spreadsheet.get("research_post_endpoint_url")
+        or spreadsheet.get("researchPostEndpointUrl")
+    ) or ""
+    research_mode_enabled = spreadsheet.get("research_mode_enabled")
+    if research_mode_enabled is None:
+        research_mode_enabled = spreadsheet.get("researchModeEnabled")
+    updates["EDGEWALKER_RESEARCH_MODE"] = (
+        "true" if _payload_bool(research_mode_enabled, default=False) else "false"
+    )
     auto_post_enabled = spreadsheet.get("auto_post_enabled")
     if auto_post_enabled is None:
         auto_post_enabled = spreadsheet.get("autoPostEnabled")
@@ -2706,6 +2754,149 @@ def post_operator_spreadsheet_daily_row(payload: dict[str, Any]) -> dict[str, An
     }
 
 
+def _post_json_to_spreadsheet_endpoint(
+    endpoint_url: str,
+    row: dict[str, Any],
+) -> tuple[int, Any]:
+    body = json.dumps(row).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint_url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+            status_code = response.status
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        raise BotError(
+            f"Spreadsheet post failed with HTTP {exc.code}: {response_body[:240]}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise BotError(f"Spreadsheet post failed: {exc.reason}") from exc
+
+    try:
+        parsed_response = json.loads(response_body)
+    except json.JSONDecodeError as exc:
+        raise BotError(
+            "Spreadsheet endpoint did not return JSON. "
+            f"Response started with: {response_body[:240]}"
+        ) from exc
+
+    if isinstance(parsed_response, dict) and parsed_response.get("status") == "error":
+        raise BotError(
+            f"Spreadsheet endpoint error: {parsed_response.get('message') or 'unknown'}"
+        )
+
+    return status_code, parsed_response
+
+
+def config_from_research_payload(payload: dict[str, Any]) -> BotConfig:
+    config_payload = dict(payload)
+    config_payload["dryRun"] = True
+    config = config_from_payload(config_payload)
+    data_feed = str(
+        payload.get("data_feed") or payload.get("dataFeed") or config.data_feed
+    ).strip()
+    if not data_feed:
+        data_feed = "iex"
+    return replace(
+        config,
+        dry_run=False,
+        data_feed=data_feed,
+        trading_base_url="research://simulated-broker",
+    )
+
+
+def research_request_from_payload(payload: dict[str, Any], config: BotConfig) -> ResearchRunRequest:
+    raw_date = _optional_text(
+        payload.get("backtest_date") or payload.get("backtestDate") or payload.get("date")
+    )
+    if not raw_date:
+        raise BotError("Choose a backtest date first.")
+    fill_model = _optional_text(
+        payload.get("fill_model") or payload.get("fillModel")
+    ) or RESEARCH_FILL_MODEL_NEXT_BAR_OPEN
+    slippage_raw = payload.get("slippage_bps")
+    if slippage_raw is None:
+        slippage_raw = payload.get("slippageBps")
+    try:
+        slippage_bps = Decimal(str(slippage_raw if slippage_raw not in (None, "") else 0))
+    except InvalidOperation as exc:
+        raise BotError("slippage_bps must be a number.") from exc
+    if slippage_bps < 0:
+        raise BotError("slippage_bps must be at least 0.")
+
+    starting_raw = payload.get("starting_account_value")
+    if starting_raw is None:
+        starting_raw = payload.get("startingAccountValue")
+    try:
+        starting_account_value = Decimal(
+            str(starting_raw if starting_raw not in (None, "") else 100000)
+        )
+    except InvalidOperation as exc:
+        raise BotError("starting_account_value must be a number.") from exc
+    if starting_account_value <= 0:
+        raise BotError("starting_account_value must be greater than 0.")
+
+    return ResearchRunRequest(
+        date=raw_date,
+        data_feed=config.data_feed,
+        fill_model=fill_model,
+        slippage_bps=slippage_bps,
+        preset_name=_optional_text(payload.get("preset_name") or payload.get("presetName"))
+        or "Current Controls",
+        preset_version=_optional_text(
+            payload.get("preset_version") or payload.get("presetVersion")
+        )
+        or "v1",
+        starting_account_value=starting_account_value,
+    )
+
+
+def run_research_backtest_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    config = config_from_research_payload(payload)
+    request = research_request_from_payload(payload, config)
+    result = run_research_backtest(config, request)
+    row = {
+        column: result["row"].get(column, "")
+        for column in RESEARCH_SPREADSHEET_COLUMNS
+    }
+    spreadsheet_settings = operator_spreadsheet_settings()
+    endpoint_url = _optional_text(
+        payload.get("research_post_endpoint_url")
+        or payload.get("researchPostEndpointUrl")
+        or payload.get("post_endpoint_url")
+        or payload.get("postEndpointUrl")
+        or spreadsheet_settings.get("research_post_endpoint_url")
+        or spreadsheet_settings.get("post_endpoint_url")
+    )
+    post_result: dict[str, Any] | None = None
+    if endpoint_url:
+        status_code, parsed_response = _post_json_to_spreadsheet_endpoint(
+            endpoint_url,
+            row,
+        )
+        post_result = {
+            "status": "posted",
+            "http_status": status_code,
+            "endpoint_response": parsed_response,
+        }
+
+    return {
+        "status": result["status"],
+        "posted": post_result,
+        "columns": RESEARCH_SPREADSHEET_COLUMNS,
+        "row": row,
+        "date": result["date"],
+        "performance": result["performance"],
+        "trade_count": len(result["trades"]),
+        "cycles": len(result["records"]),
+    }
+
+
 def _extract_session_context(
     records: list[dict[str, Any]],
     log_date: str,
@@ -3695,6 +3886,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.require_local_ui_request("operator spreadsheet requests")
                 self.send_json(post_operator_spreadsheet_daily_row(payload))
                 return
+            if self.path == "/api/research/run":
+                self.require_local_ui_request("research backtest requests")
+                if self.runner.snapshot().running:
+                    raise BotError("Stop the live/paper loop before running research.")
+                self.send_json(run_research_backtest_from_payload(payload))
+                return
             if self.path == "/api/live-arm":
                 self.require_local_ui_request()
                 confirmation = str(payload.get("confirmation", ""))
@@ -3778,6 +3975,9 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, status=400)
         except json.JSONDecodeError:
             self.send_json({"error": "Invalid JSON"}, status=400)
+        except Exception as exc:
+            traceback.print_exc()
+            self.send_json({"error": f"Internal server error: {exc}"}, status=500)
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
