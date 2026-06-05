@@ -90,6 +90,7 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "closed_trades",
     "wins",
     "losses",
+    "win_rate",
     "momentum_pl",
     "chop_pl",
     "inverse_pl",
@@ -2636,6 +2637,14 @@ def build_operator_spreadsheet_daily_row(
         result_status = "RED"
     else:
         result_status = "FLAT"
+    trade_count = int(performance.get("session_trade_count") or 0)
+    wins = int(performance.get("session_wins") or 0)
+    losses = int(performance.get("session_losses") or 0)
+    win_rate = (
+        Decimal(wins) / Decimal(trade_count) * Decimal("100")
+        if trade_count > 0
+        else Decimal("0")
+    )
 
     bot_pl = _bot_pl_map(performance)
     exit_reason_counts: dict[str, int] = {}
@@ -2667,9 +2676,10 @@ def build_operator_spreadsheet_daily_row(
         "realized_pl_dollars": _rounded_number(realized_pl),
         "account_change_percent": _rounded_number(account_change_percent),
         "account_result_status": result_status,
-        "closed_trades": int(performance.get("session_trade_count") or 0),
-        "wins": int(performance.get("session_wins") or 0),
-        "losses": int(performance.get("session_losses") or 0),
+        "closed_trades": trade_count,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": _rounded_number(win_rate),
         "momentum_pl": _rounded_number(bot_pl.get(MOMENTUM_BOT)),
         "chop_pl": _rounded_number(bot_pl.get(CHOP_BOT)),
         "inverse_pl": _rounded_number(bot_pl.get(INVERSE_BOT)),

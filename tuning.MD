@@ -1,13 +1,13 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-06-04
+Last updated: 2026-06-05
 
-Go-live target: 2026-06-04
+Initial go-live: 2026-06-04
 
 This file turns after-action reviews into practical tuning candidates. The goal
 is not to optimize from one day of evidence. The goal is to preserve behavioral
 coherence, improve transparency, and identify the highest-value upgrades to
-consider before live trading.
+consider before and after initial live trading.
 
 ## Operating Bias
 
@@ -86,6 +86,106 @@ Current V1 assumptions:
 - Fill model: `next_bar_open`.
 - Slippage: explicit basis-point field.
 - Output: research spreadsheet rows without daily narrative generation.
+- Research rows should be compared to live rows by behavioral fingerprint
+  before P/L, especially when live `POLL_SEC` is below `60` and replay cadence
+  remains one-minute bars.
+- Research rows should capture an explicit starting account so P/L, bot P/L,
+  and exit-reason P/L can be scaled consistently against live rows.
+
+## Environmental Classification Research
+
+Working concept:
+
+```text
+Regime = local direction
+Environment = reward structure around regimes
+Posture = willingness to participate
+Config = how the system expresses that willingness
+```
+
+The regime engine should remain the first sensor. It answers whether the local
+structure is UPTREND, DOWNTREND, or SIDEWAYS. Environmental classification is a
+layer above that sensor. It should interpret regime history, exit behavior,
+post-entry movement, and data quality to answer a different question:
+
+```text
+Is this market currently rewarding continuation, reversal, or patience?
+```
+
+Do not start by inventing hard labels like bull, bear, or sideways. Build
+fingerprints first, collect them across live and research sessions, then name
+recurring clusters only after the data earns those names.
+
+Candidate fingerprint fields:
+
+- `regime_transitions`
+- `avg_regime_duration_minutes`
+- `median_regime_duration_minutes`
+- `max_regime_duration_minutes`
+- `transitions_per_hour`
+- `session_trend_trust_avg`
+- `route_invalidation_rate`
+- `route_invalidation_pl`
+- `early_entry_percent`
+- `regime_age_at_entry_avg`
+- `avg_mfe_percent`
+- `avg_mae_percent`
+- `momentum_avg_mfe`
+- `momentum_avg_mae`
+- `inverse_avg_mfe`
+- `inverse_avg_mae`
+- `chop_avg_mfe`
+- `chop_avg_mae`
+- `trade_count`
+- `win_rate`
+
+Rolling scopes:
+
+- Session fingerprint
+- 60-minute fingerprint
+- 30-minute fingerprint
+- Open-position context
+
+The goal is to avoid treating a full day as one static creature. A session can
+begin hostile, become tradeable, and deteriorate again. Environmental telemetry
+should eventually be able to detect those shifts.
+
+Profitable Persistence:
+
+```text
+Profitable Persistence =
+post-entry favorable movement before invalidation or exit
+```
+
+Recent evidence suggests EdgeWalker often enters real regimes. The harder
+question is whether those real regimes produce enough favorable continuation to
+pay for participation, noise, spread, trail behavior, and route invalidation.
+MFE/MAE telemetry is the next required instrument for this question.
+
+Implementation order:
+
+1. Environmental Fingerprint Telemetry
+2. MFE/MAE tracking
+3. Profitable Persistence metrics
+4. Manual labels in AAR and spreadsheet notes
+5. Research Mode cluster comparison
+6. Shadow environment classification
+7. Shadow config selector
+8. Active config routing later
+
+Manual labels should be observational, not predictive. Useful starting labels
+may include `TRADEABLE_TREND`, `HOSTILE_CHURN`, `TRADEABLE_CHURN`,
+`RANGE_REVERSION`, and `DIRECTIONAL_TRAP`, but those names should remain
+provisional until repeated fingerprints support them.
+
+Authority boundary:
+
+- Environmental classification is research-only for now.
+- It should not mutate live strategy controls.
+- It should not override hard safety doctrine.
+- It should not promote a configuration from one session or one replay.
+- It can inform AARs, spreadsheet notes, Research Mode comparisons, and future
+  shadow recommendations.
 
 ## Qualification Mode Rotation
 
@@ -133,6 +233,11 @@ notes, but have not yet become approved tuning decisions.
 - Trend Trust appears more predictive than raw trend strength.
 - Regime age may be underrepresented in current confidence calculations.
 - Churn count alone is insufficient to explain performance.
+- The next conceptual layer is environmental classification: not whether the
+  market is up/down/sideways, but whether it is rewarding continuation,
+  reversal, or patience.
+- Profitable Persistence may be the missing link between real regimes and
+  profitable regimes.
 - Route invalidation exits dominate realized outcomes on churny sessions.
 - Route invalidation P/L may be more important than route invalidation count.
   June 2 showed `13` route-invalidated exits with about `+$813.71` net P/L,
@@ -146,6 +251,30 @@ notes, but have not yet become approved tuning decisions.
   judgment rather than an independent mode-selection opinion.
 - `POLL_SEC` may be an exit-quality and perception lever rather than an
   entry-quality lever.
+- `POLL_SEC=20` produced a clean first live run and much higher cycle count, but
+  should be treated as a measurement/timing variable until replay/live
+  comparisons show whether faster polling improves exits or increases
+  micro-churn sensitivity.
+- Live operational success is not the same as strategy edge. The first live day
+  proved real-money lifecycle capability; Research Mode and future sessions
+  still need to measure repeatable ability.
+- Exit-reason P/L is more diagnostic than exit counts. June 4 showed route
+  invalidation net positive and trailing stops net negative on the same live
+  tape, making MFE/MAE and exit-quality telemetry higher-value than raw win
+  rate.
+- June 5 Research Mode produced the first materially useful detector candidate:
+  `8/30`, `0.30/0.05`, `STRONG`, with `0.50/1.00` extension discipline. It
+  reduced crash-day drawdown without breaking the June 1-4 replay set.
+- The global detector is no longer the only suspect. Once detector eagerness is
+  reduced, InverseBot participation quality becomes the visible bottleneck.
+- Shared controls may be too blunt for collapse environments. A setting can
+  help InverseBot while harming MomentumBot or ChopBot, which points toward
+  future environment-specific or bot-specific doctrine.
+- Win rate is contextual. June 4 finished green with a `38.10%` win rate
+  because bot-level and exit-reason P/L mattered more than hit rate.
+- Live and research rows must preserve their assumptions. Live rows include
+  broker fills, stream/data imperfections, and poll cadence; research rows use
+  completed bars and the configured fill model.
 - Regular-session warmup integrity is a doctrine question, not just a data
   hygiene issue.
 - Human-facing label: route invalidation exit. Current internal code:
@@ -337,7 +466,144 @@ Evidence strength:
 - Weak evidence for changing regime thresholds, trail percent, ChopBot
   discount, or Adaptive posture rules.
 
-## P0 Candidates Before Go-Live
+## June 5 Research Findings
+
+Research Mode produced two distinct findings after the June 5 SOXL collapse.
+
+Discovery 1: the detector was too eager.
+
+The live June 5 configuration was:
+
+- Fast/slow SMA: `8 / 21`
+- Regime gap / exit gap: `0.10% / 0.05%`
+- Trail: `1.5%`
+- Chop discount: `0.33%`
+- Directional max extension / chase extension: `1.0% / 2.0%`
+- Directional minimum strength: `STRONG`
+
+Live result:
+
+- Account impact: `-4.44%`
+- Closed trades: `27`
+- Win rate: `18.52%`
+- MomentumBot: `-$12.47`
+- ChopBot: `-$0.40`
+- InverseBot: `-$2.67`
+
+Best whole-system research candidate found so far:
+
+```text
+Name: BigMove_v2_Candidate / Stability_8_30_Gap30_Ext05
+Mode: ADAPTIVE
+Trail: 1.5%
+Fast SMA: 8
+Slow SMA: 30
+Regime Gap: 0.30%
+Regime Exit Gap: 0.05%
+Chop Discount: 0.33%
+Max Extension: 0.50%
+Strong Chase Extension: 1.00%
+Min Strength: STRONG
+Cooldown: 5 minutes
+```
+
+June 5 replay result:
+
+- Account impact: about `-0.24%`
+- Closed trades: `23`
+- Win rate: `43.48%`
+- MomentumBot: `-$1.59`
+- ChopBot: `+$0.58`
+- InverseBot: `+$0.18`
+
+June 1-5 replay smoke test:
+
+- June 1: `+0.41%`
+- June 2: `-0.29%`
+- June 3: `-0.32%`
+- June 4: `+0.10%`
+- June 5: `-0.24%`
+- Aggregate: roughly `-0.34%`
+
+Observed effects:
+
+- Reduced trade frequency.
+- Reduced MomentumBot losses during the collapse tape.
+- Improved June 5 crash-day behavior materially.
+- Preserved broadly similar behavior across June 1-4.
+- Did not turn the collapse into an InverseBot payday.
+
+Discovery 2: InverseBot is now the visible bottleneck.
+
+Research Mode made the detector calmer. Once the detector improved, the
+remaining limitation became clearer: InverseBot still did not monetize a major
+SOXL collapse.
+
+Key conclusion:
+
+```text
+The detector can find the avalanche.
+The trader layer does not yet monetize the avalanche.
+```
+
+Next research focus:
+
+- InverseBot trade archaeology.
+- Participation-quality analysis.
+- MFE/MAE and capture ratio.
+- Bear Cascade environmental fingerprinting.
+
+Research question:
+
+```text
+Does InverseBot fail because it enters poorly, exits poorly,
+or because downside continuation requires different participation doctrine
+than upside continuation?
+```
+
+Authority boundary:
+
+- Save the candidate configuration as a research preset.
+- Do not promote it directly to live from one evening of research.
+- Do not remove or nerf InverseBot before per-trade evidence exists.
+- Do not widen trail globally from June 5; shared wider-trail variants worsened
+  the whole-system result.
+
+## P0 Candidates Before / After Initial Go-Live
+
+### 0. InverseBot Trade Archaeology And MFE/MAE
+
+Observation:
+
+- June 5 was an extreme bearish SOXL session, yet InverseBot finished negative
+  live and only slightly positive in the best same-day research variant.
+- Research Mode made the detector calmer, but did not turn the bearish cascade
+  into an inverse payday.
+
+Need:
+
+- Entry time
+- Entry price
+- Exit time
+- Exit reason
+- Exit price
+- Regime age at entry
+- Trend Trust at entry
+- MFE
+- MAE
+- Capture ratio
+- Bot owner
+- Environment fingerprint
+
+Acceptance criteria:
+
+- For each closed trade, EdgeWalker can say whether the trade failed because it
+  never moved favorably, moved favorably but was not captured, or was
+  invalidated before continuation could pay.
+- InverseBot can be evaluated separately from MomentumBot instead of being
+  treated as a perfect mirror.
+- Research Mode can compare detector candidates by participation quality, not
+  only final P/L.
 
 ### 1. Add First-Class Event Classification
 
@@ -899,6 +1165,14 @@ Watch:
 - [x] Live trading remains explicitly armed, typed-confirmation gated, and easy
   to disarm.
 - [ ] Final closeout state is clear: flat, stopped, and rearmed for next day.
+- [x] First live-money lifecycle proof completed with `HIGH` reconciliation on
+  2026-06-04.
+- [x] Operator spreadsheet environment attribution hardened after the first
+  live row exposed a mixed paper/live snapshot issue.
+- [x] Spreadsheet rows include `win_rate` plus full config snapshot for live
+  and research comparison.
+- [ ] Add MFE/MAE telemetry so route invalidation, trailing stops, and market
+  close exits can be evaluated against missed or protected excursion.
 
 ## Non-Goals For Now
 
@@ -966,3 +1240,17 @@ Watch:
   protected-position state, one-time `Position_secured.wav` cue, and copy icon.
 - Strategy thresholds, Adaptive logic changes, and active Dynamic Controls
   remain intentionally parked until more evidence exists.
+
+2026-06-04:
+
+- Completed first live real-money trading day with Adaptive mode, tiny
+  notional exposure, and `HIGH` reconciliation.
+- Treated the result as live-pipe validation rather than strategy proof:
+  arming, live orders, fills, exits, closeout, dashboard state, and spreadsheet
+  export all produced usable evidence.
+- Fixed spreadsheet environment attribution after a pre-open paper snapshot
+  polluted the first live daily row.
+- Added `win_rate` to session rows and explicit research starting-account
+  control so live and research outputs can be compared at the same scale.
+- Preserved strategy thresholds after the live day; promoted MFE/MAE and
+  exit-quality telemetry as the next evidence upgrades.

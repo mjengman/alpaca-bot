@@ -8,6 +8,7 @@ const state = {
   busy: false,
   fixedNotionalValue: "25",
   latestBuyingPower: null,
+  latestAccountValue: null,
   lastSizingValue: "FIXED",
   activeTab: "activity",
   narrativeTimeframe: "1D",
@@ -145,6 +146,7 @@ const els = {
   researchMessage: document.querySelector("#researchMessage"),
   backtestDate: document.querySelector("#backtestDateInput"),
   backtestFeed: document.querySelector("#backtestFeedInput"),
+  backtestStartingAccount: document.querySelector("#backtestStartingAccountInput"),
   backtestFillModel: document.querySelector("#backtestFillModelInput"),
   backtestSlippage: document.querySelector("#backtestSlippageInput"),
   backtestPresetName: document.querySelector("#backtestPresetNameInput"),
@@ -174,6 +176,7 @@ const els = {
   gap: document.querySelector("#gapValue"),
   position: document.querySelector("#positionValue"),
   positionPl: document.querySelector("#positionPlValue"),
+  maxLossLabel: document.querySelector("#maxLossLabel"),
   maxLoss: document.querySelector("#maxLossValue"),
   entryPrice: document.querySelector("#entryPriceValue"),
   trailExit: document.querySelector("#trailExitValue"),
@@ -344,6 +347,45 @@ function sizingValueFromData(data) {
 function buyingPowerFromData(data) {
   const value = data.edgewalker_status?.buying_power ?? null;
   return numberOrNull(value);
+}
+
+function accountValueFromData(data) {
+  const value =
+    data.edgewalker_status?.portfolio_value ??
+    data.edgewalker_status?.account_value ??
+    null;
+  return numberOrNull(value);
+}
+
+function formatResearchAccountValue(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "";
+  }
+  return parsed.toFixed(2);
+}
+
+function syncResearchStartingAccount({ force = false } = {}) {
+  if (!els.backtestStartingAccount) {
+    return;
+  }
+  const isInitialDefault =
+    els.backtestStartingAccount.value === "100" &&
+    els.backtestStartingAccount.dataset.autoValue !== "false";
+  if (
+    document.activeElement === els.backtestStartingAccount ||
+    (!force &&
+      els.backtestStartingAccount.value &&
+      !isInitialDefault &&
+      els.backtestStartingAccount.dataset.autoValue !== "true")
+  ) {
+    return;
+  }
+  const value = state.latestAccountValue ?? state.latestBuyingPower;
+  if (value !== null) {
+    els.backtestStartingAccount.value = formatResearchAccountValue(value);
+    els.backtestStartingAccount.dataset.autoValue = "true";
+  }
 }
 
 function dynamicNotionalPreview() {
@@ -978,7 +1020,7 @@ function trailProtectionState(status) {
   return { label: "Trail below entry", protected: false, active: true };
 }
 
-function maxLossAtTrail(status) {
+function projectedTrailPl(status) {
   const qty = numberOrNull(status?.position_qty);
   const entryPrice = numberOrNull(status?.position_avg_entry_price);
   const trailPrice = numberOrNull(status?.trailing_exit_price);
@@ -988,8 +1030,7 @@ function maxLossAtTrail(status) {
   if (entryPrice === null || trailPrice === null) {
     return null;
   }
-  const projectedPl = (trailPrice - entryPrice) * qty;
-  return Math.min(0, projectedPl);
+  return (trailPrice - entryPrice) * qty;
 }
 
 function hydrateAudioBaselines(data) {
@@ -1413,6 +1454,7 @@ function ensureBacktestDefaults() {
   if (els.backtestFeed && !els.backtestFeed.value) {
     els.backtestFeed.value = els.dataFeed?.value || "iex";
   }
+  syncResearchStartingAccount({ force: !els.backtestStartingAccount?.value });
   if (els.backtestFillModel && !els.backtestFillModel.value) {
     els.backtestFillModel.value = "next_bar_open";
   }
@@ -1446,6 +1488,7 @@ async function runBacktest() {
       ...payloadFromForm(),
       backtest_date: els.backtestDate.value,
       data_feed: els.backtestFeed?.value || els.dataFeed?.value || "iex",
+      starting_account_value: els.backtestStartingAccount?.value || "100000",
       fill_model: els.backtestFillModel?.value || "next_bar_open",
       slippage_bps: els.backtestSlippage?.value || "0",
       preset_name: els.backtestPresetName?.value || "Current Controls",
@@ -2241,6 +2284,25 @@ function formatPercent(value, { fraction = false } = {}) {
   return `${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`;
 }
 
+function strategyDayPl(status, performance) {
+  const realized = numberOrNull(performance?.session_realized_pl);
+  const unrealized = numberOrNull(status?.position_unrealized_pl);
+  if (realized === null && unrealized === null) {
+    return { value: null, percent: null };
+  }
+
+  const value = (realized ?? 0) + (unrealized ?? 0);
+  const accountValue = numberOrNull(status?.portfolio_value);
+  const startingValue =
+    accountValue === null ? null : Math.max(0, accountValue - value);
+  const percent =
+    startingValue === null || startingValue === 0
+      ? null
+      : (value / startingValue) * 100;
+
+  return { value, percent };
+}
+
 function formatQty(value) {
   const parsed = numberOrNull(value);
   if (parsed === null) {
@@ -2312,7 +2374,7 @@ function setTone(element, value) {
   }
 }
 
-function renderDecision(status) {
+function renderDecision(status, performance) {
   if (!status) {
     els.regime.textContent = "Waiting";
     els.activeBot.textContent = "Waiting";
@@ -2339,9 +2401,12 @@ function renderDecision(status) {
   }
   els.gap.textContent = formatPercent(status.gap_percent);
 
-  const dayPlText = `${formatMoney(status.day_pl)} ${formatPercent(status.day_pl_percent)}`;
-  els.dayPl.textContent = status.day_pl === null ? "--" : dayPlText;
-  setTone(els.dayPl, status.day_pl);
+  const dayPl = strategyDayPl(status, performance);
+  const dayPlText = `${formatMoney(dayPl.value)} ${formatPercent(dayPl.percent)}`;
+  els.dayPl.textContent = dayPl.value === null ? "--" : dayPlText;
+  els.dayPl.dataset.tooltip =
+    "Strategy/session P/L from realized trades plus open-position P/L. External deposits and withdrawals are not counted.";
+  setTone(els.dayPl, dayPl.value);
 
   if (status.position_symbol && status.position_qty) {
     const qty = formatPositionQty(status.position_qty) || status.position_qty;
@@ -2358,15 +2423,24 @@ function renderDecision(status) {
     status.position_unrealized_pl === null ? "--" : positionPlText;
   setTone(els.positionPl, status.position_unrealized_pl);
 
-  const maxLoss = maxLossAtTrail(status);
-  els.maxLoss.textContent = maxLoss === null ? "--" : formatMoney(maxLoss);
-  if (maxLoss === null) {
+  const projectedExitPl = projectedTrailPl(status);
+  const riskLabel = projectedExitPl !== null && projectedExitPl >= 0 ? "Min gain" : "Max loss";
+  if (els.maxLossLabel) {
+    els.maxLossLabel.textContent = riskLabel;
+    els.maxLossLabel.dataset.tooltip =
+      projectedExitPl !== null && projectedExitPl >= 0
+        ? "Approximate minimum protected gain if the current bot-managed exit price fills as shown. Does not account for slippage."
+        : "Approximate worst-case P/L if the current bot-managed exit price fills as shown. Does not account for slippage.";
+  }
+  els.maxLoss.textContent =
+    projectedExitPl === null ? "--" : formatMoney(projectedExitPl);
+  if (projectedExitPl === null) {
     setTone(els.maxLoss, null);
-  } else if (maxLoss === 0) {
+  } else if (projectedExitPl >= 0) {
     els.maxLoss.classList.remove("is-negative", "is-neutral");
     els.maxLoss.classList.add("is-positive");
   } else {
-    setTone(els.maxLoss, maxLoss);
+    setTone(els.maxLoss, projectedExitPl);
   }
 
   els.entryPrice.textContent = status.position_avg_entry_price
@@ -2656,7 +2730,12 @@ function render(data) {
   if (latestBuyingPower !== null) {
     state.latestBuyingPower = latestBuyingPower;
   }
+  const latestAccountValue = accountValueFromData(data);
+  if (latestAccountValue !== null) {
+    state.latestAccountValue = latestAccountValue;
+  }
   hydrateForm(data);
+  syncResearchStartingAccount();
 
   const waitingForOpen =
     state.running && data.next_run_reason === "market_open";
@@ -2709,7 +2788,7 @@ function render(data) {
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.error.textContent = data.last_error || "";
-  renderDecision(data.edgewalker_status);
+  renderDecision(data.edgewalker_status, data.performance);
   renderLog(data);
   handleRuntimeSounds(data, wasRunning);
 }
@@ -2804,6 +2883,12 @@ els.runOnce.addEventListener("click", () => {
 
 if (els.runBacktest) {
   els.runBacktest.addEventListener("click", runBacktest);
+}
+
+if (els.backtestStartingAccount) {
+  els.backtestStartingAccount.addEventListener("input", () => {
+    els.backtestStartingAccount.dataset.autoValue = "false";
+  });
 }
 
 if (els.symbol) {

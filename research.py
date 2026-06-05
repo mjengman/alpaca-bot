@@ -652,6 +652,14 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
     losses = [item for item in bot_pl.items() if item[1] < 0]
     bottom_bot = min(losses, key=lambda item: item[1])[0] if losses else ""
     result_status = "GREEN" if realized_pl > 0 else "RED" if realized_pl < 0 else "FLAT"
+    trade_count = int(performance.get("session_trade_count") or 0)
+    wins = int(performance.get("session_wins") or 0)
+    losses_count = int(performance.get("session_losses") or 0)
+    win_rate = (
+        Decimal(wins) / Decimal(trade_count) * Decimal("100")
+        if trade_count > 0
+        else Decimal("0")
+    )
     exit_counts = metrics["exit_reason_counts"]
     exit_pl = metrics["exit_reason_pl"]
     row = {
@@ -672,9 +680,10 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "realized_pl_dollars": _rounded(realized_pl),
         "account_change_percent": _rounded(account_change_percent),
         "account_result_status": result_status,
-        "closed_trades": int(performance.get("session_trade_count") or 0),
-        "wins": int(performance.get("session_wins") or 0),
-        "losses": int(performance.get("session_losses") or 0),
+        "closed_trades": trade_count,
+        "wins": wins,
+        "losses": losses_count,
+        "win_rate": _rounded(win_rate),
         "momentum_pl": _rounded(bot_pl["MomentumBot"]),
         "chop_pl": _rounded(bot_pl["ChopBot"]),
         "inverse_pl": _rounded(bot_pl["InverseBot"]),

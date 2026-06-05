@@ -470,6 +470,21 @@
               <label class="field">
                 <span
                   class="has-tooltip"
+                  data-tooltip="Simulated account value used for sizing dynamic research trades."
+                  >Starting account</span
+                >
+                <input
+                  id="backtestStartingAccountInput"
+                  type="number"
+                  min="1"
+                  step="0.01"
+                  value="100"
+                  aria-label="Backtest starting account value"
+                />
+              </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
                   data-tooltip="V1 uses the next bar open after the strategy decision for simulated fills."
                   >Fill model</span
                 >
@@ -686,6 +701,7 @@
             </div>
             <div class="position-risk-row">
               <span
+                id="maxLossLabel"
                 class="has-tooltip"
                 data-tooltip="Approximate worst-case P/L if the current bot-managed exit price fills as shown. Does not account for slippage."
                 >Max loss</span

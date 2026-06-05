@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-05-30
+Last updated: 2026-06-05
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -88,6 +88,15 @@ foundation for future work.
   dashboard polling, and lower-noise stream bar persistence
 - Initial same-symbol open-buy sell guard to avoid broker-rejected
   opposite-side exits while an entry order is still resolving
+- Operator spreadsheet export with daily session rows, config snapshots,
+  `win_rate`, exit-reason P/L, optional daily narrative, and separate research
+  rows
+- Research Mode / Backtest Lab with historical one-minute bars, simulated
+  broker, `next_bar_open` fill model, slippage field, explicit starting
+  account, and hard separation from live order paths
+- First live-money lifecycle proof completed on 2026-06-04 with explicit live
+  arming, real orders/fills/exits, closeout, spreadsheet export, and `HIGH`
+  reconciliation
 
 ## Priority 0: Operational Truth
 
@@ -989,13 +998,157 @@ V1 scope:
    - Do not generate a daily narrative for research rows.
    - Reuse the normal spreadsheet post endpoint when Apps Script routes by
      `is_backtest=true`; keep the research endpoint override optional.
+   - Capture `win_rate` and an explicit starting account so research rows can
+     compare at the same scale as live rows.
 
 6. [ ] Validate baseline fidelity before trusting experiments.
    - Replay known sessions with the production configuration.
    - Compare broad behavioral fingerprint: trade count, dominant bot,
      dominant exit reasons, regime-transition shape, and P/L direction.
    - Treat exact P/L matching as a later goal, not a V1 requirement.
+   - Account for live/research cadence differences. Live may poll at `20`
+     seconds while V1 replay is still one-minute-bar based.
 
 7. [ ] Add MFE/MAE telemetry once baseline replay is usable.
    - The central research question is whether entries find profitable
      persistence, not merely whether regimes are real.
+   - June 5 made this urgent for InverseBot: determine whether inverse trades
+     fail from poor entry, poor exit/capture, or unsuitable downside doctrine.
+
+8. [ ] InverseBot trade archaeology
+   - For each InverseBot trade, capture entry time, exit time, entry price, exit
+     price, exit reason, regime age, Trend Trust, MFE, MAE, and capture ratio.
+   - Compare InverseBot against MomentumBot without assuming they are perfect
+     mirror strategies.
+
+9. [ ] Save research presets
+   - Preserve promising detector candidates such as
+     `BigMove_v2_Candidate / Stability_8_30_Gap30_Ext05`.
+   - Presets are research evidence, not live promotion authority.
+
+## Environmental Classification / Profitable Persistence
+
+Objective: discover whether EdgeWalker performs best when it classifies the
+market's reward structure, not just the local regime direction.
+
+Core distinction:
+
+```text
+Regime = local direction
+Environment = reward structure around regimes
+Posture = willingness to participate
+Config = how the system expresses that willingness
+```
+
+The regime engine remains the sensor. Environmental classification should sit
+above it and interpret regime history, route invalidation, MFE/MAE, Trend Trust,
+and session behavior.
+
+Core question:
+
+```text
+Is the market currently rewarding continuation, reversal, or patience?
+```
+
+V1 telemetry fields to consider:
+
+- Regime transitions
+- Average / median / maximum regime duration
+- Transitions per hour
+- Session Trend Trust average
+- Route invalidation rate and P/L
+- Early-entry percentage
+- Average regime age at entry
+- Average MFE / MAE
+- Bot-level MFE / MAE for MomentumBot, InverseBot, and ChopBot
+- Trade count
+- Win rate
+
+Rolling scopes:
+
+- Full-session fingerprint
+- 60-minute fingerprint
+- 30-minute fingerprint
+- Open-position context
+
+Build sequence:
+
+1. [ ] Environmental Fingerprint Telemetry
+   - Capture session and rolling-window fingerprints without changing live
+     decisions.
+
+2. [ ] MFE/MAE tracking
+   - Measure whether entries find favorable excursion before invalidation or
+     exit.
+
+3. [ ] Profitable Persistence metrics
+   - Distinguish real regimes from regimes that produce enough continuation to
+     reward participation.
+
+4. [ ] Manual environment labels
+   - Add observational labels in AARs and spreadsheet notes.
+   - Start with provisional labels only, such as `TRADEABLE_TREND`,
+     `HOSTILE_CHURN`, `TRADEABLE_CHURN`, `RANGE_REVERSION`, and
+     `DIRECTIONAL_TRAP`.
+
+5. [ ] Research Mode cluster comparison
+   - Compare whether different fingerprints consistently favor different
+     strategy-control configurations.
+
+6. [ ] Shadow environment classification
+   - Emit environment labels and confidence without affecting live behavior.
+
+7. [ ] Shadow config selector
+   - Recommend bounded config presets based on classified environment.
+
+8. [ ] Active config routing
+   - Park until shadow evidence proves that environment-specific config
+     selection improves behavior across repeated sessions.
+
+Early Bear Cascade hypothesis:
+
+- June 5 suggested the system can detect a major bearish move but does not yet
+  monetize it through InverseBot.
+- A future Bear Cascade environment may need to suppress MomentumBot bounce
+  entries, prioritize InverseBot only when participation quality supports it,
+  and require stronger proof before treating local bullish moves as real
+  reversal opportunities.
+- This remains research/shadow-only until MFE/MAE and multi-session evidence
+  support it.
+
+Authority boundary:
+
+- Do not wire environmental classification into live behavior yet.
+- Do not let it override hard safety doctrine.
+- Do not let one replay or one live day promote a config.
+- Use it to make Research Mode and AARs more diagnostic before it becomes
+  runtime authority.
+
+## Initial Live Trading Notes
+
+2026-06-04:
+
+- Live Day 1 used Adaptive mode, `25%` dynamic allocation on a roughly `$100`
+  account, and `POLL_SEC=20`.
+- The day ended essentially flat-positive: `+$0.08`, `+0.08%`, with `21`
+  closed trades and `HIGH` reconciliation.
+- This validated capability more than ability: the live broker lifecycle,
+  dashboard, closeout, and spreadsheet export all produced usable evidence.
+- The session exposed and then led to fixes for spreadsheet environment
+  attribution, research starting-account scaling, and the missing `win_rate`
+  export field.
+- Strategy thresholds remain frozen. The next research value is MFE/MAE and
+  exit-quality measurement, especially route invalidation versus trailing stop
+  behavior.
+
+2026-06-05:
+
+- Live Day 2 exposed the first meaningful live drawdown: `-$15.53`, `-4.44%`
+  on a roughly `$350` account during an extreme SOXL collapse.
+- Research Mode identified a calmer detector candidate:
+  `8/30`, `0.30/0.05`, `STRONG`, `0.50/1.00` extension discipline.
+- That candidate reduced the June 5 replay drawdown to about `-0.24%` and
+  remained broadly stable across June 1-4.
+- The remaining bottleneck is InverseBot participation quality: the system
+  found the bearish environment, but did not monetize it.
+- Next build priority: MFE/MAE, capture ratio, and InverseBot trade archaeology.

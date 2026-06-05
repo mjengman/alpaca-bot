@@ -1,11 +1,12 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-06-02
+Last updated: 2026-06-05
 
-This file captures paper-trading qualification observations before they become
+This file captures qualification and early-live observations before they become
 tuning decisions. During the first full rotation through Conservative,
-Balanced, Aggressive, and Adaptive, the goal is to let each mode show its tape
-without moving the target.
+Balanced, Aggressive, and Adaptive, the goal was to let each mode show its tape
+without moving the target. In live trading, the same evidence discipline
+applies: prove lifecycle truth first, then tune from repeated evidence.
 
 ## Qualification Doctrine
 
@@ -42,6 +43,16 @@ These are recurring observations, not tuning decisions.
   timing opportunity.
 - Directional persistence may explain outcomes better than raw churn count,
   trend strength, or regime classification alone.
+- Environmental classification may become the next layer above regime
+  detection. Regime answers local direction; environment should eventually
+  describe whether the current reward structure favors continuation, reversal,
+  or patience.
+- Profitable Persistence is emerging as a key concept: many regimes appear real,
+  but not all produce enough favorable post-entry movement to reward
+  participation.
+- Live operational success is distinct from strategy edge. The first real-money
+  day should be judged primarily on lifecycle truth, order correctness,
+  reconciliation, and operator control.
 - Route invalidation exits dominate realized outcomes on churny sessions.
 - Route invalidation P/L is now a first-class validation metric. On June 2,
   route invalidation exits were net positive, suggesting the doctrine may be
@@ -54,6 +65,9 @@ These are recurring observations, not tuning decisions.
   a position is open can mostly reflect paused entry-posture judgment.
 - `POLL_SEC` may be more important for exit precision than entry quality while
   regime logic remains one-minute-bar based.
+- Live/research comparisons must account for cadence differences. A 20-second
+  live poll loop can produce a different behavioral fingerprint than a
+  one-minute `next_bar_open` replay even with the same controls.
 - Regular-session warmup integrity is a doctrine question: what market world is
   EdgeWalker modeling at the open?
 - Human-facing label: route invalidation exit. Current internal code:
@@ -894,3 +908,277 @@ Do not change yet:
 - Do not change InverseBot filters after one weak downside-continuation day.
 - Do not feed Trend Trust into active entry/exit decisions yet.
 - Continue Round 2 unchanged; run Aggressive tomorrow as planned.
+
+## 2026-06-04 AAR: Live Day 1 Adaptive Mode
+
+Qualification day: first live real-money trading day
+
+Mode: Adaptive
+
+Session files:
+
+- `logs/edgewalker-2026-06-04.jsonl`
+- `logs/position_lifecycle.jsonl`
+
+Result:
+
+- Starting account value: `$100.00`
+- Ending account value: `$100.02`
+- Final realized P/L: `+$0.08`
+- Account impact: `+0.08%`
+- Cycles: `1100` log cycles
+- Closed trades: `21`
+- Wins/losses: `8W / 13L`
+- Win rate: `38.10%`
+- Regime transitions: `32`
+- Market character: `HIGH-CHURN / MIXED / TRADEABLE BUT FRAGMENTED`
+- Session difficulty: `HIGH`
+- Data / broker health: `28` stale cycles, `4` stream-error cycles, broker
+  state remained operational, reconciliation confidence `HIGH`
+- End state: flat after closeout
+- Interpretation confidence: `HIGH` for live lifecycle behavior; `MEDIUM` for
+  strategy conclusions because position size was intentionally tiny.
+
+Configuration:
+
+- Active environment: `live`
+- Sizing mode: `DYNAMIC`
+- Allocation: `25%` of buying power, about `$25` notional per position
+- `POLL_SEC`: `20`
+- Trail: `1.5%`
+- Regime gap / exit gap: `0.20% / 0.10%`
+- Data feed: `iex`
+
+Bot performance:
+
+- MomentumBot: `+$1.69`
+- ChopBot: `-$0.42`
+- InverseBot: `-$1.18`
+- Top P/L bot: MomentumBot
+- Bottom P/L bot: InverseBot
+
+Exit reason contribution:
+
+- Route invalidation exits: `13`, `+$0.50`
+- Trailing stop exits: `7`, `-$0.63`
+- Market close liquidation: `1`, `+$0.22`
+
+Adaptive observations:
+
+- Adaptive did not behave as a single fixed posture. After warmup, posture
+  telemetry was mostly `BALANCED`, with short `CONSERVATIVE` and `AGGRESSIVE`
+  windows.
+- The posture distribution was coherent with the tape: frequent churn, several
+  real but fragmented opportunities, and no sustained reason to remain
+  Aggressive for long.
+- Adaptive's first live test should be graded on whether it selected and
+  executed doctrine coherently, not whether it maximized dollars on a `$100`
+  account.
+
+Main behavioral fingerprint:
+
+- This was a live-pipe validation day more than a strategy-proof day.
+- EdgeWalker placed and closed real-money trades, maintained lifecycle
+  visibility, preserved reconciliation confidence, and auto-posted the daily
+  row.
+- The system was active enough to generate meaningful live data, but the small
+  account and `25%` allocation kept mistakes bounded.
+- MomentumBot again carried the net result while InverseBot remained the main
+  drag, reinforcing the watch item around upside/downside continuation
+  asymmetry.
+- Route invalidation was net positive again, while trailing stops were net
+  negative. That does not prove one doctrine is better than the other, but it
+  makes exit-reason P/L one of the most valuable ongoing measurements.
+
+Operational findings:
+
+- The first live run exposed a spreadsheet attribution issue: a pre-open paper
+  status snapshot could contaminate live daily-row account fields. This was
+  fixed after the session so spreadsheet rows prefer the relevant active
+  environment.
+- The first live run also confirmed the need for explicit `win_rate` in the
+  spreadsheet row and for a research starting-account control so live and
+  replay rows can be compared at the same scale.
+- `POLL_SEC=20` gave the operator a more responsive live loop than the older
+  `60` second cadence. Future research comparisons should account for this
+  because Research Mode currently replays one-minute bars with `next_bar_open`
+  fills.
+
+What worked:
+
+- Live account connection, arming, order submission, fills, exits, closeout,
+  reconciliation, and dashboard visibility all operated.
+- Real-money exposure stayed appropriately tiny for Day 1.
+- Route invalidation remained disciplined and positive on the day.
+- The operator spreadsheet captured the live session, config snapshot, exit
+  reason attribution, and daily narrative path.
+- Research Mode is now available to compare configuration behavior on the same
+  historical tape without touching the live broker path.
+
+What needs attention:
+
+- InverseBot remains the weakest repeated contributor and should stay on the
+  watchlist. Do not remove or nerf it from one live day, but continue comparing
+  downside continuation quality against MomentumBot.
+- Trailing stop exits were net negative. This should be studied with MFE/MAE
+  and backtest/live comparisons before changing `trail_percent`.
+- The live-vs-research gap is expected in V1, but should be documented whenever
+  a replay is used as evidence. Live uses real fills and a 20-second polling
+  loop; Research Mode uses completed bars and `next_bar_open`.
+- Win rate alone is not a sufficient score. This green day had a `38.10%` win
+  rate because winners and exit reasons carried more meaning than hit rate.
+
+Parked hypotheses:
+
+- Route invalidation may be doing more useful work than trailing stops in
+  high-churn conditions, but this needs multi-session exit-reason P/L evidence.
+- Downside continuation may require different trust or persistence telemetry
+  than upside continuation, even if the current bots remain doctrinal mirrors.
+- `POLL_SEC=20` may improve exit awareness, but may also expose the runtime to
+  more micro-churn. Compare behavior before treating lower polling cadence as
+  broadly better.
+- Research Mode should become the main place to test whether trail, regime gap,
+  and extension controls improve persistence capture.
+
+Do not change yet:
+
+- Do not change core strategy thresholds from the first live day.
+- Do not make Trend Trust an active gate yet.
+- Do not infer Adaptive profitability from a `$0.08` live result.
+- Continue using the live account primarily to prove lifecycle correctness
+  while Research Mode begins measuring strategy ability.
+
+## 2026-06-05 AAR: Live Day 2 Adaptive Mode
+
+Qualification day: second live real-money trading day
+
+Mode: Adaptive
+
+Session files:
+
+- `logs/edgewalker-2026-06-05.jsonl`
+
+Result:
+
+- Starting account value: `$350.02`
+- Ending account value: `$334.37`
+- Final realized P/L: `-$15.53`
+- Account impact: `-4.44%`
+- Cycles: `384`
+- Closed trades: `27`
+- Wins/losses: `5W / 22L`
+- Win rate: `18.52%`
+- Regime transitions: `28`
+- Average Trend Trust: `56`
+- Market character: `BEARISH CASCADE / SOXL COLLAPSE`
+- Session difficulty: `EXTREME`
+- Data / broker health: `0` stale cycles, `0` stream-error cycles in the
+  session row; reconciliation confidence `HIGH`
+- Operational note: a transient Alpaca HTTPS/TLS handshake timeout occurred
+  against the open-orders endpoint. Treat as broker/API connectivity
+  degradation, not a strategy or broker-rejection event.
+- Interpretation confidence: `HIGH` for the loss attribution; `MEDIUM` for
+  tuning conclusions until MFE/MAE and per-trade archaeology are available.
+
+Configuration:
+
+- Active environment: `live`
+- Sizing mode: `DYNAMIC`
+- Allocation: `25%` of buying power
+- `POLL_SEC`: `60`
+- Trail: `1.5%`
+- Fast/slow SMA: `8 / 21`
+- Regime gap / exit gap: `0.10% / 0.05%`
+- Chop discount: `0.33%`
+- Directional max extension / chase extension: `1.0% / 2.0%`
+- Directional minimum strength: `STRONG`
+- Adaptive shadow: `false`
+- Data feed: `iex`
+
+Bot performance:
+
+- MomentumBot: `-$12.47`
+- ChopBot: `-$0.40`
+- InverseBot: `-$2.67`
+- Top P/L bot: ChopBot, by losing least
+- Bottom P/L bot: MomentumBot
+
+Exit reason contribution:
+
+- Route invalidation exits: `8`, `-$5.69`
+- Trailing stop exits: `19`, `-$9.84`
+- Market close liquidation: `0`, `$0.00`
+
+Main behavioral fingerprint:
+
+- SOXL suffered an extreme selloff, but EdgeWalker did not turn the downside
+  into an InverseBot payday.
+- The live loss was dominated by MomentumBot attempting upside participation
+  during a broader bearish collapse and by trailing-stop losses across many
+  short-lived trades.
+- InverseBot was active and did participate, but its contribution remained
+  negative despite the environment appearing ideal for inverse exposure.
+- This was not a lifecycle failure. Orders, fills, P/L reconciliation, and
+  closeout remained coherent. The failure was strategy expression inside a
+  bearish-cascade environment.
+
+Research Mode findings from the same tape:
+
+- The live configuration produced `-4.44%` account impact.
+- A more selective detector profile reduced the June 5 replay drawdown to about
+  `-0.24%`:
+  - Fast/slow SMA: `8 / 30`
+  - Regime gap / exit gap: `0.30% / 0.05%`
+  - Trail: `1.5%`
+  - Chop discount: `0.33%`
+  - Directional max extension / chase extension: `0.50% / 1.00%`
+  - Directional minimum strength: `STRONG`
+  - Cooldown: `5m`
+- The same candidate stayed broadly stable across the June 1-5 replay set,
+  finishing near breakeven overall rather than improving one day while breaking
+  the others.
+- The research result suggests the detector was too eager, but the detector is
+  not the only bottleneck.
+
+What worked:
+
+- Live exposure was bounded enough that an extreme SOXL collapse produced a
+  painful but survivable account drawdown.
+- The spreadsheet row, bot attribution, exit attribution, and reconciliation
+  confidence produced a usable research record.
+- Research Mode quickly eliminated several hypotheses:
+  - Widening the shared trail did not solve the problem.
+  - Increasing exit hysteresis did not solve the problem.
+  - Extension discipline materially reduced damage.
+
+What needs attention:
+
+- InverseBot failed its most important audition: it did not monetize a major
+  SOXL collapse.
+- MomentumBot needs stronger suppression or reversal proof during bearish
+  cascade environments. Local upside bounces should not be treated as equal
+  continuation opportunities while the broader tape is collapsing.
+- Shared controls are proving blunt. A setting that helps InverseBot can damage
+  MomentumBot or ChopBot, and vice versa.
+- MFE/MAE and capture ratio are now the highest-value instrumentation gaps.
+
+Parked hypotheses:
+
+- `BigMove_v2_Candidate` / `Stability_8_30_Gap30_Ext05` may be a better
+  defensive detector profile than the current live configuration, but it is not
+  yet proven enough for live promotion.
+- Bear Cascade may need a future environment-specific doctrine:
+  suppress MomentumBot, prioritize InverseBot, require stronger bullish
+  reversal proof, and let inverse continuation prove whether it can pay.
+- The detector can find the avalanche. The trader layer still does not monetize
+  the avalanche.
+
+Do not change yet:
+
+- Do not promote the candidate configuration from one evening of research.
+- Do not remove or nerf InverseBot without per-trade archaeology.
+- Do not change trail percent globally based on June 5; shared wider trail made
+  several research variants worse.
+- Next research focus: InverseBot trade archaeology, including entry timing,
+  exit timing, exit reason, regime age, Trend Trust, MFE, MAE, and capture
+  ratio.

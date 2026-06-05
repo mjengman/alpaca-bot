@@ -491,6 +491,14 @@ class ServerLoggingTest(unittest.TestCase):
 
         self.assertEqual(payload["columns"], OPERATOR_SPREADSHEET_COLUMNS)
         self.assertEqual(len(payload["values"]), len(OPERATOR_SPREADSHEET_COLUMNS))
+        self.assertEqual(
+            payload["columns"].index("win_rate"),
+            payload["columns"].index("losses") + 1,
+        )
+        self.assertEqual(
+            payload["columns"].index("momentum_pl"),
+            payload["columns"].index("win_rate") + 1,
+        )
         self.assertEqual(row["date"], "2026-06-01")
         self.assertEqual(row["mode"], "BALANCED")
         self.assertEqual(row["starting_account_value"], 1000.0)
@@ -501,6 +509,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["closed_trades"], 2)
         self.assertEqual(row["wins"], 2)
         self.assertEqual(row["losses"], 0)
+        self.assertEqual(row["win_rate"], 100.0)
         self.assertEqual(row["momentum_pl"], 100.0)
         self.assertEqual(row["inverse_pl"], 40.0)
         self.assertEqual(row["top_pl_bot"], MOMENTUM_BOT)
