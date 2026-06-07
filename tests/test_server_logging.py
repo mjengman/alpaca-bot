@@ -20,6 +20,7 @@ from bot import (
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
+    LIFECYCLE_POSITION_MANAGED,
     MOMENTUM_BOT,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_CLOSING,
@@ -44,6 +45,9 @@ from server import (
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
+    _research_compare_date_summary,
+    _research_compare_preset_summaries,
+    _research_fingerprint,
     alpaca_environment_settings,
     build_operator_spreadsheet_daily_row,
     build_summary_prompt,
@@ -56,6 +60,8 @@ from server import (
     set_live_trading_armed,
     set_live_trading_disarmed,
 )
+from trade_metrics import enrich_trades_with_bar_extremes
+from trade_metrics import bot_archaeology_report
 
 
 def config() -> BotConfig:
@@ -221,6 +227,22 @@ class ServerLoggingTest(unittest.TestCase):
                 "filled_avg_price": "100",
             },
             {
+                "event_type": LIFECYCLE_POSITION_MANAGED,
+                "created_at": "2026-05-22T14:45:00+00:00",
+                "symbol": "SOXL",
+                "qty": "2",
+                "current_price": "104",
+                "avg_entry_price": "100",
+            },
+            {
+                "event_type": LIFECYCLE_POSITION_MANAGED,
+                "created_at": "2026-05-22T15:00:00+00:00",
+                "symbol": "SOXL",
+                "qty": "2",
+                "current_price": "98",
+                "avg_entry_price": "100",
+            },
+            {
                 "event_type": LIFECYCLE_FULL_FILL,
                 "created_at": "2026-05-22T15:30:00+00:00",
                 "symbol": "SOXL",
@@ -242,6 +264,15 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["session_losses"], 0)
         self.assertEqual(summary["last_trade_realized_pl"], "6")
         self.assertEqual(summary["last_trade"]["realized_pl_percent"], "3")
+        self.assertEqual(summary["last_trade"]["mfe_pl"], "8")
+        self.assertEqual(summary["last_trade"]["mae_pl"], "-4")
+        self.assertEqual(summary["last_trade"]["mfe_percent"], "4")
+        self.assertEqual(summary["last_trade"]["mae_percent"], "-2")
+        self.assertEqual(summary["last_trade"]["capture_ratio_percent"], "75")
+        self.assertEqual(summary["last_trade"]["hold_seconds"], 3600.0)
+        self.assertEqual(summary["last_trade"]["mfe_mae_source"], "managed_mark")
+        self.assertEqual(summary["trade_quality"]["avg_mfe_percent"], "4")
+        self.assertEqual(summary["trade_quality"]["avg_capture_ratio_percent"], "75")
         self.assertEqual(summary["reconciliation_confidence"], "HIGH")
         self.assertEqual(summary["reconciliation_notes"], ["all_fills_matched"])
         self.assertEqual(summary["open_lot_qty"], "0")
@@ -257,6 +288,176 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["last_trade"], None)
         self.assertEqual(summary["reconciliation_confidence"], "HIGH")
         self.assertEqual(summary["open_lot_qty"], "0")
+
+    def test_research_bar_excursion_ignores_bars_after_exit(self) -> None:
+        trades = [
+            {
+                "symbol": "SOXS",
+                "qty": "10",
+                "avg_entry_price": "10",
+                "exit_price": "9.50",
+                "realized_pl": "-5",
+                "opened_at": "2026-06-05T14:00:00+00:00",
+                "closed_at": "2026-06-05T14:02:00+00:00",
+            }
+        ]
+        bars_by_symbol = {
+            "SOXS": [
+                {
+                    "t": "2026-06-05T14:00:00Z",
+                    "h": "11",
+                    "l": "9.8",
+                },
+                {
+                    "t": "2026-06-05T14:01:00Z",
+                    "h": "10.5",
+                    "l": "9.4",
+                },
+                {
+                    "t": "2026-06-05T14:02:00Z",
+                    "h": "30",
+                    "l": "1",
+                },
+            ]
+        }
+
+        enriched = enrich_trades_with_bar_extremes(trades, bars_by_symbol)
+
+        self.assertEqual(enriched[0]["mfe_price"], "11")
+        self.assertEqual(enriched[0]["mae_price"], "9.4")
+        self.assertEqual(enriched[0]["mfe_pl"], "10")
+        self.assertEqual(enriched[0]["mae_pl"], "-6")
+        self.assertEqual(enriched[0]["capture_ratio_percent"], "-50")
+        self.assertEqual(
+            enriched[0]["mfe_mae_source"],
+            "research_completed_bar_high_low",
+        )
+
+    def test_research_fingerprint_summarizes_full_and_early_windows(self) -> None:
+        records = []
+        for minute in range(60):
+            if minute < 10:
+                regime = "WARMUP"
+            elif minute < 30:
+                regime = "UPTREND"
+            else:
+                regime = "DOWNTREND"
+            records.append(
+                {
+                    "timestamp": f"2026-06-05T14:{minute:02d}:00Z",
+                    "regime": regime,
+                    "regime_transition": (
+                        {"from": "WARMUP", "to": "UPTREND"}
+                        if minute == 10
+                        else {"from": "UPTREND", "to": "DOWNTREND"}
+                        if minute == 30
+                        else None
+                    ),
+                    "trend_trust": {"score": "50"},
+                }
+            )
+        trades = [
+            {
+                "closed_at": "2026-06-05T14:20:00Z",
+                "realized_pl": "1",
+                "exit_reason": "route_invalidated_exit",
+                "mfe_percent": "2",
+                "mae_percent": "-0.5",
+                "capture_ratio_percent": "50",
+                "hold_seconds": "600",
+            },
+            {
+                "closed_at": "2026-06-05T14:50:00Z",
+                "realized_pl": "-2",
+                "exit_reason": "trailing_stop_breached",
+                "mfe_percent": "1",
+                "mae_percent": "-1",
+                "capture_ratio_percent": "-200",
+                "hold_seconds": "300",
+            },
+        ]
+
+        full = _research_fingerprint(records, trades)
+        early = _research_fingerprint(records, trades, window_minutes=30)
+
+        self.assertEqual(full["cycles"], 60)
+        self.assertEqual(full["regime_transitions"], 2)
+        self.assertEqual(full["transitions_per_hour"], 2)
+        self.assertEqual(full["avg_regime_duration_minutes"], 25)
+        self.assertEqual(full["closed_trades"], 2)
+        self.assertEqual(full["route_invalidation_rate"], 50)
+        self.assertEqual(full["trailing_stop_rate"], 50)
+        self.assertEqual(full["avg_mfe_percent"], 1.5)
+        self.assertEqual(early["cycles"], 30)
+        self.assertEqual(early["closed_trades"], 1)
+        self.assertEqual(early["route_invalidation_rate"], 100)
+
+    def test_research_comparison_reports_winner_margin_and_wrong_cost(self) -> None:
+        def result(name: str, realized_pl: str, change_percent: str) -> dict[str, object]:
+            return {
+                "date": "2026-06-05",
+                "preset_id": f"{name}::v1",
+                "preset_name": name,
+                "preset_version": "v1",
+                "row": {
+                    "realized_pl_dollars": realized_pl,
+                    "account_change_percent": change_percent,
+                },
+                "fingerprint": {"transitions_per_hour": 12},
+                "early_windows": {"30": {}, "60": {}},
+            }
+
+        rows = [
+            result("Lead_Generalist", "-2", "-0.57"),
+            result("Lead_Inverse_Specialist", "3", "0.86"),
+            result("Lead_Momentum_Specialist", "1", "0.29"),
+        ]
+
+        summary = _research_compare_date_summary("2026-06-05", rows)
+        preset_summaries = _research_compare_preset_summaries(rows, [summary])
+
+        self.assertEqual(summary["winner"], "Lead_Inverse_Specialist")
+        self.assertEqual(summary["runner_up"], "Lead_Momentum_Specialist")
+        self.assertEqual(summary["margin_dollars"], 2.0)
+        self.assertEqual(summary["margin_percent"], 0.57)
+        self.assertEqual(summary["winner_confidence"], "MODERATE")
+        self.assertEqual(summary["worst_misclassification_cost_dollars"], 5.0)
+        self.assertEqual(summary["misclassification_costs"][0]["preset_name"], "Lead_Momentum_Specialist")
+        self.assertEqual(preset_summaries[0]["preset_name"], "Lead_Inverse_Specialist")
+        self.assertEqual(preset_summaries[0]["date_wins"], 1)
+
+    def test_inversebot_archaeology_returns_ranked_hypotheses(self) -> None:
+        report = bot_archaeology_report(
+            [
+                {
+                    "bot": INVERSE_BOT,
+                    "realized_pl": "-5",
+                    "exit_reason": "trailing_stop_breached",
+                    "mfe_percent": "10",
+                    "mae_percent": "-1",
+                    "capture_ratio_percent": "-50",
+                    "hold_seconds": "120",
+                },
+                {
+                    "bot": INVERSE_BOT,
+                    "realized_pl": "-2",
+                    "exit_reason": "route_invalidated_exit",
+                    "mfe_percent": "0",
+                    "mae_percent": "-3",
+                    "capture_ratio_percent": None,
+                    "hold_seconds": "60",
+                },
+            ],
+            INVERSE_BOT,
+        )
+
+        self.assertEqual(report["bot"], INVERSE_BOT)
+        self.assertEqual(report["trade_count"], 2)
+        self.assertEqual(report["near_zero_mfe_count"], 1)
+        self.assertEqual(report["meaningful_mfe_low_capture_count"], 1)
+        self.assertIn("trailing_stop_breached", report["exit_reasons"])
+        self.assertIn("hypothesis", report["hypotheses"][0])
+        self.assertNotIn("change", report["hypotheses"][0]["hypothesis"].lower())
 
     def test_lifecycle_performance_summary_handles_partial_open_lot(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
@@ -368,6 +569,8 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(by_bot[MOMENTUM_BOT]["trade_count"], 1)
         self.assertEqual(by_bot[MOMENTUM_BOT]["wins"], 1)
         self.assertEqual(by_bot[MOMENTUM_BOT]["win_rate_percent"], "100")
+        self.assertEqual(by_bot[MOMENTUM_BOT]["avg_capture_ratio_percent"], "100")
+        self.assertEqual(by_bot[MOMENTUM_BOT]["avg_hold_seconds"], "600")
         self.assertEqual(by_bot[INVERSE_BOT]["realized_pl"], "-2")
         self.assertEqual(by_bot[INVERSE_BOT]["losses"], 1)
         self.assertEqual(by_bot[CHOP_BOT]["realized_pl"], "0")
@@ -523,6 +726,26 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["route_invalidation_pl"], 100.0)
         self.assertEqual(row["market_close_exits"], 1)
         self.assertEqual(row["market_close_pl"], 40.0)
+        self.assertEqual(row["session_avg_mfe_percent"], 15.0)
+        self.assertEqual(row["session_avg_mae_percent"], 0.0)
+        self.assertEqual(row["session_avg_capture_ratio_percent"], 100.0)
+        self.assertEqual(row["session_avg_hold_seconds"], 9900.0)
+        self.assertEqual(row["momentum_avg_mfe_percent"], 10.0)
+        self.assertEqual(row["momentum_avg_mae_percent"], 0.0)
+        self.assertEqual(row["momentum_avg_capture_ratio_percent"], 100.0)
+        self.assertEqual(row["momentum_avg_hold_seconds"], 1800.0)
+        self.assertEqual(row["chop_avg_mfe_percent"], "")
+        self.assertEqual(row["chop_avg_mae_percent"], "")
+        self.assertEqual(row["chop_avg_capture_ratio_percent"], "")
+        self.assertEqual(row["chop_avg_hold_seconds"], "")
+        self.assertEqual(row["inverse_avg_mfe_percent"], 20.0)
+        self.assertEqual(row["inverse_avg_mae_percent"], 0.0)
+        self.assertEqual(row["inverse_avg_capture_ratio_percent"], 100.0)
+        self.assertEqual(row["inverse_avg_hold_seconds"], 18000.0)
+        self.assertEqual(row["inverse_near_zero_mfe_count"], 0)
+        self.assertEqual(row["inverse_meaningful_mfe_low_capture_count"], 0)
+        self.assertEqual(row["inverse_adverse_gt_favorable_count"], 0)
+        self.assertEqual(row["mfe_mae_source"], "fill_prices_only")
         self.assertEqual(row["reconciliation_confidence"], "HIGH")
         self.assertEqual(row["config_version"], "v-test-config")
         self.assertEqual(row["strategy_version"], "v-test-strategy")

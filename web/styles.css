@@ -691,7 +691,8 @@ h2 {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line);
@@ -700,6 +701,12 @@ h2 {
   background: var(--input);
   color: var(--ink);
   outline: none;
+}
+
+.field textarea {
+  min-height: 76px;
+  padding: 10px 12px;
+  resize: vertical;
 }
 
 .field select {
@@ -725,13 +732,15 @@ h2 {
 }
 
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
   border-color: var(--green);
   box-shadow: 0 0 0 3px rgba(31, 122, 77, 0.16);
 }
 
 .field input:disabled,
-.field select:disabled {
+.field select:disabled,
+.field textarea:disabled {
   color: var(--muted);
   background: var(--input-disabled);
 }
@@ -879,9 +888,269 @@ h2 {
   color: var(--amber);
 }
 
+.research-progress {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 14px;
+}
+
+.research-progress[hidden] {
+  display: none;
+}
+
+.research-progress-bar {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.research-progress-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  border-radius: inherit;
+  background: var(--green);
+  animation: research-progress-sweep 1.35s ease-in-out infinite;
+}
+
+.research-progress p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+@keyframes research-progress-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  55% {
+    transform: translateX(170%);
+  }
+  100% {
+    transform: translateX(170%);
+  }
+}
+
 .research-action-row {
   justify-content: flex-end;
   margin-top: 14px;
+}
+
+.research-preset-notes-field {
+  grid-column: span 2;
+}
+
+.research-preset-row {
+  justify-content: flex-start;
+  margin-top: 12px;
+}
+
+.research-compare-panel {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.research-compare-dates-field,
+.research-compare-presets-field {
+  grid-column: span 2;
+}
+
+.research-compare-dates-field textarea,
+.research-compare-presets-field select {
+  min-height: 116px;
+}
+
+.research-results {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.research-results[hidden] {
+  display: none;
+}
+
+.research-results-head,
+.research-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.research-results-head {
+  margin-bottom: 12px;
+}
+
+.research-result-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.research-result-actions button {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+}
+
+.research-results-head .eyebrow {
+  margin-bottom: 3px;
+}
+
+.research-results-head strong {
+  display: block;
+  font-size: 0.96rem;
+}
+
+.research-result-status,
+.research-section-head small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.research-summary-grid,
+.research-archaeology-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+}
+
+.research-metric,
+.research-bot-card {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  min-height: 78px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  text-align: center;
+}
+
+.research-metric span,
+.research-bot-card > span,
+.research-section-head span,
+.research-bot-card dt,
+.research-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.research-metric strong,
+.research-bot-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.05rem;
+}
+
+.research-section {
+  margin-top: 16px;
+}
+
+.research-section-head {
+  margin-bottom: 8px;
+}
+
+.research-bot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.research-bot-card {
+  gap: 8px;
+}
+
+.research-bot-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 10px;
+  width: 100%;
+  margin: 0;
+}
+
+.research-bot-card dl div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.research-bot-card dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.research-hypotheses {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding-left: 20px;
+}
+
+.research-hypotheses li {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.research-hypotheses span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.research-table-wrap {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.research-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+
+.research-table th,
+.research-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 9px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.research-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.research-table td {
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.research-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 button {
@@ -1688,6 +1957,7 @@ body.live-paper .metric:first-child {
   .decision-lead,
   .decision-grid,
   .bot-performance-grid,
+  .research-bot-grid,
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1794,10 +2064,15 @@ body.live-paper .metric:first-child {
     text-align: left;
   }
 
+  .research-preset-notes-field {
+    grid-column: auto;
+  }
+
   .control-grid,
   .decision-lead,
   .decision-grid,
   .bot-performance-grid,
+  .research-bot-grid,
   .metrics {
     grid-template-columns: 1fr;
   }

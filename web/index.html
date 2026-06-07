@@ -443,6 +443,17 @@
               </div>
               <p id="researchMessage" class="research-message" role="status"></p>
             </div>
+            <div
+              id="researchProgress"
+              class="research-progress"
+              aria-live="polite"
+              hidden
+            >
+              <div class="research-progress-bar" aria-hidden="true">
+                <span></span>
+              </div>
+              <p id="researchProgressText">Research run in progress.</p>
+            </div>
             <div class="control-grid research-control-grid">
               <label class="field">
                 <span
@@ -535,6 +546,110 @@
                   aria-label="Backtest preset version"
                 />
               </label>
+              <label class="field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Saved research presets live in this browser and store strategy controls plus notes."
+                  >Preset library</span
+                >
+                <select
+                  id="researchPresetLibraryInput"
+                  aria-label="Saved research presets"
+                >
+                  <option value="">No saved presets</option>
+                </select>
+              </label>
+              <label class="field research-preset-notes-field">
+                <span
+                  class="has-tooltip"
+                  data-tooltip="Optional evidence or discovery notes saved with this local preset."
+                  >Preset notes</span
+                >
+                <textarea
+                  id="researchPresetNotesInput"
+                  rows="2"
+                  aria-label="Research preset notes"
+                  placeholder="Why this preset exists, dates tested, or evidence summary"
+                ></textarea>
+              </label>
+            </div>
+            <div class="button-row research-preset-row">
+              <button
+                id="saveResearchPresetButton"
+                type="button"
+                class="secondary has-tooltip"
+                data-tooltip="Save the current strategy controls to the local preset library."
+              >
+                Save Preset
+              </button>
+              <button
+                id="loadResearchPresetButton"
+                type="button"
+                class="secondary has-tooltip"
+                data-tooltip="Load the selected local preset into Strategy Controls."
+              >
+                Load Preset
+              </button>
+              <button
+                id="deleteResearchPresetButton"
+                type="button"
+                class="secondary has-tooltip"
+                data-tooltip="Delete the selected local preset from this browser."
+              >
+                Delete
+              </button>
+            </div>
+            <div class="research-compare-panel">
+              <div class="research-section-head">
+                <span>Preset Comparison</span>
+                <small>Interactive matrix · no sheet post</small>
+              </div>
+              <div class="control-grid research-control-grid">
+                <label class="field research-compare-dates-field">
+                  <span
+                    class="has-tooltip"
+                    data-tooltip="Dates to replay for every selected preset. Use commas, spaces, or one date per line."
+                    >Comparison dates</span
+                  >
+                  <textarea
+                    id="researchCompareDatesInput"
+                    rows="3"
+                    aria-label="Research comparison dates"
+                    placeholder="2026-06-01&#10;2026-06-02&#10;2026-06-05"
+                  ></textarea>
+                </label>
+                <label class="field research-compare-presets-field">
+                  <span
+                    class="has-tooltip"
+                    data-tooltip="Saved presets to replay against each comparison date."
+                    >Comparison presets</span
+                  >
+                  <select
+                    id="researchComparePresetsInput"
+                    multiple
+                    size="4"
+                    aria-label="Research comparison presets"
+                  ></select>
+                </label>
+              </div>
+              <div class="button-row research-preset-row">
+                <button
+                  id="selectAllResearchComparePresetsButton"
+                  type="button"
+                  class="secondary has-tooltip"
+                  data-tooltip="Select every saved preset for the comparison batch."
+                >
+                  Select All
+                </button>
+                <button
+                  id="runResearchCompareButton"
+                  type="button"
+                  class="primary has-tooltip"
+                  data-tooltip="Replay every selected preset on every comparison date and return winner, margin, fingerprint, and misclassification cost."
+                >
+                  Compare Presets
+                </button>
+              </div>
             </div>
             <div class="button-row research-action-row">
               <button
@@ -546,6 +661,12 @@
                 Run Backtest
               </button>
             </div>
+            <div
+              id="researchResults"
+              class="research-results"
+              aria-live="polite"
+              hidden
+            ></div>
           </div>
 
           <div id="controlsActionRow" class="button-row controls-action-row">

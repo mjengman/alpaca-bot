@@ -28,6 +28,12 @@ from bot import (
     format_decimal,
     parse_market_timestamp,
 )
+from trade_metrics import (
+    analyze_lifecycle_trades,
+    bot_archaeology_report,
+    enrich_trades_with_bar_extremes,
+    trade_quality_averages,
+)
 
 
 NY_TZ = ZoneInfo("America/New_York")
@@ -377,65 +383,15 @@ class SimulatedBroker:
         return total.quantize(MONEY_STEP)
 
 
-def _performance_from_lifecycle(records: list[dict[str, Any]], date_text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    trades: list[dict[str, Any]] = []
-    for record in records:
-        if record.get("event_type") != "FULL_FILL":
-            continue
-        created_at = parse_market_timestamp(record.get("created_at"))
-        if created_at is None or created_at.astimezone(NY_TZ).date().isoformat() != date_text:
-            continue
-        symbol = str(record.get("symbol") or "")
-        side = str(record.get("side") or "").lower()
-        qty_raw = record.get("fill_delta_qty") or record.get("filled_qty")
-        price_raw = record.get("filled_avg_price")
-        if not symbol or side not in {"buy", "sell"} or qty_raw in (None, "") or price_raw in (None, ""):
-            continue
-        qty = Decimal(str(qty_raw))
-        price = Decimal(str(price_raw))
-        if side == "buy":
-            lots_by_symbol.setdefault(symbol, []).append(
-                {
-                    "qty": qty,
-                    "price": price,
-                    "bot": record.get("bot"),
-                    "created_at": created_at,
-                }
-            )
-            continue
-        remaining = qty
-        matched_qty = Decimal("0")
-        cost_basis = Decimal("0")
-        matched_bot = record.get("bot")
-        lots = lots_by_symbol.setdefault(symbol, [])
-        while remaining > 0 and lots:
-            lot = lots[0]
-            consumed = min(remaining, lot["qty"])
-            matched_qty += consumed
-            cost_basis += consumed * lot["price"]
-            matched_bot = matched_bot or lot.get("bot")
-            remaining -= consumed
-            lot["qty"] -= consumed
-            if lot["qty"] <= 0:
-                lots.pop(0)
-        if matched_qty <= 0:
-            continue
-        proceeds = matched_qty * price
-        realized_pl = proceeds - cost_basis
-        avg_entry = cost_basis / matched_qty
-        trades.append(
-            {
-                "symbol": symbol,
-                "bot": matched_bot or "UNKNOWN",
-                "qty": format_decimal(matched_qty),
-                "avg_entry_price": format_decimal(avg_entry),
-                "exit_price": format_decimal(price),
-                "realized_pl": format_decimal(realized_pl),
-                "exit_reason": record.get("reason"),
-                "closed_at": created_at.isoformat(timespec="seconds"),
-            }
-        )
+def _performance_from_lifecycle(
+    records: list[dict[str, Any]],
+    date_text: str,
+    bars_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    analysis = analyze_lifecycle_trades(records, date_text, session_tz=NY_TZ)
+    trades = analysis["realized_trades"]
+    if bars_by_symbol is not None:
+        trades = enrich_trades_with_bar_extremes(trades, bars_by_symbol)
 
     total = sum((Decimal(str(trade["realized_pl"])) for trade in trades), Decimal("0"))
     wins = sum(1 for trade in trades if Decimal(str(trade["realized_pl"])) > 0)
@@ -451,6 +407,7 @@ def _performance_from_lifecycle(records: list[dict[str, Any]], date_text: str) -
             if bot_trades
             else Decimal("0")
         )
+        quality = trade_quality_averages(bot_trades)
         bot_items.append(
             {
                 "bot": bot_name,
@@ -459,8 +416,15 @@ def _performance_from_lifecycle(records: list[dict[str, Any]], date_text: str) -
                 "wins": bot_wins,
                 "losses": bot_losses,
                 "win_rate_percent": format_decimal(win_rate),
+                "avg_mfe_percent": quality.get("avg_mfe_percent"),
+                "avg_mae_percent": quality.get("avg_mae_percent"),
+                "avg_capture_ratio_percent": quality.get(
+                    "avg_capture_ratio_percent"
+                ),
+                "avg_hold_seconds": quality.get("avg_hold_seconds"),
             }
         )
+    quality = trade_quality_averages(trades)
     return (
         {
             "source": "research_lifecycle",
@@ -472,6 +436,9 @@ def _performance_from_lifecycle(records: list[dict[str, Any]], date_text: str) -
             "session_wins": wins,
             "session_losses": losses,
             "bot_performance": bot_items,
+            "realized_trades": trades,
+            "trade_quality": quality,
+            "inversebot_archaeology": bot_archaeology_report(trades, "InverseBot"),
         },
         trades,
     )
@@ -480,6 +447,90 @@ def _performance_from_lifecycle(records: list[dict[str, Any]], date_text: str) -
 def _rounded(value: Any) -> float:
     decimal_value = Decimal(str(value or 0))
     return float(decimal_value.quantize(Decimal("0.01")))
+
+
+def _quality_number(value: Any) -> float | str:
+    if value in (None, ""):
+        return ""
+    return _rounded(value)
+
+
+def _trade_quality_source(trades: list[dict[str, Any]]) -> str:
+    sources = sorted(
+        {
+            str(source)
+            for trade in trades
+            if (source := trade.get("mfe_mae_source")) not in (None, "")
+        }
+    )
+    return ",".join(sources)
+
+
+def _bot_performance_by_name(
+    performance: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("bot")): item
+        for item in performance.get("bot_performance") or []
+        if isinstance(item, dict) and item.get("bot")
+    }
+
+
+def _trade_quality_row_values(
+    performance: dict[str, Any],
+    trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    session_quality = performance.get("trade_quality")
+    if not isinstance(session_quality, dict):
+        session_quality = trade_quality_averages(trades)
+    by_bot = _bot_performance_by_name(performance)
+    inverse_report = performance.get("inversebot_archaeology")
+    if not isinstance(inverse_report, dict):
+        inverse_report = bot_archaeology_report(trades, "InverseBot")
+
+    row = {
+        "session_avg_mfe_percent": _quality_number(
+            session_quality.get("avg_mfe_percent")
+        ),
+        "session_avg_mae_percent": _quality_number(
+            session_quality.get("avg_mae_percent")
+        ),
+        "session_avg_capture_ratio_percent": _quality_number(
+            session_quality.get("avg_capture_ratio_percent")
+        ),
+        "session_avg_hold_seconds": _quality_number(
+            session_quality.get("avg_hold_seconds")
+        ),
+        "inverse_near_zero_mfe_count": int(
+            inverse_report.get("near_zero_mfe_count") or 0
+        ),
+        "inverse_meaningful_mfe_low_capture_count": int(
+            inverse_report.get("meaningful_mfe_low_capture_count") or 0
+        ),
+        "inverse_adverse_gt_favorable_count": int(
+            inverse_report.get("larger_adverse_than_favorable_count") or 0
+        ),
+        "mfe_mae_source": _trade_quality_source(trades),
+    }
+    for bot_name, prefix in (
+        ("MomentumBot", "momentum"),
+        ("ChopBot", "chop"),
+        ("InverseBot", "inverse"),
+    ):
+        quality = by_bot.get(bot_name) or {}
+        row[f"{prefix}_avg_mfe_percent"] = _quality_number(
+            quality.get("avg_mfe_percent")
+        )
+        row[f"{prefix}_avg_mae_percent"] = _quality_number(
+            quality.get("avg_mae_percent")
+        )
+        row[f"{prefix}_avg_capture_ratio_percent"] = _quality_number(
+            quality.get("avg_capture_ratio_percent")
+        )
+        row[f"{prefix}_avg_hold_seconds"] = _quality_number(
+            quality.get("avg_hold_seconds")
+        )
+    return row
 
 
 def _bot_pl_map(performance: dict[str, Any]) -> dict[str, Decimal]:
@@ -596,7 +647,11 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
                     }
                 previous_regime = regime
             lifecycle_records = lifecycle_ledger.read_all()
-            performance, _trades = _performance_from_lifecycle(lifecycle_records, date_text)
+            performance, _trades = _performance_from_lifecycle(
+                lifecycle_records,
+                date_text,
+                bars_by_symbol,
+            )
             records.append(
                 {
                     "timestamp": current_time.isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -641,7 +696,11 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
 
         lifecycle_records = lifecycle_ledger.read_all()
 
-    performance, trades = _performance_from_lifecycle(lifecycle_records, date_text)
+    performance, trades = _performance_from_lifecycle(
+        lifecycle_records,
+        date_text,
+        bars_by_symbol,
+    )
     metrics = _session_metrics(records, trades)
     bot_pl = _bot_pl_map(performance)
     realized_pl = Decimal(str(performance.get("session_realized_pl") or 0))
@@ -700,6 +759,7 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "trailing_stop_pl": _rounded(exit_pl.get("trailing_stop_breached", Decimal("0"))),
         "market_close_exits": int(exit_counts.get("market_close_liquidation", 0)),
         "market_close_pl": _rounded(exit_pl.get("market_close_liquidation", Decimal("0"))),
+        **_trade_quality_row_values(performance, trades),
         "reconciliation_confidence": performance.get("reconciliation_confidence") or "",
         "config_version": "research-v1",
         "strategy_version": "research-v1",

@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-06-05
+Last updated: 2026-06-07
 
 Initial go-live: 2026-06-04
 
@@ -146,7 +146,7 @@ Rolling scopes:
 - 30-minute fingerprint
 - Open-position context
 
-The goal is to avoid treating a full day as one static creature. A session can
+The goal is to avoid treating a full day as one static state. A session can
 begin hostile, become tradeable, and deteriorate again. Environmental telemetry
 should eventually be able to detect those shifts.
 
@@ -164,14 +164,18 @@ MFE/MAE telemetry is the next required instrument for this question.
 
 Implementation order:
 
-1. Environmental Fingerprint Telemetry
-2. MFE/MAE tracking
-3. Profitable Persistence metrics
-4. Manual labels in AAR and spreadsheet notes
-5. Research Mode cluster comparison
-6. Shadow environment classification
-7. Shadow config selector
-8. Active config routing later
+1. MFE/MAE tracking
+2. Capture ratio
+3. Closed-trade record enrichment
+4. InverseBot trade archaeology
+5. Strategy preset save/load
+6. Lightweight preset comparison matrix
+7. Environmental Fingerprint Telemetry
+8. Manual labels in AAR and spreadsheet notes
+9. Research Mode cluster comparison
+10. Shadow environment classification
+11. Shadow config selector
+12. Active config routing later
 
 Manual labels should be observational, not predictive. Useful starting labels
 may include `TRADEABLE_TREND`, `HOSTILE_CHURN`, `TRADEABLE_CHURN`,
@@ -186,6 +190,8 @@ Authority boundary:
 - It should not promote a configuration from one session or one replay.
 - It can inform AARs, spreadsheet notes, Research Mode comparisons, and future
   shadow recommendations.
+- No AI/LLM layer is part of the current environment-classification plan.
+  Keep the near-term classifier deterministic and evidence-based.
 
 ## Qualification Mode Rotation
 
@@ -270,6 +276,21 @@ notes, but have not yet become approved tuning decisions.
 - Shared controls may be too blunt for collapse environments. A setting can
   help InverseBot while harming MomentumBot or ChopBot, which points toward
   future environment-specific or bot-specific doctrine.
+- Research Mode now provides evidence against a single universal best
+  configuration. `Lead_Generalist`, `Lead_Momentum_Specialist`, and
+  `Lead_Inverse_Specialist` each fit different tapes, while
+  `Bear_Capture_Trail_075` looked promising in-sample and then failed the May
+  out-of-sample batch.
+- The first 20-date preset comparison matrix found
+  `Lead_Momentum_Specialist` as the aggregate leader, but not as a universal
+  replacement. `Lead_Generalist` remains the default anchor and
+  `Lead_Inverse_Specialist` remains the high-cost downside specialist candidate.
+- Candidate labels should remain role-based and provisional. The current
+  research roles are Generalist, Momentum specialist, and Inverse specialist.
+  A Chop/range specialist has not yet earned a slot.
+- Specialist discovery and environment fingerprinting should inform each other.
+  Do not force a four-lane taxonomy before same-date preset comparisons show
+  that all four lanes are materially distinct.
 - Win rate is contextual. June 4 finished green with a `38.10%` win rate
   because bot-level and exit-reason P/L mattered more than hit rate.
 - Live and research rows must preserve their assumptions. Live rows include
@@ -490,7 +511,7 @@ Live result:
 - ChopBot: `-$0.40`
 - InverseBot: `-$2.67`
 
-Best whole-system research candidate found so far:
+First materially useful detector candidate found at that point:
 
 ```text
 Name: BigMove_v2_Candidate / Stability_8_30_Gap30_Ext05
@@ -568,6 +589,332 @@ Authority boundary:
 - Do not remove or nerf InverseBot before per-trade evidence exists.
 - Do not widen trail globally from June 5; shared wider-trail variants worsened
   the whole-system result.
+
+## June 7 Research Findings
+
+Research Mode moved from single-tape tuning into same-date candidate comparison.
+The main lesson was that EdgeWalker is unlikely to have one universally best
+configuration across the sampled tapes.
+
+### Retired Stepping Stone: Bear_Capture_Trail_075
+
+The `Bear_Capture_Trail_075` candidate used the calmer `8/30`,
+`0.30% / 0.05%`, `STRONG`, `0.50% / 1.00%` detector with a `0.75%` trail.
+
+It was useful because it:
+
+- Reduced June 5 damage materially.
+- Helped reveal that a lower trail could improve capture on a crash tape.
+- Led to the discovery of a better bear/strong-move detector shape.
+
+It should not be promoted because:
+
+- It failed the fresh May 18-28 out-of-sample batch.
+- It remained weak for InverseBot across broader samples.
+- It appears to be a research stepping stone, not a durable specialist.
+
+### Generalist Anchor: Lead_Generalist
+
+Current role:
+
+```text
+Generalist / lower-variance anchor
+```
+
+Configuration identity:
+
+- Trail: `1.5%`
+- Fast/slow SMA: `8 / 21`
+- Regime gap / exit gap: `0.10% / 0.05%`
+- Chop discount: `0.33%`
+- Directional max extension / chase extension: `1.0% / 2.0%`
+- Directional minimum strength: `STRONG`
+
+Research read:
+
+- Survived the May 18-28 out-of-sample batch better than
+  `Bear_Capture_Trail_075` and the pre-rename inverse specialist candidate.
+- Still has tail-risk days, especially hostile churn and crash tapes.
+- Remains the current default/generalist control unless a candidate beats it
+  across broader same-date comparisons.
+
+### Inverse Specialist Candidate: Lead_Inverse_Specialist
+
+Current role:
+
+```text
+Inverse / downside-damage specialist candidate
+```
+
+Configuration identity:
+
+- Trail: `0.75%`
+- Fast/slow SMA: `8 / 24`
+- Regime gap / exit gap: `0.25% / 0.05%`
+- Chop discount: `0.33%`
+- Directional max extension / chase extension: `0.50% / 1.00%`
+- Directional minimum strength: `STRONG`
+
+Research read:
+
+- First candidate that made June 5's SOXL collapse become an InverseBot payday
+  in replay.
+- Made InverseBot net positive across the initial control set.
+- Failed the May 18-28 out-of-sample batch as a general replacement.
+- Should be treated as an environment-specific specialist candidate, not a live
+  default.
+
+### Momentum Specialist Candidate: Lead_Momentum_Specialist
+
+Current role:
+
+```text
+Momentum / upside-trend participation specialist candidate
+```
+
+Configuration identity:
+
+- Trail: `1.5%`
+- Fast/slow SMA: `8 / 30`
+- Regime gap / exit gap: `0.20% / 0.05%`
+- Chop discount: `0.33%`
+- Directional max extension / chase extension: `0.75% / 1.50%`
+- Directional minimum strength: `MODERATE`
+
+Research read:
+
+- Beat `Lead_Generalist` on the May 18-28 batch.
+- Produced large wins on clean trend/upside participation days.
+- Failed hard on hostile or bearish tapes such as June 3, June 5, and May 18.
+- Should be treated as a high-upside specialist, not a safe generalist.
+
+### Chop / Range Specialist Status
+
+`Range_CHOP_v1` did not earn a specialist slot.
+
+Research read:
+
+- It improved some ChopBot contribution but did not prove a distinct range
+  doctrine.
+- Some of its better days were still driven mostly by MomentumBot or
+  InverseBot.
+- The Chop/range lane remains unknown. It may become a true ChopBot specialist,
+  a defensive low-participation preset, or no separate lane at all.
+
+### First Preset Comparison Matrix
+
+The first full comparison matrix ran `60` replay runs: `3` saved presets across
+`20` dates, using `Next Bar Open` fills and `0 bps` slippage.
+
+Aggregate result:
+
+| Preset | Total P/L | Avg % | Date Wins | Green/Red | Momentum | Chop | Inverse |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Lead_Momentum_Specialist` | `$2.83` | `+0.14%` | `8` | `10/8` | `$3.29` | `$1.66` | `-$2.10` |
+| `Lead_Generalist` | `-$0.16` | `-0.01%` | `7` | `11/9` | `$0.24` | `-$0.71` | `$0.31` |
+| `Lead_Inverse_Specialist` | `-$2.57` | `-0.13%` | `5` | `9/10` | `-$1.77` | `-$0.51` | `-$0.24` |
+
+Research read:
+
+- `Lead_Momentum_Specialist` led the aggregate batch, but still failed hard on
+  June 3 and June 5. It is a specialist candidate, not a live default.
+- `Lead_Generalist` did not win the aggregate, but remained a viable default
+  anchor and won important mixed tapes such as June 1 and June 2.
+- `Lead_Inverse_Specialist` did not win the aggregate, but won the highest
+  misclassification-cost downside tapes: June 3 and June 5.
+- Every `Lead_Momentum_Specialist` date win in this batch had `30m Trans/hr = 0`.
+  That is the first concrete early-window routing clue, not a routing rule.
+- The highest wrong-choice cost was June 5: choosing the wrong preset instead
+  of `Lead_Inverse_Specialist` cost up to `$3.25` on a `$100` replay account.
+
+Current research hypothesis:
+
+```text
+Quiet first 30 minutes / low early transition pressure
+=> Momentum specialist may fit.
+
+Mixed or ambiguous tape
+=> Generalist remains the safer anchor.
+
+High downside damage risk / hostile continuation
+=> Inverse specialist may be the needed defensive lane.
+```
+
+This remains research-only. The comparison matrix is evidence for future shadow
+routing, not live routing authority.
+
+### Next Research Priority
+
+Use the preset comparison and environment-fingerprint frame to evaluate more
+date batches before active routing.
+
+Required comparison fields:
+
+- Date
+- Preset
+- Total P/L
+- Bot P/L
+- Trade count
+- Win rate
+- Route invalidation P/L
+- Trailing stop P/L
+- Session and bot-level MFE/MAE/capture
+- Winner per date
+- Full-session versus partial-session marker
+
+Required early-window questions:
+
+- What did the first 30 minutes look like?
+- What did the first 60 minutes look like?
+- How early could a deterministic fingerprint have selected the winning preset?
+- What would misclassification have cost?
+
+Authority boundary:
+
+- Do not build active routing yet.
+- Do not force the final taxonomy to be UP / DOWN / CHOP / GENERAL until the
+  data proves those lanes are real.
+- Do not promote a specialist from one in-sample cluster.
+- Use same-date preset comparison as the guardrail before naming environments
+  or giving any selector live authority.
+
+## Measurement Sprint: Trade Behavior Analyzer
+
+Goal:
+
+```text
+Turn EdgeWalker from trade result logger
+into trade behavior analyzer.
+```
+
+This sprint should not make EdgeWalker smarter yet. It should make each trade
+more inspectable so future tuning can distinguish bad entries, bad exits,
+missed capture, and unsuitable doctrine.
+
+Hard rule:
+
+- No live behavior changes.
+- No strategy-threshold changes.
+- No InverseBot doctrine changes.
+- No active environment classifier.
+- No AI/LLM selector layer.
+
+Build order:
+
+### P0 - MFE/MAE Per Trade
+
+Record maximum favorable excursion and maximum adverse excursion for every
+open position from entry through exit.
+
+Definition:
+
+- MFE is the highest favorable price reached during the position lifetime.
+- MAE is the worst adverse price reached during the position lifetime.
+- Both are measured from the actual fill price, not the entry-intent price.
+- The position lifetime begins at fill and ends at exit.
+- Research Mode must only use bars visible during the simulated position
+  lifetime. It must not inspect bars after the exit.
+- V1 should record the excursion source explicitly. Research Mode starts with
+  completed-bar MFE/MAE for replay honesty and live/research parity. Live
+  quote/trade-based excursion can be added later as a separate metric if useful.
+
+Why:
+
+- Reveals whether a trade ever found opportunity.
+- Distinguishes immediate bad entries from good entries with poor capture.
+- Gives InverseBot analysis the missing facts from June 5.
+
+### P0 - Capture Ratio
+
+Derive capture quality from realized P/L versus available favorable excursion.
+
+Priority:
+
+- Bot-level capture ratio is more diagnostic than session-level capture ratio.
+- Session-level capture ratio can be summarized later, but the first consumers
+  should be MomentumBot, InverseBot, ChopBot, and exit-reason groupings.
+
+Diagnostic reads:
+
+- If MFE is near zero, the thesis never developed.
+- If MFE is meaningful but capture ratio is low, the trade found opportunity
+  but exit/capture behavior failed to preserve enough of it.
+- If MFE is meaningful, capture ratio is reasonable, and P/L is still negative,
+  MAE may be too large relative to MFE.
+
+Why:
+
+- Converts raw MFE into an exit-quality judgment metric.
+- Helps separate "no opportunity existed" from "opportunity existed but was
+  not captured."
+
+### P1 - Closed-Trade Record Enrichment
+
+Persist trade-quality facts with every closed trade, including bot owner, entry
+context, exit context, regime age, Trend Trust, MFE, MAE, capture ratio, and
+exit reason.
+
+Include hold duration while the lifecycle ledger is being enriched. Hold
+duration by bot and exit reason helps distinguish fast reversals from slow
+bleeds, especially for InverseBot.
+
+Why:
+
+- Makes the daily row and AAR less dependent on ad hoc log archaeology.
+- Lets Research Mode compare candidates by behavior, not just P/L.
+
+### P1 - InverseBot Archaeology Report
+
+Use enriched closed trades to answer whether InverseBot fails from poor entry,
+poor exit/capture, or downside-continuation doctrine mismatch.
+
+Output discipline:
+
+- The report should end with ranked hypotheses to test in Research Mode, not
+  immediate live changes.
+- Example output shape: "Hypothesis: InverseBot bearish-continuation entries
+  show meaningful MFE but poor capture during Bear Cascade tapes."
+
+Why:
+
+- June 5 showed that detecting a bearish cascade is not the same as monetizing
+  it.
+- InverseBot should be evaluated separately from MomentumBot rather than
+  treated as a perfect mirror.
+
+### P2 - Strategy Preset Save/Load
+
+Preserve discovered configurations such as
+`BigMove_v2_Candidate / Stability_8_30_Gap30_Ext05`.
+
+Preset records should preserve context, not just numeric controls:
+
+- Name
+- Status
+- Created/discovery date
+- Config snapshot
+- Discovery context
+- Tested dates
+- Aggregate result / cross-date P/L summary
+- Evidence summary
+- Operator notes
+
+Why:
+
+- Presets preserve knowledge.
+- MFE/MAE creates knowledge.
+- If sprint bandwidth gets tight, ship MFE/MAE and capture ratio cleanly before
+  shipping presets.
+
+Success criteria:
+
+- Every closed trade can say whether it found favorable excursion.
+- Every closed trade can say how much of that excursion was captured.
+- Every closed trade records hold duration.
+- InverseBot can be analyzed without manually reading every lifecycle line.
+- InverseBot archaeology returns testable hypotheses rather than doctrine
+  changes.
+- Research rows and AARs can discuss trade quality, not only trade result.
 
 ## P0 Candidates Before / After Initial Go-Live
 
@@ -1171,7 +1518,7 @@ Watch:
   live row exposed a mixed paper/live snapshot issue.
 - [x] Spreadsheet rows include `win_rate` plus full config snapshot for live
   and research comparison.
-- [ ] Add MFE/MAE telemetry so route invalidation, trailing stops, and market
+- [x] Add MFE/MAE telemetry so route invalidation, trailing stops, and market
   close exits can be evaluated against missed or protected excursion.
 
 ## Non-Goals For Now
@@ -1254,3 +1601,58 @@ Watch:
   control so live and research outputs can be compared at the same scale.
 - Preserved strategy thresholds after the live day; promoted MFE/MAE and
   exit-quality telemetry as the next evidence upgrades.
+
+2026-06-06:
+
+- Completed the measurement, reporting, and memory scope of the Trade Behavior
+  Analyzer sprint.
+- Added closed-trade MFE/MAE, capture ratio, hold duration, and source-labeled
+  excursion telemetry without changing live strategy behavior.
+- Research Mode enriches closed trades with completed-bar high/low excursion
+  inside the simulated position lifetime.
+- Live/session summaries enrich closed trades from lifecycle managed marks and
+  fill prices.
+- Added a structured InverseBot archaeology report that returns ranked
+  hypotheses for Research Mode testing, not live doctrine changes.
+- Added a Research Mode result surface for overall replay outcome, bot-quality
+  averages, InverseBot archaeology, and closed-trade MFE/MAE/capture review.
+- Added live and research spreadsheet row fields for session-level and bot-level
+  MFE/MAE, capture ratio, hold duration, InverseBot diagnostic counts, and the
+  MFE/MAE source label.
+- Added local strategy preset save/load with name, version, notes, saved
+  timestamp, and strategy-control snapshot. Presets are research memory only;
+  they do not select live configurations or alter strategy behavior
+  automatically.
+
+2026-06-07:
+
+- Compared `live_preset`, `Bear_Capture_Trail_075`,
+  `Lead_Adaptive_8_24_25`, `Momentum_UP_v1`, and `Range_CHOP_v1` across
+  same-date research batches.
+- Renamed the surviving preset candidates:
+  - `Lead_Generalist`
+  - `Lead_Momentum_Specialist`
+  - `Lead_Inverse_Specialist`
+- Preserved `Lead_Generalist` as the current generalist anchor.
+- Promoted `Lead_Momentum_Specialist` to momentum/upside-trend specialist
+  candidate status.
+- Promoted `Lead_Inverse_Specialist` to inverse/downside-damage specialist
+  candidate status, not general replacement status.
+- Retired `Bear_Capture_Trail_075` as a research stepping stone after
+  out-of-sample failure.
+- Left the Chop/range specialist slot open; `Range_CHOP_v1` did not prove a
+  distinct range doctrine.
+- Built the same-date preset comparison matrix and environment-fingerprint
+  frame.
+- Added an interactive no-sheet-post comparison UI, elapsed progress indicator,
+  and copyable markdown output.
+- Ran a `60` replay comparison across `20` dates and the three lead presets.
+  `Lead_Momentum_Specialist` led the aggregate result at `$2.83`, while
+  `Lead_Generalist` remained the default anchor and `Lead_Inverse_Specialist`
+  won the highest wrong-choice-cost downside dates.
+- First deterministic fingerprint clue: every `Lead_Momentum_Specialist` win in
+  the batch had `30m Trans/hr = 0`. Treat this as a hypothesis for shadow
+  routing, not a live rule.
+- Keep active config routing parked until broader batches and shadow selector
+  evidence prove that the routing decision is better than simply staying with
+  `Lead_Generalist`.

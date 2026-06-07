@@ -36,6 +36,10 @@ const state = {
   dryRun: false,
   researchModeEnabled: false,
   researchBusy: false,
+  researchProgressTimer: null,
+  researchProgressStartedAt: null,
+  researchProgressLabel: "",
+  lastResearchResult: null,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -44,6 +48,7 @@ const LOG_COLLAPSED_KEY = "edgewalker-log-collapsed";
 const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
 const SECTION_COLLAPSED_PREFIX = "edgewalker-section-collapsed:";
 const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v2";
+const RESEARCH_PRESETS_KEY = "edgewalker-research-presets-v1";
 const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
@@ -144,6 +149,8 @@ const els = {
   controlsActionRow: document.querySelector("#controlsActionRow"),
   researchControls: document.querySelector("#researchControls"),
   researchMessage: document.querySelector("#researchMessage"),
+  researchProgress: document.querySelector("#researchProgress"),
+  researchProgressText: document.querySelector("#researchProgressText"),
   backtestDate: document.querySelector("#backtestDateInput"),
   backtestFeed: document.querySelector("#backtestFeedInput"),
   backtestStartingAccount: document.querySelector("#backtestStartingAccountInput"),
@@ -151,7 +158,19 @@ const els = {
   backtestSlippage: document.querySelector("#backtestSlippageInput"),
   backtestPresetName: document.querySelector("#backtestPresetNameInput"),
   backtestPresetVersion: document.querySelector("#backtestPresetVersionInput"),
+  researchPresetLibrary: document.querySelector("#researchPresetLibraryInput"),
+  researchPresetNotes: document.querySelector("#researchPresetNotesInput"),
+  researchCompareDates: document.querySelector("#researchCompareDatesInput"),
+  researchComparePresets: document.querySelector("#researchComparePresetsInput"),
+  selectAllResearchComparePresets: document.querySelector(
+    "#selectAllResearchComparePresetsButton",
+  ),
+  saveResearchPreset: document.querySelector("#saveResearchPresetButton"),
+  loadResearchPreset: document.querySelector("#loadResearchPresetButton"),
+  deleteResearchPreset: document.querySelector("#deleteResearchPresetButton"),
   runBacktest: document.querySelector("#runBacktestButton"),
+  runResearchCompare: document.querySelector("#runResearchCompareButton"),
+  researchResults: document.querySelector("#researchResults"),
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
   mode: document.querySelector("#modeValue"),
@@ -454,6 +473,265 @@ function validateAllocationPercent(value) {
   if (parsed === null || parsed <= 0 || parsed > 100) {
     throw new Error("Sizing percent must be greater than 0 and at most 100.");
   }
+}
+
+function researchPresetId(name, version) {
+  return `${name.trim()}::${(version || "v1").trim()}`;
+}
+
+function readResearchPresets() {
+  try {
+    const raw = localStorage.getItem(RESEARCH_PRESETS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((preset) => preset && preset.id && preset.name)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeResearchPresets(presets) {
+  try {
+    localStorage.setItem(RESEARCH_PRESETS_KEY, JSON.stringify(presets));
+  } catch {
+    setResearchMessage("Could not save preset library in this browser.", "danger");
+  }
+}
+
+function renderResearchPresetLibrary(selectedId = "") {
+  if (!els.researchPresetLibrary && !els.researchComparePresets) return;
+  const presets = readResearchPresets();
+  const optionHtml = presets
+    .map(
+      (preset) =>
+        `<option value="${escapeHtml(preset.id)}">${escapeHtml(
+          `${preset.name} ${preset.version ? `(${preset.version})` : ""}`.trim(),
+        )}</option>`,
+    )
+    .join("");
+  if (els.researchPresetLibrary) {
+    els.researchPresetLibrary.innerHTML = presets.length
+      ? `<option value="">Choose saved preset</option>${optionHtml}`
+      : '<option value="">No saved presets</option>';
+    els.researchPresetLibrary.value = selectedId;
+  }
+  if (els.researchComparePresets) {
+    const selectedCompareIds = new Set(
+      Array.from(els.researchComparePresets.selectedOptions || []).map(
+        (option) => option.value,
+      ),
+    );
+    els.researchComparePresets.innerHTML = presets.length
+      ? optionHtml
+      : '<option value="">No saved presets</option>';
+    Array.from(els.researchComparePresets.options).forEach((option) => {
+      option.selected = selectedCompareIds.has(option.value);
+    });
+  }
+  syncResearchPresetButtons();
+}
+
+function syncResearchPresetButtons() {
+  const selected = Boolean(els.researchPresetLibrary?.value);
+  const compareSelectedCount = Array.from(
+    els.researchComparePresets?.selectedOptions || [],
+  ).filter((option) => option.value).length;
+  const hasCompareOptions = Array.from(els.researchComparePresets?.options || []).some(
+    (option) => option.value,
+  );
+  const locked = state.running || state.busy || state.researchBusy;
+  if (els.saveResearchPreset) {
+    els.saveResearchPreset.disabled = locked;
+  }
+  if (els.loadResearchPreset) {
+    els.loadResearchPreset.disabled = locked || !selected;
+  }
+  if (els.deleteResearchPreset) {
+    els.deleteResearchPreset.disabled = locked || !selected;
+  }
+  if (els.selectAllResearchComparePresets) {
+    els.selectAllResearchComparePresets.disabled = locked || !hasCompareOptions;
+  }
+  if (els.runResearchCompare) {
+    els.runResearchCompare.disabled = locked || compareSelectedCount < 2;
+  }
+}
+
+function saveResearchPreset() {
+  const name = (els.backtestPresetName?.value || "").trim();
+  const version = (els.backtestPresetVersion?.value || "v1").trim() || "v1";
+  if (!name) {
+    setResearchMessage("Name the preset before saving it.", "warning");
+    return;
+  }
+  let config;
+  try {
+    config = payloadFromForm();
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+    return;
+  }
+  delete config.dryRun;
+  const id = researchPresetId(name, version);
+  const presets = readResearchPresets();
+  const nextPreset = {
+    id,
+    name,
+    version,
+    notes: els.researchPresetNotes?.value || "",
+    saved_at: new Date().toISOString(),
+    config,
+  };
+  const existingIndex = presets.findIndex((preset) => preset.id === id);
+  if (existingIndex >= 0) {
+    presets[existingIndex] = nextPreset;
+  } else {
+    presets.push(nextPreset);
+  }
+  presets.sort((a, b) => `${a.name} ${a.version}`.localeCompare(`${b.name} ${b.version}`));
+  writeResearchPresets(presets);
+  renderResearchPresetLibrary(id);
+  setResearchMessage(`Saved preset ${name} (${version}).`, "success");
+}
+
+function selectedResearchPreset() {
+  const id = els.researchPresetLibrary?.value;
+  if (!id) {
+    return null;
+  }
+  return readResearchPresets().find((preset) => preset.id === id) || null;
+}
+
+function selectedResearchComparePresets() {
+  const selectedIds = new Set(
+    Array.from(els.researchComparePresets?.selectedOptions || [])
+      .map((option) => option.value)
+      .filter(Boolean),
+  );
+  if (!selectedIds.size) {
+    return [];
+  }
+  return readResearchPresets().filter((preset) => selectedIds.has(preset.id));
+}
+
+function selectAllResearchComparePresets() {
+  if (!els.researchComparePresets) return;
+  Array.from(els.researchComparePresets.options).forEach((option) => {
+    option.selected = Boolean(option.value);
+  });
+  syncResearchPresetButtons();
+  setResearchMessage("Selected all saved presets for comparison.", "success");
+}
+
+function loadResearchPreset() {
+  const preset = selectedResearchPreset();
+  if (!preset) {
+    setResearchMessage("Choose a saved preset first.", "warning");
+    return;
+  }
+  applyStrategyConfig(preset.config || {});
+  if (els.backtestPresetName) {
+    els.backtestPresetName.value = preset.name || "Current Controls";
+  }
+  if (els.backtestPresetVersion) {
+    els.backtestPresetVersion.value = preset.version || "v1";
+  }
+  if (els.researchPresetNotes) {
+    els.researchPresetNotes.value = preset.notes || "";
+  }
+  setResearchMessage(`Loaded preset ${preset.name}. Save settings or run a backtest to apply it.`, "success");
+}
+
+function deleteResearchPreset() {
+  const preset = selectedResearchPreset();
+  if (!preset) {
+    setResearchMessage("Choose a saved preset first.", "warning");
+    return;
+  }
+  const presets = readResearchPresets().filter((item) => item.id !== preset.id);
+  writeResearchPresets(presets);
+  renderResearchPresetLibrary();
+  setResearchMessage(`Deleted preset ${preset.name}.`, "success");
+}
+
+function applyStrategyConfig(config) {
+  if (!config || typeof config !== "object") {
+    return;
+  }
+  if (els.symbol && config.symbol) {
+    els.symbol.value = String(config.symbol).toUpperCase();
+  }
+  const sizingMode = config.positionSizingMode || "FIXED";
+  const allocation = String(config.positionAllocationPercent || "25");
+  if (els.positionSizing) {
+    if (sizingMode === "DYNAMIC") {
+      els.positionSizing.value = ["25", "50", "75", "95"].includes(allocation)
+        ? allocation
+        : "CUSTOM";
+      if (els.customAllocation) {
+        els.customAllocation.value = allocation;
+      }
+    } else {
+      els.positionSizing.value = "FIXED";
+    }
+    state.lastSizingValue = els.positionSizing.value;
+  }
+  if (config.positionNotional) {
+    state.fixedNotionalValue = String(config.positionNotional);
+    if (els.notional && (!els.positionSizing || els.positionSizing.value === "FIXED")) {
+      els.notional.value = state.fixedNotionalValue;
+    }
+  }
+  if (els.trail && config.trailPercent !== undefined) {
+    els.trail.value = config.trailPercent;
+  }
+  if (els.poll && config.pollSeconds !== undefined) {
+    els.poll.value = config.pollSeconds;
+  }
+  if (els.closeout && config.closeLiquidateMinutes !== undefined) {
+    els.closeout.value = config.closeLiquidateMinutes;
+  }
+  if (els.regimeGap && config.regimeGapThreshold !== undefined) {
+    els.regimeGap.value = config.regimeGapThreshold;
+  }
+  if (els.regimeExitGap && config.regimeExitGapThreshold !== undefined) {
+    els.regimeExitGap.value = config.regimeExitGapThreshold;
+  }
+  if (els.chopDiscount && config.chopEntryDiscountPercent !== undefined) {
+    els.chopDiscount.value = config.chopEntryDiscountPercent;
+  }
+  if (config.directionalMode) {
+    els.directionalModes.forEach((input) => {
+      input.checked = input.value === config.directionalMode;
+    });
+  }
+  if (els.directionalMaxExtension && config.directionalMaxExtensionPercent !== undefined) {
+    els.directionalMaxExtension.value = config.directionalMaxExtensionPercent;
+  }
+  if (
+    els.directionalStrongChase &&
+    config.directionalStrongChaseMaxExtensionPercent !== undefined
+  ) {
+    els.directionalStrongChase.value =
+      config.directionalStrongChaseMaxExtensionPercent;
+  }
+  if (els.directionalMinStrength && config.directionalMinStrength !== undefined) {
+    els.directionalMinStrength.value = config.directionalMinStrength;
+  }
+  if (els.directionalCooldown && config.directionalCooldownMinutes !== undefined) {
+    els.directionalCooldown.value = config.directionalCooldownMinutes;
+  }
+  if (els.adaptiveShadow && config.adaptiveShadowEnabled !== undefined) {
+    els.adaptiveShadow.checked = Boolean(config.adaptiveShadowEnabled);
+  }
+  if (els.fast && config.fastSmaMinutes !== undefined) {
+    els.fast.value = config.fastSmaMinutes;
+  }
+  if (els.slow && config.slowSmaMinutes !== undefined) {
+    els.slow.value = config.slowSmaMinutes;
+  }
+  syncSizingControls();
 }
 
 function hydrateForm(data) {
@@ -1197,6 +1475,773 @@ function setResearchMessage(message, tone = "neutral") {
   }
 }
 
+function updateResearchProgressText() {
+  if (!els.researchProgressText || !state.researchProgressStartedAt) return;
+  const elapsedSeconds = Math.max(
+    Math.floor((Date.now() - state.researchProgressStartedAt) / 1000),
+    0,
+  );
+  els.researchProgressText.textContent = `${state.researchProgressLabel} · ${formatDurationSeconds(
+    elapsedSeconds,
+  )} elapsed`;
+}
+
+function startResearchProgress(label) {
+  state.researchProgressLabel = label || "Research run in progress";
+  state.researchProgressStartedAt = Date.now();
+  if (els.researchProgress) {
+    els.researchProgress.hidden = false;
+  }
+  updateResearchProgressText();
+  if (state.researchProgressTimer) {
+    clearInterval(state.researchProgressTimer);
+  }
+  state.researchProgressTimer = window.setInterval(updateResearchProgressText, 1000);
+}
+
+function stopResearchProgress() {
+  if (state.researchProgressTimer) {
+    clearInterval(state.researchProgressTimer);
+  }
+  state.researchProgressTimer = null;
+  state.researchProgressStartedAt = null;
+  state.researchProgressLabel = "";
+  if (els.researchProgress) {
+    els.researchProgress.hidden = true;
+  }
+}
+
+function renderResearchResults(result = state.lastResearchResult) {
+  if (!els.researchResults) return;
+  if (!state.researchModeEnabled || !result) {
+    els.researchResults.hidden = true;
+    els.researchResults.innerHTML = "";
+    return;
+  }
+  if (result.kind === "comparison") {
+    renderResearchComparison(result);
+    return;
+  }
+
+  const row = result.row || {};
+  const performance = result.performance || {};
+  const trades = Array.isArray(result.trades) ? result.trades : [];
+  const quality = performance.trade_quality || {};
+  const archaeology = result.inversebot_archaeology || {};
+  const botPerformance = Array.isArray(performance.bot_performance)
+    ? performance.bot_performance
+    : [];
+  const realizedPl = numberOrNull(row.realized_pl_dollars);
+  const accountChange = numberOrNull(row.account_change_percent);
+  const tradeCount = numberOrNull(row.closed_trades) ?? trades.length;
+  const winRate = numberOrNull(row.win_rate);
+  const posted = result.posted ? "Posted" : "Not posted";
+  const title = `${row.date || result.date || "Backtest"} · ${
+    row.mode || "Research"
+  }`;
+
+  els.researchResults.hidden = false;
+  els.researchResults.innerHTML = `
+    <div class="research-results-head">
+      <div>
+        <p class="eyebrow">BACKTEST RESULT</p>
+        <strong>${escapeHtml(title)}</strong>
+      </div>
+      <div class="research-result-actions">
+        <span class="research-result-status">${escapeHtml(posted)}</span>
+        <button
+          id="copyResearchOutputButton"
+          type="button"
+          class="secondary"
+        >
+          Copy Output
+        </button>
+      </div>
+    </div>
+    <div class="research-summary-grid">
+      ${renderResearchMetric("Realized P/L", formatMoney(realizedPl), realizedPl)}
+      ${renderResearchMetric(
+        "Account Change",
+        accountChange === null ? "--" : formatPercent(accountChange),
+        accountChange,
+      )}
+      ${renderResearchMetric("Closed Trades", String(tradeCount || 0))}
+      ${renderResearchMetric(
+        "Win Rate",
+        winRate === null ? "--" : formatPercent(winRate),
+        winRate,
+      )}
+      ${renderResearchMetric(
+        "Avg MFE",
+        quality.avg_mfe_percent === null || quality.avg_mfe_percent === undefined
+          ? "--"
+          : formatPercent(quality.avg_mfe_percent),
+        quality.avg_mfe_percent,
+      )}
+      ${renderResearchMetric(
+        "Avg MAE",
+        quality.avg_mae_percent === null || quality.avg_mae_percent === undefined
+          ? "--"
+          : formatPercent(quality.avg_mae_percent),
+        quality.avg_mae_percent,
+      )}
+      ${renderResearchMetric(
+        "Avg Capture",
+        quality.avg_capture_ratio_percent === null ||
+          quality.avg_capture_ratio_percent === undefined
+          ? "--"
+          : formatPercent(quality.avg_capture_ratio_percent),
+        quality.avg_capture_ratio_percent,
+      )}
+      ${renderResearchMetric(
+        "Avg Hold",
+        formatDurationSeconds(quality.avg_hold_seconds),
+      )}
+    </div>
+    ${renderResearchBotQuality(botPerformance)}
+    ${renderResearchArchaeology(archaeology)}
+    ${renderResearchTrades(trades)}
+  `;
+  wireResearchResultActions();
+}
+
+function renderResearchComparison(result) {
+  const presetSummaries = Array.isArray(result.preset_summaries)
+    ? result.preset_summaries
+    : [];
+  const dateSummaries = Array.isArray(result.date_summaries)
+    ? result.date_summaries
+    : [];
+  const results = Array.isArray(result.results) ? result.results : [];
+  const leader = presetSummaries[0] || null;
+  const biggestWrongCost = dateSummaries.reduce((maxValue, summary) => {
+    const cost = numberOrNull(summary.worst_misclassification_cost_dollars) || 0;
+    return Math.max(maxValue, cost);
+  }, 0);
+
+  els.researchResults.hidden = false;
+  els.researchResults.innerHTML = `
+    <div class="research-results-head">
+      <div>
+        <p class="eyebrow">PRESET COMPARISON</p>
+        <strong>${escapeHtml(result.run_count || 0)} replay runs</strong>
+      </div>
+      <div class="research-result-actions">
+        <span class="research-result-status">${escapeHtml(
+          `${result.preset_count || 0} presets · ${dateSummaries.length} dates`,
+        )}</span>
+        <button
+          id="copyResearchOutputButton"
+          type="button"
+          class="secondary"
+        >
+          Copy Output
+        </button>
+      </div>
+    </div>
+    <div class="research-summary-grid">
+      ${renderResearchMetric(
+        "Aggregate Leader",
+        leader ? leader.preset_name : "--",
+        leader?.total_pl,
+      )}
+      ${renderResearchMetric(
+        "Leader Total P/L",
+        leader ? formatMoney(leader.total_pl) : "--",
+        leader?.total_pl,
+      )}
+      ${renderResearchMetric(
+        "Leader Date Wins",
+        leader ? String(leader.date_wins || 0) : "--",
+      )}
+      ${renderResearchMetric(
+        "Max Wrong-Cost",
+        formatMoney(biggestWrongCost),
+        biggestWrongCost,
+      )}
+      ${renderResearchMetric("Fill Model", formatLabel(result.fill_model || "--"))}
+      ${renderResearchMetric(
+        "Slippage",
+        `${escapeHtml(result.slippage_bps ?? "0")} bps`,
+      )}
+    </div>
+    ${renderResearchPresetSummaryTable(presetSummaries)}
+    ${renderResearchDateSummaryTable(dateSummaries)}
+    ${renderResearchComparisonRunTable(results)}
+  `;
+  wireResearchResultActions();
+}
+
+function renderResearchPresetSummaryTable(rows) {
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Aggregate Preset Results</span>
+        <small>${rows.length} presets</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              <th>Preset</th>
+              <th>Total P/L</th>
+              <th>Avg %</th>
+              <th>Date Wins</th>
+              <th>Green/Red</th>
+              <th>Momentum</th>
+              <th>Chop</th>
+              <th>Inverse</th>
+              <th>Worst Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.preset_name || "--")}</td>
+                    <td class="${researchToneClass(row.total_pl)}">${escapeHtml(
+                      formatMoney(row.total_pl),
+                    )}</td>
+                    <td class="${researchToneClass(row.avg_account_change_percent)}">${escapeHtml(
+                      formatPercentMaybe(row.avg_account_change_percent),
+                    )}</td>
+                    <td>${escapeHtml(String(row.date_wins || 0))}</td>
+                    <td>${escapeHtml(`${row.green_days || 0}/${row.red_days || 0}`)}</td>
+                    <td class="${researchToneClass(row.momentum_pl)}">${escapeHtml(
+                      formatMoney(row.momentum_pl),
+                    )}</td>
+                    <td class="${researchToneClass(row.chop_pl)}">${escapeHtml(
+                      formatMoney(row.chop_pl),
+                    )}</td>
+                    <td class="${researchToneClass(row.inverse_pl)}">${escapeHtml(
+                      formatMoney(row.inverse_pl),
+                    )}</td>
+                    <td>${escapeHtml(row.worst_date || "--")} ${escapeHtml(
+                      formatMoney(row.worst_pl),
+                    )}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderResearchDateSummaryTable(rows) {
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Date Winners & Fingerprints</span>
+        <small>winner fingerprint shown</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Winner</th>
+              <th>Margin</th>
+              <th>Confidence</th>
+              <th>Worst Cost</th>
+              <th>Trans/hr</th>
+              <th>Regime min</th>
+              <th>Trust</th>
+              <th>30m Trans/hr</th>
+              <th>60m Trans/hr</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(renderResearchDateSummaryRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderResearchDateSummaryRow(row) {
+  const fingerprint = row.winner_fingerprint || {};
+  const early30 = row.winner_early_windows?.["30"] || {};
+  const early60 = row.winner_early_windows?.["60"] || {};
+  return `
+    <tr>
+      <td>${escapeHtml(row.date || "--")}</td>
+      <td>${escapeHtml(row.winner || "--")}</td>
+      <td class="${researchToneClass(row.margin_dollars)}">${escapeHtml(
+        `${formatMoney(row.margin_dollars)} · ${formatPercentMaybe(row.margin_percent)}`,
+      )}</td>
+      <td>${escapeHtml(row.winner_confidence || "--")}</td>
+      <td class="${researchToneClass(row.worst_misclassification_cost_dollars)}">${escapeHtml(
+        formatMoney(row.worst_misclassification_cost_dollars),
+      )}</td>
+      <td>${escapeHtml(formatNumberMaybe(fingerprint.transitions_per_hour))}</td>
+      <td>${escapeHtml(formatNumberMaybe(fingerprint.avg_regime_duration_minutes))}</td>
+      <td>${escapeHtml(formatNumberMaybe(fingerprint.trend_trust_avg))}</td>
+      <td>${escapeHtml(formatNumberMaybe(early30.transitions_per_hour))}</td>
+      <td>${escapeHtml(formatNumberMaybe(early60.transitions_per_hour))}</td>
+    </tr>
+  `;
+}
+
+function renderResearchComparisonRunTable(rows) {
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>All Runs</span>
+        <small>${rows.length} rows</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Preset</th>
+              <th>P/L</th>
+              <th>%</th>
+              <th>Trades</th>
+              <th>Win Rate</th>
+              <th>Momentum</th>
+              <th>Chop</th>
+              <th>Inverse</th>
+              <th>MFE</th>
+              <th>Capture</th>
+              <th>Trans/hr</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(renderResearchComparisonRunRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderResearchComparisonRunRow(result) {
+  const row = result.row || {};
+  const fingerprint = result.fingerprint || {};
+  return `
+    <tr>
+      <td>${escapeHtml(result.date || row.date || "--")}</td>
+      <td>${escapeHtml(result.preset_name || "--")}</td>
+      <td class="${researchToneClass(row.realized_pl_dollars)}">${escapeHtml(
+        formatMoney(row.realized_pl_dollars),
+      )}</td>
+      <td class="${researchToneClass(row.account_change_percent)}">${escapeHtml(
+        formatPercentMaybe(row.account_change_percent),
+      )}</td>
+      <td>${escapeHtml(String(row.closed_trades ?? "--"))}</td>
+      <td>${escapeHtml(formatPercentMaybe(row.win_rate))}</td>
+      <td class="${researchToneClass(row.momentum_pl)}">${escapeHtml(
+        formatMoney(row.momentum_pl),
+      )}</td>
+      <td class="${researchToneClass(row.chop_pl)}">${escapeHtml(
+        formatMoney(row.chop_pl),
+      )}</td>
+      <td class="${researchToneClass(row.inverse_pl)}">${escapeHtml(
+        formatMoney(row.inverse_pl),
+      )}</td>
+      <td>${escapeHtml(formatPercentMaybe(row.session_avg_mfe_percent))}</td>
+      <td class="${researchToneClass(row.session_avg_capture_ratio_percent)}">${escapeHtml(
+        formatPercentMaybe(row.session_avg_capture_ratio_percent),
+      )}</td>
+      <td>${escapeHtml(formatNumberMaybe(fingerprint.transitions_per_hour))}</td>
+    </tr>
+  `;
+}
+
+function wireResearchResultActions() {
+  const copyButton = document.querySelector("#copyResearchOutputButton");
+  if (copyButton) {
+    copyButton.addEventListener("click", copyResearchOutput);
+  }
+}
+
+function markdownCell(value) {
+  return String(value ?? "--").replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+function markdownRow(cells) {
+  return `| ${cells.map(markdownCell).join(" | ")} |`;
+}
+
+function markdownDivider(count) {
+  return `| ${Array.from({ length: count }, () => "---").join(" | ")} |`;
+}
+
+function researchComparisonMarkdown(result) {
+  const presetSummaries = Array.isArray(result.preset_summaries)
+    ? result.preset_summaries
+    : [];
+  const dateSummaries = Array.isArray(result.date_summaries)
+    ? result.date_summaries
+    : [];
+  const runs = Array.isArray(result.results) ? result.results : [];
+  const leader = presetSummaries[0] || {};
+  const lines = [
+    "# EdgeWalker Preset Comparison",
+    "",
+    `Runs: ${result.run_count || 0}`,
+    `Presets: ${result.preset_count || presetSummaries.length}`,
+    `Dates: ${dateSummaries.length}`,
+    `Fill model: ${formatLabel(result.fill_model || "--")}`,
+    `Slippage: ${result.slippage_bps ?? "0"} bps`,
+    `Aggregate leader: ${leader.preset_name || "--"} (${formatMoney(
+      leader.total_pl,
+    )}, ${formatPercentMaybe(leader.avg_account_change_percent)} avg)`,
+    "",
+    "## Aggregate Preset Results",
+    markdownRow([
+      "Preset",
+      "Total P/L",
+      "Avg %",
+      "Date Wins",
+      "Green/Red",
+      "Momentum",
+      "Chop",
+      "Inverse",
+      "Worst Date",
+    ]),
+    markdownDivider(9),
+    ...presetSummaries.map((row) =>
+      markdownRow([
+        row.preset_name || "--",
+        formatMoney(row.total_pl),
+        formatPercentMaybe(row.avg_account_change_percent),
+        row.date_wins || 0,
+        `${row.green_days || 0}/${row.red_days || 0}`,
+        formatMoney(row.momentum_pl),
+        formatMoney(row.chop_pl),
+        formatMoney(row.inverse_pl),
+        `${row.worst_date || "--"} ${formatMoney(row.worst_pl)}`,
+      ]),
+    ),
+    "",
+    "## Date Winners & Fingerprints",
+    markdownRow([
+      "Date",
+      "Winner",
+      "Margin",
+      "Confidence",
+      "Worst Cost",
+      "Trans/hr",
+      "Regime Min",
+      "Trust",
+      "30m Trans/hr",
+      "60m Trans/hr",
+    ]),
+    markdownDivider(10),
+    ...dateSummaries.map((row) => {
+      const fingerprint = row.winner_fingerprint || {};
+      const early30 = row.winner_early_windows?.["30"] || {};
+      const early60 = row.winner_early_windows?.["60"] || {};
+      return markdownRow([
+        row.date || "--",
+        row.winner || "--",
+        `${formatMoney(row.margin_dollars)} ${formatPercentMaybe(
+          row.margin_percent,
+        )}`,
+        row.winner_confidence || "--",
+        formatMoney(row.worst_misclassification_cost_dollars),
+        formatNumberMaybe(fingerprint.transitions_per_hour),
+        formatNumberMaybe(fingerprint.avg_regime_duration_minutes),
+        formatNumberMaybe(fingerprint.trend_trust_avg),
+        formatNumberMaybe(early30.transitions_per_hour),
+        formatNumberMaybe(early60.transitions_per_hour),
+      ]);
+    }),
+    "",
+    "## All Runs",
+    markdownRow([
+      "Date",
+      "Preset",
+      "P/L",
+      "%",
+      "Trades",
+      "Win Rate",
+      "Momentum",
+      "Chop",
+      "Inverse",
+      "MFE",
+      "Capture",
+      "Trans/hr",
+    ]),
+    markdownDivider(12),
+    ...runs.map((resultRow) => {
+      const row = resultRow.row || {};
+      const fingerprint = resultRow.fingerprint || {};
+      return markdownRow([
+        resultRow.date || row.date || "--",
+        resultRow.preset_name || "--",
+        formatMoney(row.realized_pl_dollars),
+        formatPercentMaybe(row.account_change_percent),
+        row.closed_trades ?? "--",
+        formatPercentMaybe(row.win_rate),
+        formatMoney(row.momentum_pl),
+        formatMoney(row.chop_pl),
+        formatMoney(row.inverse_pl),
+        formatPercentMaybe(row.session_avg_mfe_percent),
+        formatPercentMaybe(row.session_avg_capture_ratio_percent),
+        formatNumberMaybe(fingerprint.transitions_per_hour),
+      ]);
+    }),
+  ];
+  return lines.join("\n");
+}
+
+function researchSingleRunMarkdown(result) {
+  const row = result.row || {};
+  const performance = result.performance || {};
+  const botPerformance = Array.isArray(performance.bot_performance)
+    ? performance.bot_performance
+    : [];
+  const lines = [
+    "# EdgeWalker Backtest Result",
+    "",
+    `Date: ${row.date || result.date || "--"}`,
+    `Preset: ${row.preset_name || "--"} (${row.preset_version || "--"})`,
+    `P/L: ${formatMoney(row.realized_pl_dollars)} (${formatPercentMaybe(
+      row.account_change_percent,
+    )})`,
+    `Trades: ${row.closed_trades || 0}`,
+    `Win rate: ${formatPercentMaybe(row.win_rate)}`,
+    `Avg MFE: ${formatPercentMaybe(row.session_avg_mfe_percent)}`,
+    `Avg MAE: ${formatPercentMaybe(row.session_avg_mae_percent)}`,
+    `Avg capture: ${formatPercentMaybe(row.session_avg_capture_ratio_percent)}`,
+    "",
+    "## Bot Quality",
+    markdownRow(["Bot", "P/L", "MFE", "MAE", "Capture", "Hold"]),
+    markdownDivider(6),
+    ...botPerformance.map((bot) =>
+      markdownRow([
+        bot.bot || "--",
+        formatMoney(bot.realized_pl),
+        formatPercentMaybe(bot.avg_mfe_percent),
+        formatPercentMaybe(bot.avg_mae_percent),
+        formatPercentMaybe(bot.avg_capture_ratio_percent),
+        formatDurationSeconds(bot.avg_hold_seconds),
+      ]),
+    ),
+  ];
+  return lines.join("\n");
+}
+
+async function copyResearchOutput() {
+  const result = state.lastResearchResult;
+  if (!result) {
+    setResearchMessage("No research output to copy yet.", "warning");
+    return;
+  }
+  const text =
+    result.kind === "comparison"
+      ? researchComparisonMarkdown(result)
+      : researchSingleRunMarkdown(result);
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    setResearchMessage("Copied research output to clipboard.", "success");
+  } catch (error) {
+    setResearchMessage(`Copy failed: ${error.message}`, "danger");
+  }
+}
+
+function renderResearchMetric(label, value, toneValue = null) {
+  return `
+    <div class="research-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong class="${researchToneClass(toneValue)}">${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function renderResearchBotQuality(rows) {
+  const botRows = Array.isArray(rows) ? rows : [];
+  if (!botRows.length) {
+    return "";
+  }
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Bot Quality</span>
+      </div>
+      <div class="research-bot-grid">
+        ${botRows.map(renderResearchBotCard).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderResearchBotCard(row) {
+  const realized = numberOrNull(row.realized_pl);
+  const capture = row.avg_capture_ratio_percent;
+  return `
+    <div class="research-bot-card">
+      <span>${escapeHtml(formatLabel(row.bot || "Bot"))}</span>
+      <strong class="${researchToneClass(realized)}">${escapeHtml(
+        formatMoney(realized),
+      )}</strong>
+      <dl>
+        <div>
+          <dt>MFE</dt>
+          <dd>${escapeHtml(formatPercentMaybe(row.avg_mfe_percent))}</dd>
+        </div>
+        <div>
+          <dt>MAE</dt>
+          <dd>${escapeHtml(formatPercentMaybe(row.avg_mae_percent))}</dd>
+        </div>
+        <div>
+          <dt>Capture</dt>
+          <dd class="${researchToneClass(capture)}">${escapeHtml(
+            formatPercentMaybe(capture),
+          )}</dd>
+        </div>
+        <div>
+          <dt>Hold</dt>
+          <dd>${escapeHtml(formatDurationSeconds(row.avg_hold_seconds))}</dd>
+        </div>
+      </dl>
+    </div>
+  `;
+}
+
+function renderResearchArchaeology(report) {
+  if (!report || !report.bot) {
+    return "";
+  }
+  const quality = report.quality || {};
+  const hypotheses = Array.isArray(report.hypotheses) ? report.hypotheses : [];
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>${escapeHtml(formatLabel(report.bot))} Archaeology</span>
+        <small>${escapeHtml(String(report.trade_count || 0))} trades</small>
+      </div>
+      <div class="research-archaeology-grid">
+        ${renderResearchMetric(
+          "Near-zero MFE",
+          `${report.near_zero_mfe_count || 0}/${report.trade_count || 0}`,
+        )}
+        ${renderResearchMetric(
+          "Low Capture",
+          `${report.meaningful_mfe_low_capture_count || 0}/${
+            report.trade_count || 0
+          }`,
+        )}
+        ${renderResearchMetric(
+          "Adverse > Favorable",
+          `${report.larger_adverse_than_favorable_count || 0}/${
+            report.trade_count || 0
+          }`,
+        )}
+        ${renderResearchMetric(
+          "Avg Capture",
+          formatPercentMaybe(quality.avg_capture_ratio_percent),
+          quality.avg_capture_ratio_percent,
+        )}
+      </div>
+      ${
+        hypotheses.length
+          ? `<ol class="research-hypotheses">${hypotheses
+              .map(
+                (item) => `
+                  <li>
+                    <strong>${escapeHtml(item.hypothesis || "Hypothesis")}</strong>
+                    <span>${escapeHtml(item.evidence || "")}</span>
+                  </li>
+                `,
+              )
+              .join("")}</ol>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderResearchTrades(trades) {
+  const rows = Array.isArray(trades) ? trades : [];
+  if (!rows.length) {
+    return `
+      <div class="research-section">
+        <div class="research-section-head">
+          <span>Closed Trades</span>
+        </div>
+        <p class="research-empty">No closed trades in this replay.</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Closed Trades</span>
+        <small>${rows.length} rows</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Symbol</th>
+              <th>P/L</th>
+              <th>MFE</th>
+              <th>MAE</th>
+              <th>Capture</th>
+              <th>Hold</th>
+              <th>Exit</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(renderResearchTradeRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderResearchTradeRow(trade) {
+  const realized = numberOrNull(trade.realized_pl);
+  return `
+    <tr>
+      <td>${escapeHtml(formatLabel(trade.bot || "Bot"))}</td>
+      <td>${escapeHtml(trade.symbol || "--")}</td>
+      <td class="${researchToneClass(realized)}">${escapeHtml(
+        formatMoney(realized),
+      )}</td>
+      <td>${escapeHtml(formatPercentMaybe(trade.mfe_percent))}</td>
+      <td>${escapeHtml(formatPercentMaybe(trade.mae_percent))}</td>
+      <td class="${researchToneClass(trade.capture_ratio_percent)}">${escapeHtml(
+        formatPercentMaybe(trade.capture_ratio_percent),
+      )}</td>
+      <td>${escapeHtml(formatDurationSeconds(trade.hold_seconds))}</td>
+      <td>${escapeHtml(formatLabel(trade.exit_reason || "Exit"))}</td>
+    </tr>
+  `;
+}
+
 function renderResearchMode() {
   if (els.researchMode) {
     els.researchMode.checked = state.researchModeEnabled;
@@ -1208,6 +2253,7 @@ function renderResearchMode() {
     els.controlsActionRow.hidden = state.researchModeEnabled;
   }
   document.body.classList.toggle("research-mode", state.researchModeEnabled);
+  renderResearchResults();
 }
 
 function applySettings(settings) {
@@ -1466,6 +2512,15 @@ function ensureBacktestDefaults() {
   }
 }
 
+function parseResearchCompareDates() {
+  const raw = els.researchCompareDates?.value || "";
+  const dates = raw
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return Array.from(new Set(dates));
+}
+
 async function runBacktest() {
   ensureBacktestDefaults();
   if (!els.backtestDate?.value) {
@@ -1476,6 +2531,7 @@ async function runBacktest() {
   if (els.runBacktest) {
     els.runBacktest.disabled = true;
   }
+  syncResearchPresetButtons();
   setResearchMessage("Saving settings...");
   try {
     await saveSettings({
@@ -1484,6 +2540,7 @@ async function runBacktest() {
       button: null,
     });
     setResearchMessage("Running historical replay...");
+    startResearchProgress("Running 1 historical replay");
     const payload = {
       ...payloadFromForm(),
       backtest_date: els.backtestDate.value,
@@ -1500,6 +2557,8 @@ async function runBacktest() {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    state.lastResearchResult = result;
+    renderResearchResults(result);
     const postedText = result.posted ? " Posted to research sheet." : "";
     setResearchMessage(
       `Backtest complete: ${formatMoney(result.row?.realized_pl_dollars || 0)} across ${result.trade_count || 0} trades.${postedText}`,
@@ -1508,10 +2567,75 @@ async function runBacktest() {
   } catch (error) {
     setResearchMessage(error.message, "danger");
   } finally {
+    stopResearchProgress();
     state.researchBusy = false;
     if (els.runBacktest) {
       els.runBacktest.disabled = false;
     }
+    syncResearchPresetButtons();
+  }
+}
+
+async function runResearchComparison() {
+  ensureBacktestDefaults();
+  const dates = parseResearchCompareDates();
+  if (!dates.length) {
+    setResearchMessage("Add at least one comparison date.", "warning");
+    return;
+  }
+  const presets = selectedResearchComparePresets();
+  if (presets.length < 2) {
+    setResearchMessage("Choose at least two saved presets to compare.", "warning");
+    return;
+  }
+  state.researchBusy = true;
+  syncResearchPresetButtons();
+  const runCount = dates.length * presets.length;
+  setResearchMessage(
+    `Comparing ${presets.length} presets across ${dates.length} dates...`,
+  );
+  startResearchProgress(`Running ${runCount} replay runs`);
+  try {
+    await saveSettings({
+      rethrow: true,
+      messageSetter: setResearchMessage,
+      button: null,
+    });
+    const payload = {
+      dates,
+      data_feed: els.backtestFeed?.value || els.dataFeed?.value || "iex",
+      starting_account_value: els.backtestStartingAccount?.value || "100000",
+      fill_model: els.backtestFillModel?.value || "next_bar_open",
+      slippage_bps: els.backtestSlippage?.value || "0",
+      presets: presets.map((preset) => ({
+        name: preset.name,
+        version: preset.version || "v1",
+        notes: preset.notes || "",
+        config: preset.config || {},
+      })),
+    };
+    const result = await request("/api/research/compare", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.lastResearchResult = result;
+    renderResearchResults(result);
+    const leader = Array.isArray(result.preset_summaries)
+      ? result.preset_summaries[0]
+      : null;
+    const leaderText = leader
+      ? ` Leader: ${leader.preset_name} at ${formatMoney(leader.total_pl)}.`
+      : "";
+    setResearchMessage(
+      `Comparison complete: ${result.run_count || 0} replay runs.${leaderText}`,
+      "success",
+    );
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+  } finally {
+    stopResearchProgress();
+    state.researchBusy = false;
+    syncResearchPresetButtons();
   }
 }
 
@@ -2284,6 +3408,48 @@ function formatPercent(value, { fraction = false } = {}) {
   return `${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`;
 }
 
+function formatPercentMaybe(value) {
+  return value === null || value === undefined ? "--" : formatPercent(value);
+}
+
+function formatNumberMaybe(value, digits = 2) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "--";
+  }
+  return parsed.toLocaleString([], {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: digits,
+  });
+}
+
+function formatDurationSeconds(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "--";
+  }
+  const totalSeconds = Math.max(Math.round(parsed), 0);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function researchToneClass(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null || parsed === 0) {
+    return "is-neutral";
+  }
+  return parsed > 0 ? "is-positive" : "is-negative";
+}
+
 function strategyDayPl(status, performance) {
   const realized = numberOrNull(performance?.session_realized_pl);
   const unrealized = numberOrNull(status?.position_unrealized_pl);
@@ -2766,6 +3932,7 @@ function render(data) {
   if (els.runBacktest) {
     els.runBacktest.disabled = state.running || state.busy || state.researchBusy;
   }
+  syncResearchPresetButtons();
   if (els.adaptiveShadowLabel) {
     els.adaptiveShadowLabel.dataset.tooltip = settingsLocked
       ? "Stop Edgewalker before changing Adaptive shadow telemetry."
@@ -2885,6 +4052,37 @@ if (els.runBacktest) {
   els.runBacktest.addEventListener("click", runBacktest);
 }
 
+if (els.runResearchCompare) {
+  els.runResearchCompare.addEventListener("click", runResearchComparison);
+}
+
+if (els.saveResearchPreset) {
+  els.saveResearchPreset.addEventListener("click", saveResearchPreset);
+}
+
+if (els.loadResearchPreset) {
+  els.loadResearchPreset.addEventListener("click", loadResearchPreset);
+}
+
+if (els.deleteResearchPreset) {
+  els.deleteResearchPreset.addEventListener("click", deleteResearchPreset);
+}
+
+if (els.researchPresetLibrary) {
+  els.researchPresetLibrary.addEventListener("change", syncResearchPresetButtons);
+}
+
+if (els.researchComparePresets) {
+  els.researchComparePresets.addEventListener("change", syncResearchPresetButtons);
+}
+
+if (els.selectAllResearchComparePresets) {
+  els.selectAllResearchComparePresets.addEventListener(
+    "click",
+    selectAllResearchComparePresets,
+  );
+}
+
 if (els.backtestStartingAccount) {
   els.backtestStartingAccount.addEventListener("input", () => {
     els.backtestStartingAccount.dataset.autoValue = "false";
@@ -2955,6 +4153,7 @@ setupCollapsibleSections();
 setupActivityLog();
 setupTooltips();
 ensureBacktestDefaults();
+renderResearchPresetLibrary();
 renderResearchMode();
 loadSettings().catch((error) => {
   if (els.error) {

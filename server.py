@@ -61,6 +61,11 @@ from research import (
     ResearchRunRequest,
     run_research_backtest,
 )
+from trade_metrics import (
+    analyze_lifecycle_trades,
+    bot_archaeology_report,
+    trade_quality_averages,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -107,6 +112,26 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "trailing_stop_pl",
     "market_close_exits",
     "market_close_pl",
+    "session_avg_mfe_percent",
+    "session_avg_mae_percent",
+    "session_avg_capture_ratio_percent",
+    "session_avg_hold_seconds",
+    "momentum_avg_mfe_percent",
+    "momentum_avg_mae_percent",
+    "momentum_avg_capture_ratio_percent",
+    "momentum_avg_hold_seconds",
+    "chop_avg_mfe_percent",
+    "chop_avg_mae_percent",
+    "chop_avg_capture_ratio_percent",
+    "chop_avg_hold_seconds",
+    "inverse_avg_mfe_percent",
+    "inverse_avg_mae_percent",
+    "inverse_avg_capture_ratio_percent",
+    "inverse_avg_hold_seconds",
+    "inverse_near_zero_mfe_count",
+    "inverse_meaningful_mfe_low_capture_count",
+    "inverse_adverse_gt_favorable_count",
+    "mfe_mae_source",
     "reconciliation_confidence",
     "config_version",
     "strategy_version",
@@ -762,98 +787,8 @@ def lifecycle_performance_summary(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     session_date = _ny_date_text(now)
-    lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    realized_trades: list[dict[str, Any]] = []
-    unmatched_exit_qty = Decimal("0")
-    ignored_fill_count = 0
-
-    for record in records:
-        if record.get("event_type") not in {
-            LIFECYCLE_PARTIAL_FILL,
-            LIFECYCLE_FULL_FILL,
-        }:
-            continue
-        created_at = _record_created_at(record)
-        if created_at is None or _ny_date_text(created_at) != session_date:
-            continue
-
-        symbol = record.get("symbol")
-        side = str(record.get("side") or "").lower()
-        fill_qty = _record_decimal(record, "fill_delta_qty") or _record_decimal(
-            record,
-            "filled_qty",
-        )
-        fill_price = _record_decimal(record, "filled_avg_price")
-        if not isinstance(symbol, str) or side not in {"buy", "sell"}:
-            ignored_fill_count += 1
-            continue
-        if fill_qty is None or fill_qty <= 0 or fill_price is None:
-            ignored_fill_count += 1
-            continue
-
-        if side == "buy":
-            lots_by_symbol.setdefault(symbol, []).append(
-                {
-                    "qty": fill_qty,
-                    "price": fill_price,
-                    "bot": record.get("bot"),
-                    "created_at": created_at,
-                    "order_id": record.get("order_id"),
-                }
-            )
-            continue
-
-        remaining = fill_qty
-        matched_qty = Decimal("0")
-        cost_basis = Decimal("0")
-        matched_lot_bots: list[tuple[str | None, Decimal]] = []
-        lots = lots_by_symbol.setdefault(symbol, [])
-        while remaining > 0 and lots:
-            lot = lots[0]
-            lot_qty = lot["qty"]
-            consumed_qty = min(remaining, lot_qty)
-            matched_qty += consumed_qty
-            cost_basis += consumed_qty * lot["price"]
-            matched_lot_bots.append((_optional_text(lot.get("bot")), consumed_qty))
-            remaining -= consumed_qty
-            lot["qty"] = lot_qty - consumed_qty
-            if lot["qty"] <= 0:
-                lots.pop(0)
-
-        if matched_qty <= 0:
-            unmatched_exit_qty += remaining
-            continue
-
-        unmatched_exit_qty += max(remaining, Decimal("0"))
-        proceeds = matched_qty * fill_price
-        realized_pl = proceeds - cost_basis
-        avg_entry_price = cost_basis / matched_qty
-        realized_pl_percent = (
-            realized_pl / cost_basis * Decimal("100")
-            if cost_basis > 0
-            else None
-        )
-        realized_trades.append(
-            {
-                "symbol": symbol,
-                "bot": _optional_text(record.get("bot"))
-                or _dominant_bot(matched_lot_bots),
-                "qty": format_decimal(matched_qty),
-                "avg_entry_price": format_decimal(avg_entry_price),
-                "exit_price": format_decimal(fill_price),
-                "realized_pl": format_decimal(realized_pl),
-                "realized_pl_percent": (
-                    format_decimal(realized_pl_percent)
-                    if realized_pl_percent is not None
-                    else None
-                ),
-                "exit_reason": record.get("reason"),
-                "exit_order_id": record.get("order_id"),
-                "closed_at": created_at.astimezone(timezone.utc).isoformat(
-                    timespec="seconds"
-                ),
-            }
-        )
+    analysis = analyze_lifecycle_trades(records, session_date, session_tz=NY_TZ)
+    realized_trades = analysis["realized_trades"]
 
     total_realized = sum(
         (
@@ -862,14 +797,8 @@ def lifecycle_performance_summary(
         ),
         Decimal("0"),
     )
-    open_qty = sum(
-        (lot["qty"] for lots in lots_by_symbol.values() for lot in lots),
-        Decimal("0"),
-    )
-    open_cost_basis = sum(
-        (lot["qty"] * lot["price"] for lots in lots_by_symbol.values() for lot in lots),
-        Decimal("0"),
-    )
+    open_qty = analysis["open_qty"]
+    open_cost_basis = analysis["open_cost_basis"]
     wins = sum(
         1
         for trade in realized_trades
@@ -884,9 +813,10 @@ def lifecycle_performance_summary(
     bot_performance = bot_performance_summary(realized_trades)
     reconciliation_confidence, reconciliation_notes = _pl_reconciliation_confidence(
         open_qty,
-        unmatched_exit_qty,
-        ignored_fill_count,
+        analysis["unmatched_exit_qty"],
+        analysis["ignored_fill_count"],
     )
+    quality = trade_quality_averages(realized_trades)
 
     return {
         "source": "position_lifecycle",
@@ -902,10 +832,16 @@ def lifecycle_performance_summary(
             last_trade.get("realized_pl") if last_trade else None
         ),
         "bot_performance": bot_performance,
+        "realized_trades": realized_trades,
+        "trade_quality": quality,
+        "inversebot_archaeology": bot_archaeology_report(
+            realized_trades,
+            INVERSE_BOT,
+        ),
         "open_lot_qty": format_decimal(open_qty),
         "open_lot_cost_basis": format_decimal(open_cost_basis),
-        "unmatched_exit_qty": format_decimal(unmatched_exit_qty),
-        "ignored_fill_count": ignored_fill_count,
+        "unmatched_exit_qty": format_decimal(analysis["unmatched_exit_qty"]),
+        "ignored_fill_count": analysis["ignored_fill_count"],
     }
 
 
@@ -995,6 +931,7 @@ def bot_performance_summary(realized_trades: list[dict[str, Any]]) -> list[dict[
         elif realized_pl < 0:
             aggregate["losses"] += 1
         aggregate["last_trade"] = trade
+        aggregate["trades"].append(trade)
 
     return [_bot_performance_payload(aggregates[bot]) for bot in order]
 
@@ -1007,6 +944,7 @@ def _blank_bot_performance(bot: str) -> dict[str, Any]:
         "wins": 0,
         "losses": 0,
         "last_trade": None,
+        "trades": [],
     }
 
 
@@ -1015,6 +953,9 @@ def _bot_performance_payload(aggregate: dict[str, Any]) -> dict[str, Any]:
     wins = int(aggregate["wins"])
     losses = int(aggregate["losses"])
     last_trade = aggregate.get("last_trade")
+    trades = aggregate.get("trades")
+    trades = trades if isinstance(trades, list) else []
+    quality = trade_quality_averages(trades)
     win_rate = (
         Decimal(wins) / Decimal(trade_count) * Decimal("100")
         if trade_count > 0
@@ -1036,6 +977,10 @@ def _bot_performance_payload(aggregate: dict[str, Any]) -> dict[str, Any]:
         "last_trade_closed_at": (
             last_trade.get("closed_at") if isinstance(last_trade, dict) else None
         ),
+        "avg_mfe_percent": quality.get("avg_mfe_percent"),
+        "avg_mae_percent": quality.get("avg_mae_percent"),
+        "avg_capture_ratio_percent": quality.get("avg_capture_ratio_percent"),
+        "avg_hold_seconds": quality.get("avg_hold_seconds"),
     }
 
 
@@ -2321,94 +2266,11 @@ def _realized_trades_for_date(
     lifecycle_records: list[dict[str, Any]],
     log_date: str,
 ) -> list[dict[str, Any]]:
-    lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    realized_trades: list[dict[str, Any]] = []
-
-    for record in lifecycle_records:
-        if record.get("event_type") not in {
-            LIFECYCLE_PARTIAL_FILL,
-            LIFECYCLE_FULL_FILL,
-        }:
-            continue
-        created_at = _record_created_at(record)
-        if created_at is None or _ny_date_text(created_at) != log_date:
-            continue
-
-        symbol = record.get("symbol")
-        side = str(record.get("side") or "").lower()
-        fill_qty = _record_decimal(record, "fill_delta_qty") or _record_decimal(
-            record,
-            "filled_qty",
-        )
-        fill_price = _record_decimal(record, "filled_avg_price")
-        if not isinstance(symbol, str) or side not in {"buy", "sell"}:
-            continue
-        if fill_qty is None or fill_qty <= 0 or fill_price is None:
-            continue
-
-        if side == "buy":
-            lots_by_symbol.setdefault(symbol, []).append(
-                {
-                    "qty": fill_qty,
-                    "price": fill_price,
-                    "bot": record.get("bot"),
-                    "created_at": created_at,
-                    "order_id": record.get("order_id"),
-                }
-            )
-            continue
-
-        remaining = fill_qty
-        matched_qty = Decimal("0")
-        cost_basis = Decimal("0")
-        matched_lot_bots: list[tuple[str | None, Decimal]] = []
-        lots = lots_by_symbol.setdefault(symbol, [])
-        while remaining > 0 and lots:
-            lot = lots[0]
-            lot_qty = lot["qty"]
-            consumed_qty = min(remaining, lot_qty)
-            matched_qty += consumed_qty
-            cost_basis += consumed_qty * lot["price"]
-            matched_lot_bots.append((_optional_text(lot.get("bot")), consumed_qty))
-            remaining -= consumed_qty
-            lot["qty"] = lot_qty - consumed_qty
-            if lot["qty"] <= 0:
-                lots.pop(0)
-
-        if matched_qty <= 0:
-            continue
-
-        proceeds = matched_qty * fill_price
-        realized_pl = proceeds - cost_basis
-        avg_entry_price = cost_basis / matched_qty
-        realized_pl_percent = (
-            realized_pl / cost_basis * Decimal("100")
-            if cost_basis > 0
-            else None
-        )
-        realized_trades.append(
-            {
-                "symbol": symbol,
-                "bot": _optional_text(record.get("bot"))
-                or _dominant_bot(matched_lot_bots),
-                "qty": format_decimal(matched_qty),
-                "avg_entry_price": format_decimal(avg_entry_price),
-                "exit_price": format_decimal(fill_price),
-                "realized_pl": format_decimal(realized_pl),
-                "realized_pl_percent": (
-                    format_decimal(realized_pl_percent)
-                    if realized_pl_percent is not None
-                    else None
-                ),
-                "exit_reason": record.get("reason"),
-                "exit_order_id": record.get("order_id"),
-                "closed_at": created_at.astimezone(timezone.utc).isoformat(
-                    timespec="seconds"
-                ),
-            }
-        )
-
-    return realized_trades
+    return analyze_lifecycle_trades(
+        lifecycle_records,
+        log_date,
+        session_tz=NY_TZ,
+    )["realized_trades"]
 
 
 def _bot_pl_map(performance: dict[str, Any] | None) -> dict[str, Decimal]:
@@ -2440,6 +2302,96 @@ def _bottom_pl_bot(bot_pl: dict[str, Decimal]) -> str:
     if not losses:
         return ""
     return min(losses, key=lambda item: item[1])[0]
+
+
+def _quality_number(value: Any) -> float | str:
+    if value in (None, ""):
+        return ""
+    return _rounded_number(value)
+
+
+def _bot_performance_by_name(
+    performance: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(performance, dict):
+        return {}
+    items = performance.get("bot_performance")
+    if not isinstance(items, list):
+        return {}
+    return {
+        bot: item
+        for item in items
+        if isinstance(item, dict)
+        and (bot := _optional_text(item.get("bot"))) in BOT_PERFORMANCE_ORDER
+    }
+
+
+def _trade_quality_source(trades: list[dict[str, Any]]) -> str:
+    sources = sorted(
+        {
+            source
+            for trade in trades
+            if (source := _optional_text(trade.get("mfe_mae_source")))
+        }
+    )
+    return ",".join(sources)
+
+
+def _trade_quality_row_values(
+    performance: dict[str, Any],
+    realized_trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    session_quality = performance.get("trade_quality")
+    if not isinstance(session_quality, dict):
+        session_quality = trade_quality_averages(realized_trades)
+    by_bot = _bot_performance_by_name(performance)
+    inverse_report = performance.get("inversebot_archaeology")
+    if not isinstance(inverse_report, dict):
+        inverse_report = bot_archaeology_report(realized_trades, INVERSE_BOT)
+
+    row = {
+        "session_avg_mfe_percent": _quality_number(
+            session_quality.get("avg_mfe_percent")
+        ),
+        "session_avg_mae_percent": _quality_number(
+            session_quality.get("avg_mae_percent")
+        ),
+        "session_avg_capture_ratio_percent": _quality_number(
+            session_quality.get("avg_capture_ratio_percent")
+        ),
+        "session_avg_hold_seconds": _quality_number(
+            session_quality.get("avg_hold_seconds")
+        ),
+        "inverse_near_zero_mfe_count": int(
+            inverse_report.get("near_zero_mfe_count") or 0
+        ),
+        "inverse_meaningful_mfe_low_capture_count": int(
+            inverse_report.get("meaningful_mfe_low_capture_count") or 0
+        ),
+        "inverse_adverse_gt_favorable_count": int(
+            inverse_report.get("larger_adverse_than_favorable_count") or 0
+        ),
+        "mfe_mae_source": _trade_quality_source(realized_trades),
+    }
+    for bot, prefix in (
+        (MOMENTUM_BOT, "momentum"),
+        (CHOP_BOT, "chop"),
+        (INVERSE_BOT, "inverse"),
+    ):
+        quality = by_bot.get(bot) or {}
+        row[f"{prefix}_avg_mfe_percent"] = _quality_number(
+            quality.get("avg_mfe_percent")
+        )
+        row[f"{prefix}_avg_mae_percent"] = _quality_number(
+            quality.get("avg_mae_percent")
+        )
+        row[f"{prefix}_avg_capture_ratio_percent"] = _quality_number(
+            quality.get("avg_capture_ratio_percent")
+        )
+        row[f"{prefix}_avg_hold_seconds"] = _quality_number(
+            quality.get("avg_hold_seconds")
+        )
+    return row
 
 
 def _narrative_money(value: Any) -> str:
@@ -2716,6 +2668,7 @@ def build_operator_spreadsheet_daily_row(
         "market_close_pl": _rounded_number(
             exit_reason_pl.get("market_close_liquidation")
         ),
+        **_trade_quality_row_values(performance, realized_trades),
         "reconciliation_confidence": performance.get("reconciliation_confidence")
         or "",
         "config_version": _config_snapshot_text(
@@ -3004,8 +2957,521 @@ def run_research_backtest_from_payload(payload: dict[str, Any]) -> dict[str, Any
         "row": row,
         "date": result["date"],
         "performance": result["performance"],
+        "inversebot_archaeology": result["performance"].get(
+            "inversebot_archaeology"
+        ),
+        "trades": result["trades"],
         "trade_count": len(result["trades"]),
         "cycles": len(result["records"]),
+    }
+
+
+def _parse_research_compare_dates(payload: dict[str, Any]) -> list[str]:
+    raw_dates = (
+        payload.get("dates")
+        or payload.get("backtest_dates")
+        or payload.get("backtestDates")
+    )
+    if isinstance(raw_dates, str):
+        candidates = re.split(r"[\s,]+", raw_dates)
+    elif isinstance(raw_dates, list):
+        candidates = [str(item) for item in raw_dates]
+    else:
+        candidates = []
+
+    dates: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        date_text = candidate.strip()
+        if not date_text or date_text in seen:
+            continue
+        try:
+            datetime.strptime(date_text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise BotError("Comparison dates must use YYYY-MM-DD format.") from exc
+        dates.append(date_text)
+        seen.add(date_text)
+    if not dates:
+        raise BotError("Add at least one comparison date.")
+    return dates
+
+
+def _parse_research_compare_presets(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_presets = payload.get("presets")
+    if not isinstance(raw_presets, list):
+        raise BotError("Choose at least two saved presets to compare.")
+
+    presets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_presets, start=1):
+        if not isinstance(item, dict):
+            raise BotError(f"Comparison preset #{index} is invalid.")
+        config = item.get("config")
+        if not isinstance(config, dict):
+            raise BotError(f"Comparison preset #{index} is missing a config snapshot.")
+        name = _optional_text(
+            item.get("name") or item.get("preset_name") or item.get("presetName")
+        ) or f"Preset {index}"
+        version = _optional_text(
+            item.get("version")
+            or item.get("preset_version")
+            or item.get("presetVersion")
+        ) or "v1"
+        preset_id = f"{name}::{version}"
+        if preset_id in seen:
+            continue
+        seen.add(preset_id)
+        presets.append(
+            {
+                "id": preset_id,
+                "name": name,
+                "version": version,
+                "config": dict(config),
+                "notes": _optional_text(item.get("notes")) or "",
+            }
+        )
+
+    if len(presets) < 2:
+        raise BotError("Choose at least two saved presets to compare.")
+    return presets
+
+
+def _record_datetime(record: dict[str, Any]) -> datetime | None:
+    raw = _optional_text(record.get("timestamp"))
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _window_records(
+    records: list[dict[str, Any]],
+    window_minutes: int | None,
+) -> list[dict[str, Any]]:
+    if window_minutes is None or not records:
+        return records
+    first_at = _record_datetime(records[0])
+    if first_at is None:
+        return records[:window_minutes]
+    cutoff = first_at + timedelta(minutes=window_minutes)
+    windowed = [
+        record
+        for record in records
+        if (record_at := _record_datetime(record)) is not None and record_at < cutoff
+    ]
+    return windowed or records[:window_minutes]
+
+
+def _trades_closed_in_window(
+    trades: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    window_minutes: int | None,
+) -> list[dict[str, Any]]:
+    if window_minutes is None or not records:
+        return trades
+    first_at = _record_datetime(records[0])
+    if first_at is None:
+        return []
+    cutoff = first_at + timedelta(minutes=window_minutes)
+    closed: list[dict[str, Any]] = []
+    for trade in trades:
+        raw_closed_at = _optional_text(trade.get("closed_at"))
+        if not raw_closed_at:
+            continue
+        try:
+            closed_at = datetime.fromisoformat(raw_closed_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if closed_at <= cutoff:
+            closed.append(trade)
+    return closed
+
+
+def _research_regime_segments(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    current_regime: str | None = None
+    current_count = 0
+    for record in records:
+        regime = _optional_text(record.get("regime")) or "UNKNOWN"
+        if current_regime is None:
+            current_regime = regime
+            current_count = 1
+            continue
+        if regime == current_regime:
+            current_count += 1
+            continue
+        segments.append({"regime": current_regime, "minutes": current_count})
+        current_regime = regime
+        current_count = 1
+    if current_regime is not None:
+        segments.append({"regime": current_regime, "minutes": current_count})
+    return segments
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(values)
+    middle = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return sorted_values[middle]
+    return (sorted_values[middle - 1] + sorted_values[middle]) / 2
+
+
+def _rounded_float(value: Any, places: int = 2) -> float | None:
+    numeric = _float_from_value(value)
+    if numeric is None:
+        return None
+    return round(numeric, places)
+
+
+def _research_fingerprint(
+    records: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    *,
+    window_minutes: int | None = None,
+) -> dict[str, Any]:
+    window_records = _window_records(records, window_minutes)
+    window_trades = _trades_closed_in_window(trades, records, window_minutes)
+    cycles = len(window_records)
+    transitions = sum(1 for record in window_records if record.get("regime_transition"))
+    hours = max(cycles / 60, 1 / 60)
+    segments = _research_regime_segments(window_records)
+    active_segments = [
+        segment
+        for segment in segments
+        if segment["regime"] not in {"WARMUP", "UNKNOWN", "NONE"}
+    ]
+    duration_source = active_segments or segments
+    durations = [float(segment["minutes"]) for segment in duration_source]
+    trust_scores: list[float] = []
+    for record in window_records:
+        trend_trust = record.get("trend_trust")
+        if isinstance(trend_trust, dict):
+            score = _float_from_value(trend_trust.get("score"))
+            if score is not None:
+                trust_scores.append(score)
+    quality = trade_quality_averages(window_trades)
+    wins = sum(
+        1
+        for trade in window_trades
+        if (_float_from_value(trade.get("realized_pl")) or 0) > 0
+    )
+    trade_count = len(window_trades)
+    win_rate = wins / trade_count * 100 if trade_count else None
+    route_invalidations = [
+        trade
+        for trade in window_trades
+        if _optional_text(trade.get("exit_reason")) == "route_invalidated_exit"
+    ]
+    trailing_stops = [
+        trade
+        for trade in window_trades
+        if _optional_text(trade.get("exit_reason")) == "trailing_stop_breached"
+    ]
+
+    def realized_total(rows: list[dict[str, Any]]) -> float:
+        total = Decimal("0")
+        for row in rows:
+            value = _decimal_from_value(row.get("realized_pl"))
+            if value is not None:
+                total += value
+        return _rounded_number(total)
+
+    return {
+        "window_minutes": window_minutes,
+        "cycles": cycles,
+        "is_full_session": cycles >= 350 if window_minutes is None else None,
+        "regime_transitions": transitions,
+        "transitions_per_hour": round(transitions / hours, 2),
+        "avg_regime_duration_minutes": (
+            round(sum(durations) / len(durations), 2) if durations else None
+        ),
+        "median_regime_duration_minutes": (
+            round(_median(durations), 2) if durations else None
+        ),
+        "max_regime_duration_minutes": round(max(durations), 2) if durations else None,
+        "warmup_cycles": sum(
+            1 for record in window_records if record.get("regime") == "WARMUP"
+        ),
+        "trend_trust_avg": (
+            round(sum(trust_scores) / len(trust_scores), 2) if trust_scores else None
+        ),
+        "closed_trades": trade_count,
+        "win_rate": round(win_rate, 2) if win_rate is not None else None,
+        "route_invalidation_rate": (
+            round(len(route_invalidations) / trade_count * 100, 2)
+            if trade_count
+            else None
+        ),
+        "route_invalidation_pl": realized_total(route_invalidations),
+        "trailing_stop_rate": (
+            round(len(trailing_stops) / trade_count * 100, 2)
+            if trade_count
+            else None
+        ),
+        "trailing_stop_pl": realized_total(trailing_stops),
+        "avg_mfe_percent": _rounded_float(quality.get("avg_mfe_percent")),
+        "avg_mae_percent": _rounded_float(quality.get("avg_mae_percent")),
+        "avg_capture_ratio_percent": _rounded_float(
+            quality.get("avg_capture_ratio_percent")
+        ),
+        "avg_hold_seconds": _rounded_float(quality.get("avg_hold_seconds")),
+    }
+
+
+def _research_result_summary(
+    result: dict[str, Any],
+    preset: dict[str, Any],
+) -> dict[str, Any]:
+    row = dict(result.get("row") or {})
+    performance = result.get("performance") if isinstance(result.get("performance"), dict) else {}
+    trades = result.get("trades") if isinstance(result.get("trades"), list) else []
+    records = result.get("records") if isinstance(result.get("records"), list) else []
+    return {
+        "date": _optional_text(row.get("date") or result.get("date")) or "",
+        "preset_id": preset["id"],
+        "preset_name": preset["name"],
+        "preset_version": preset["version"],
+        "row": row,
+        "bot_performance": performance.get("bot_performance") or [],
+        "inversebot_archaeology": performance.get("inversebot_archaeology") or {},
+        "fingerprint": _research_fingerprint(records, trades),
+        "early_windows": {
+            "30": _research_fingerprint(records, trades, window_minutes=30),
+            "60": _research_fingerprint(records, trades, window_minutes=60),
+        },
+        "trade_count": len(trades),
+        "cycles": len(records),
+    }
+
+
+def _research_winner_confidence(margin_percent: Decimal) -> str:
+    margin = abs(margin_percent)
+    if margin >= Decimal("1.00"):
+        return "HIGH"
+    if margin >= Decimal("0.25"):
+        return "MODERATE"
+    return "LOW"
+
+
+def _research_compare_date_summary(
+    date_text: str,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ranked = sorted(
+        results,
+        key=lambda item: _decimal_from_value(item["row"].get("realized_pl_dollars"))
+        or Decimal("0"),
+        reverse=True,
+    )
+    winner = ranked[0]
+    runner_up = ranked[1] if len(ranked) > 1 else ranked[0]
+    worst = ranked[-1]
+    winner_pl = _decimal_from_value(winner["row"].get("realized_pl_dollars")) or Decimal("0")
+    runner_pl = _decimal_from_value(runner_up["row"].get("realized_pl_dollars")) or Decimal("0")
+    worst_pl = _decimal_from_value(worst["row"].get("realized_pl_dollars")) or Decimal("0")
+    winner_pct = _decimal_from_value(winner["row"].get("account_change_percent")) or Decimal("0")
+    runner_pct = _decimal_from_value(runner_up["row"].get("account_change_percent")) or Decimal("0")
+    margin_pl = winner_pl - runner_pl
+    margin_pct = winner_pct - runner_pct
+    costs = [
+        {
+            "preset_name": result["preset_name"],
+            "preset_version": result["preset_version"],
+            "cost_dollars": _rounded_number(
+                winner_pl
+                - (
+                    _decimal_from_value(result["row"].get("realized_pl_dollars"))
+                    or Decimal("0")
+                )
+            ),
+            "cost_percent": _rounded_number(
+                winner_pct
+                - (
+                    _decimal_from_value(result["row"].get("account_change_percent"))
+                    or Decimal("0")
+                )
+            ),
+        }
+        for result in ranked
+        if result is not winner
+    ]
+    return {
+        "date": date_text,
+        "winner": winner["preset_name"],
+        "winner_version": winner["preset_version"],
+        "winner_pl": _rounded_number(winner_pl),
+        "winner_account_change_percent": _rounded_number(winner_pct),
+        "runner_up": runner_up["preset_name"],
+        "runner_up_version": runner_up["preset_version"],
+        "runner_up_pl": _rounded_number(runner_pl),
+        "worst": worst["preset_name"],
+        "worst_version": worst["preset_version"],
+        "worst_pl": _rounded_number(worst_pl),
+        "margin_dollars": _rounded_number(margin_pl),
+        "margin_percent": _rounded_number(margin_pct),
+        "winner_confidence": _research_winner_confidence(margin_pct),
+        "worst_misclassification_cost_dollars": _rounded_number(winner_pl - worst_pl),
+        "worst_misclassification_cost_percent": _rounded_number(
+            winner_pct
+            - (
+                _decimal_from_value(worst["row"].get("account_change_percent"))
+                or Decimal("0")
+            )
+        ),
+        "misclassification_costs": costs,
+        "winner_fingerprint": winner["fingerprint"],
+        "winner_early_windows": winner["early_windows"],
+    }
+
+
+def _research_compare_preset_summaries(
+    results: list[dict[str, Any]],
+    date_summaries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    date_winners = {
+        summary["date"]: f"{summary['winner']}::{summary['winner_version']}"
+        for summary in date_summaries
+    }
+    buckets: dict[str, dict[str, Any]] = {}
+    for result in results:
+        key = result["preset_id"]
+        row = result["row"]
+        bucket = buckets.setdefault(
+            key,
+            {
+                "preset_name": result["preset_name"],
+                "preset_version": result["preset_version"],
+                "runs": 0,
+                "date_wins": 0,
+                "green_days": 0,
+                "red_days": 0,
+                "total_pl": Decimal("0"),
+                "total_account_change_percent": Decimal("0"),
+                "momentum_pl": Decimal("0"),
+                "chop_pl": Decimal("0"),
+                "inverse_pl": Decimal("0"),
+                "closed_trades": 0,
+                "best_date": "",
+                "best_pl": None,
+                "worst_date": "",
+                "worst_pl": None,
+            },
+        )
+        realized_pl = _decimal_from_value(row.get("realized_pl_dollars")) or Decimal("0")
+        account_change = _decimal_from_value(row.get("account_change_percent")) or Decimal("0")
+        bucket["runs"] += 1
+        bucket["total_pl"] += realized_pl
+        bucket["total_account_change_percent"] += account_change
+        bucket["momentum_pl"] += _decimal_from_value(row.get("momentum_pl")) or Decimal("0")
+        bucket["chop_pl"] += _decimal_from_value(row.get("chop_pl")) or Decimal("0")
+        bucket["inverse_pl"] += _decimal_from_value(row.get("inverse_pl")) or Decimal("0")
+        bucket["closed_trades"] += int(_float_from_value(row.get("closed_trades")) or 0)
+        if realized_pl > 0:
+            bucket["green_days"] += 1
+        elif realized_pl < 0:
+            bucket["red_days"] += 1
+        if date_winners.get(result["date"]) == key:
+            bucket["date_wins"] += 1
+        if bucket["best_pl"] is None or realized_pl > bucket["best_pl"]:
+            bucket["best_pl"] = realized_pl
+            bucket["best_date"] = result["date"]
+        if bucket["worst_pl"] is None or realized_pl < bucket["worst_pl"]:
+            bucket["worst_pl"] = realized_pl
+            bucket["worst_date"] = result["date"]
+
+    summaries = []
+    for bucket in buckets.values():
+        runs = int(bucket["runs"] or 1)
+        summaries.append(
+            {
+                "preset_name": bucket["preset_name"],
+                "preset_version": bucket["preset_version"],
+                "runs": bucket["runs"],
+                "date_wins": bucket["date_wins"],
+                "green_days": bucket["green_days"],
+                "red_days": bucket["red_days"],
+                "total_pl": _rounded_number(bucket["total_pl"]),
+                "avg_pl": _rounded_number(bucket["total_pl"] / Decimal(runs)),
+                "total_account_change_percent": _rounded_number(
+                    bucket["total_account_change_percent"]
+                ),
+                "avg_account_change_percent": _rounded_number(
+                    bucket["total_account_change_percent"] / Decimal(runs)
+                ),
+                "momentum_pl": _rounded_number(bucket["momentum_pl"]),
+                "chop_pl": _rounded_number(bucket["chop_pl"]),
+                "inverse_pl": _rounded_number(bucket["inverse_pl"]),
+                "closed_trades": bucket["closed_trades"],
+                "best_date": bucket["best_date"],
+                "best_pl": _rounded_number(bucket["best_pl"]),
+                "worst_date": bucket["worst_date"],
+                "worst_pl": _rounded_number(bucket["worst_pl"]),
+            }
+        )
+    return sorted(summaries, key=lambda item: item["total_pl"], reverse=True)
+
+
+def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    dates = _parse_research_compare_dates(payload)
+    presets = _parse_research_compare_presets(payload)
+    run_count = len(dates) * len(presets)
+    if run_count > 60:
+        raise BotError("Limit one comparison batch to 60 replay runs.")
+
+    results: list[dict[str, Any]] = []
+    for date_text in dates:
+        for preset in presets:
+            run_payload = {
+                **preset["config"],
+                "backtest_date": date_text,
+                "data_feed": payload.get("data_feed")
+                or payload.get("dataFeed")
+                or preset["config"].get("dataFeed")
+                or "iex",
+                "starting_account_value": payload.get("starting_account_value")
+                or payload.get("startingAccountValue")
+                or "100000",
+                "fill_model": payload.get("fill_model")
+                or payload.get("fillModel")
+                or RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
+                "slippage_bps": payload.get("slippage_bps")
+                if payload.get("slippage_bps") is not None
+                else payload.get("slippageBps", "0"),
+                "preset_name": preset["name"],
+                "preset_version": preset["version"],
+            }
+            config = config_from_research_payload(run_payload)
+            request = research_request_from_payload(run_payload, config)
+            result = run_research_backtest(config, request)
+            results.append(_research_result_summary(result, preset))
+
+    date_summaries = [
+        _research_compare_date_summary(
+            date_text,
+            [result for result in results if result["date"] == date_text],
+        )
+        for date_text in dates
+    ]
+    preset_summaries = _research_compare_preset_summaries(results, date_summaries)
+    return {
+        "status": "completed",
+        "kind": "comparison",
+        "dates": dates,
+        "preset_count": len(presets),
+        "run_count": run_count,
+        "fill_model": payload.get("fill_model")
+        or payload.get("fillModel")
+        or RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
+        "slippage_bps": payload.get("slippage_bps")
+        if payload.get("slippage_bps") is not None
+        else payload.get("slippageBps", "0"),
+        "results": results,
+        "date_summaries": date_summaries,
+        "preset_summaries": preset_summaries,
     }
 
 
@@ -4003,6 +4469,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 if self.runner.snapshot().running:
                     raise BotError("Stop the live/paper loop before running research.")
                 self.send_json(run_research_backtest_from_payload(payload))
+                return
+            if self.path == "/api/research/compare":
+                self.require_local_ui_request("research comparison requests")
+                if self.runner.snapshot().running:
+                    raise BotError("Stop the live/paper loop before running research.")
+                self.send_json(run_research_comparison_from_payload(payload))
                 return
             if self.path == "/api/live-arm":
                 self.require_local_ui_request()
