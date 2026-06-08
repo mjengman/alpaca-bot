@@ -211,6 +211,18 @@
           <label class="field">
             <span
               class="has-tooltip"
+              data-tooltip="When enabled, EdgeWalker starts on Lead_Generalist and may autonomously apply v6 09:45 preset authority using the saved Lead presets."
+              >Preset authority</span
+            >
+            <select id="presetAuthorityModeInput" aria-label="Preset authority mode">
+              <option value="OFF" selected>Off</option>
+              <option value="V6_0945">v6 09:45 auto</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span
+              class="has-tooltip"
               data-tooltip="Fixed mode uses this as the configured order size. Dynamic modes show a read-only dollar preview from current buying power."
               >Position $</span
             >
@@ -649,6 +661,14 @@
                 >
                   Compare Presets
                 </button>
+                <button
+                  id="runShadowRouterButton"
+                  type="button"
+                  class="secondary has-tooltip"
+                  data-tooltip="Replay the selected presets and score deterministic shadow-router picks at 9:45, 10:00, 10:30, and 11:00."
+                >
+                  Shadow Router
+                </button>
               </div>
             </div>
             <div class="button-row research-action-row">
@@ -747,6 +767,14 @@
               >Action</span
             >
             <strong id="actionValue">Waiting</strong>
+          </div>
+          <div>
+            <span
+              class="has-tooltip"
+              data-tooltip="Preset authority state for this session. v6 starts from Lead_Generalist and may route a HIGH-confidence 09:45 specialist signal."
+              >Authority</span
+            >
+            <strong id="authorityValue">Off</strong>
           </div>
         </div>
 

@@ -40,6 +40,7 @@ const state = {
   researchProgressStartedAt: null,
   researchProgressLabel: "",
   lastResearchResult: null,
+  tooltipsSetup: false,
 };
 
 const THEME_KEY = "edgewalker-theme";
@@ -49,6 +50,8 @@ const LOG_EXPANDED_KEY = "edgewalker-log-expanded";
 const SECTION_COLLAPSED_PREFIX = "edgewalker-section-collapsed:";
 const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v2";
 const RESEARCH_PRESETS_KEY = "edgewalker-research-presets-v1";
+const PRESET_AUTHORITY_MODE_KEY = "edgewalker-preset-authority-mode-v1";
+const PRESET_AUTHORITY_MODE_V6 = "V6_0945";
 const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
@@ -135,6 +138,7 @@ const els = {
   regimeExitGap: document.querySelector("#regimeExitGapInput"),
   chopDiscount: document.querySelector("#chopDiscountInput"),
   directionalModes: document.querySelectorAll('input[name="directionalMode"]'),
+  presetAuthorityMode: document.querySelector("#presetAuthorityModeInput"),
   directionalMaxExtension: document.querySelector("#directionalMaxExtensionInput"),
   directionalStrongChase: document.querySelector("#directionalStrongChaseInput"),
   directionalMinStrength: document.querySelector("#directionalMinStrengthInput"),
@@ -170,6 +174,7 @@ const els = {
   deleteResearchPreset: document.querySelector("#deleteResearchPresetButton"),
   runBacktest: document.querySelector("#runBacktestButton"),
   runResearchCompare: document.querySelector("#runResearchCompareButton"),
+  runShadowRouter: document.querySelector("#runShadowRouterButton"),
   researchResults: document.querySelector("#researchResults"),
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
@@ -187,6 +192,7 @@ const els = {
   activeBot: document.querySelector("#activeBotValue"),
   routedSymbol: document.querySelector("#routedSymbolValue"),
   action: document.querySelector("#actionValue"),
+  authority: document.querySelector("#authorityValue"),
   portfolio: document.querySelector("#portfolioValue"),
   dayPl: document.querySelector("#dayPlValue"),
   buyingPower: document.querySelector("#buyingPowerValue"),
@@ -229,6 +235,7 @@ const settingInputs = [
   els.regimeExitGap,
   els.chopDiscount,
   ...els.directionalModes,
+  els.presetAuthorityMode,
   els.directionalMaxExtension,
   els.directionalStrongChase,
   els.directionalMinStrength,
@@ -280,6 +287,7 @@ function payloadFromForm() {
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: state.dryRun,
+    ...presetAuthorityPayload(),
   };
 }
 
@@ -491,6 +499,91 @@ function readResearchPresets() {
   }
 }
 
+function presetRoleForName(name) {
+  const text = String(name || "").toLowerCase();
+  if (text.includes("general")) return "generalist";
+  if (text.includes("momentum")) return "momentum";
+  if (text.includes("inverse")) return "inverse";
+  return null;
+}
+
+function authorityLeadPresets() {
+  const roles = {};
+  readResearchPresets().forEach((preset) => {
+    const role = presetRoleForName(preset.name);
+    if (role && !roles[role]) {
+      roles[role] = preset;
+    }
+  });
+  return roles;
+}
+
+function presetAuthorityPayload() {
+  const mode = els.presetAuthorityMode?.value || "OFF";
+  if (mode !== PRESET_AUTHORITY_MODE_V6) {
+    return {
+      presetAuthorityMode: "OFF",
+      presetAuthorityPresets: [],
+    };
+  }
+
+  const roles = authorityLeadPresets();
+  const missing = ["generalist", "momentum", "inverse"].filter(
+    (role) => !roles[role],
+  );
+  if (missing.length) {
+    throw new Error(
+      `v6 authority needs saved Lead presets for: ${missing.join(", ")}.`,
+    );
+  }
+
+  return {
+    presetAuthorityMode: PRESET_AUTHORITY_MODE_V6,
+    presetAuthorityPresets: ["generalist", "momentum", "inverse"].map((role) => {
+      const preset = roles[role];
+      return {
+        role,
+        name: preset.name,
+        version: preset.version || "v1",
+        config: preset.config || {},
+      };
+    }),
+  };
+}
+
+function syncPresetAuthorityBaseConfig() {
+  if (!els.presetAuthorityMode || els.presetAuthorityMode.value !== PRESET_AUTHORITY_MODE_V6) {
+    return false;
+  }
+  if (state.running || state.busy) {
+    return false;
+  }
+  const roles = authorityLeadPresets();
+  if (!roles.generalist?.config) {
+    return false;
+  }
+  applyStrategyConfig(roles.generalist.config);
+  return true;
+}
+
+function setupPresetAuthorityMode() {
+  if (!els.presetAuthorityMode) return;
+  const saved = localStorage.getItem(PRESET_AUTHORITY_MODE_KEY);
+  if (saved === PRESET_AUTHORITY_MODE_V6) {
+    els.presetAuthorityMode.value = PRESET_AUTHORITY_MODE_V6;
+  }
+  els.presetAuthorityMode.addEventListener("change", () => {
+    localStorage.setItem(PRESET_AUTHORITY_MODE_KEY, els.presetAuthorityMode.value);
+    const synced = syncPresetAuthorityBaseConfig();
+    if (synced) {
+      setResearchMessage(
+        "v6 authority loaded Lead_Generalist into Strategy Controls. Momentum and Inverse remain in the authority bundle.",
+        "success",
+      );
+    }
+  });
+}
+
 function writeResearchPresets(presets) {
   try {
     localStorage.setItem(RESEARCH_PRESETS_KEY, JSON.stringify(presets));
@@ -555,6 +648,9 @@ function syncResearchPresetButtons() {
   }
   if (els.runResearchCompare) {
     els.runResearchCompare.disabled = locked || compareSelectedCount < 2;
+  }
+  if (els.runShadowRouter) {
+    els.runShadowRouter.disabled = locked || compareSelectedCount < 2;
   }
 }
 
@@ -1511,6 +1607,112 @@ function stopResearchProgress() {
   }
 }
 
+const RESEARCH_TOOLTIP_TEXT = {
+  "Aggregate Leader": "Preset with the highest total realized P/L across the selected comparison dates.",
+  "Leader Total P/L": "Total realized P/L for the aggregate leader across all replayed dates.",
+  "Leader Date Wins": "Number of comparison dates where this preset had the highest realized P/L.",
+  "Max Wrong-Cost": "Largest observed opportunity gap between the date winner and an inferior preset choice.",
+  "Fill Model": "Historical replay fill assumption. Next Bar Open fills at the next one-minute bar open after the decision.",
+  Slippage: "Execution penalty applied to simulated buys and sells, measured in basis points.",
+  Observer: "Baseline preset used as the pre-checkpoint/default observer for shadow router switch scoring.",
+  "09:45 Authority P/L": "Total checkpoint-to-close P/L under the v6 09:45 authority gate.",
+  "Authority Δ": "Authority P/L minus staying with Lead_Generalist for the same checkpoint-to-close window.",
+  "Routes / Blocked": "Specialist routes granted by v6 versus HIGH-confidence signals blocked for review.",
+  "Best Checkpoint": "Checkpoint with the strongest switch model score in this replay pack.",
+  "Best Switch P/L": "Total P/L if the router switched at that checkpoint on every tested date.",
+  "Best Switch Accuracy": "Share of checkpoint selections matching the best post-checkpoint preset.",
+  "All Snapshot Accuracy": "Aggregate hit rate across every checkpoint snapshot in the replay.",
+  Dates: "Number of dates included in this summary row.",
+  Hit: "Correct authority selections divided by total dates.",
+  Accuracy: "Hit count expressed as a percentage of total dates.",
+  "Authority P/L": "P/L produced by the authority policy, using Lead_Generalist unless v6 grants a route.",
+  "Generalist P/L": "P/L from staying with Lead_Generalist under the same checkpoint-to-close scoring model.",
+  "Δ vs Gen": "Difference between the selected policy and Lead_Generalist for the same window.",
+  "Best Switch": "Best possible checkpoint-to-close P/L among the available presets for those dates.",
+  Cost: "Opportunity cost versus the best available switch result.",
+  Route: "Count of HIGH-confidence specialist calls that v6 allowed to route.",
+  Blocked: "Count of HIGH-confidence specialist calls quarantined by v6 blocks.",
+  Advisory: "Count of MODERATE specialist calls logged only, with authority staying Generalist.",
+  Default: "Count of dates where v6 stayed with Lead_Generalist by default.",
+  Checkpoint: "Time of day when the simulated switch decision was made.",
+  "Switch Hit": "Times the raw checkpoint router selected the best post-checkpoint preset.",
+  "Switch Acc": "Switch hits divided by dates for this checkpoint.",
+  "High Conf": "Count of HIGH-confidence router calls at this checkpoint.",
+  "Switch P/L": "P/L from running Lead_Generalist before the checkpoint, then the selected preset after it.",
+  "Switch Cost": "Gap between the raw switch result and the best post-checkpoint preset.",
+  "Proxy P/L": "Older full-day proxy score for the selected preset, included for comparison.",
+  Date: "Replay trading date.",
+  Time: "Checkpoint time for this row.",
+  Pick: "Preset selected by the shadow router at this checkpoint.",
+  Authority: "v6 authority action: route, block, advisory, default, or log-only.",
+  "Auth P/L": "P/L produced by the v6 authority decision for this row.",
+  "Auth Δ": "Authority P/L minus Lead_Generalist for this row.",
+  "Post Best": "Best preset from checkpoint to close.",
+  Switch: "Whether the raw checkpoint pick matched the post-checkpoint winner.",
+  "Δ Gen": "Raw switch P/L minus Lead_Generalist for this row.",
+  "Full-Day Winner": "Preset that won the full-day proxy experiment.",
+  "Proxy Cost": "Full-day proxy opportunity cost of the selected preset versus the full-day winner.",
+  "Router Conf": "Router confidence bucket assigned to this checkpoint decision.",
+  "SOXL %": "SOXL percent change from the regular-session open to the checkpoint.",
+  "SOXL DD": "Maximum SOXL drawdown from the regular-session open observed by the checkpoint.",
+  "Trans/hr": "Regime transition density, measured as transitions per hour.",
+  "Regime min": "Average regime duration in minutes; higher values imply more persistent regimes.",
+  Trust: "Trend trust score from the fingerprint engine.",
+  Regime: "Current detected regime at the checkpoint.",
+  Reason: "Router explanation for the pick or authority action.",
+  Preset: "Saved strategy preset used for this replay row.",
+  "Target Bot": "Bot that should express this specialist preset's main thesis.",
+  "Total P/L": "Total realized P/L for this preset across selected dates.",
+  "Target P/L": "Realized P/L contributed by the preset's target bot.",
+  "Avg %": "Average account-change percentage across the replayed dates.",
+  "Date Wins": "Number of dates this preset won outright.",
+  "Green/Red": "Count of positive-P/L dates versus negative-P/L dates.",
+  Purity: "Target bot absolute P/L divided by total absolute bot P/L; higher means the specialist identity is clearer.",
+  "Non-target Damage": "Total negative P/L from bots outside this preset's target bot.",
+  "Home Capture": "Target bot P/L on the five largest home-turf move days divided by the theoretical target-instrument opportunity.",
+  "Home Target Share": "Target bot's share of preset P/L on the five largest home-turf move days.",
+  "Home Miss": "Theoretical home-turf target opportunity not captured by the target bot.",
+  Diagnosis: "First-pass audit label for whether the specialist is confirmed, polluted, weak, or still mixed.",
+  Momentum: "Realized P/L attributed to MomentumBot trades.",
+  Chop: "Realized P/L attributed to ChopBot trades.",
+  Inverse: "Realized P/L attributed to InverseBot trades.",
+  "Worst Date": "Date with this preset's weakest realized P/L.",
+  Winner: "Preset with the best realized P/L for this date.",
+  Margin: "Winner's lead over the second-place preset.",
+  Confidence: "Confidence label assigned to the date winner from the research comparison.",
+  "Worst Cost": "Largest loss of choosing the wrong preset on this date.",
+  "30m Trans/hr": "Transition density measured in the first 30 regular-session minutes.",
+  "60m Trans/hr": "Transition density measured in the first 60 regular-session minutes.",
+  "P/L": "Realized replay P/L for this run.",
+  "%": "Replay account-change percentage for this run.",
+  Trades: "Closed strategy trade count for this replay run.",
+  "Win Rate": "Percent of closed trades that finished positive.",
+  MFE: "Average maximum favorable excursion for closed trades.",
+  Capture: "Average portion of favorable excursion captured by realized exits.",
+  "Early M/C/I": "Market-buy entries with regime age at or below 3 minutes, split Momentum/Chop/Inverse.",
+  "V8 Blocks Y/T/N": "v8 entry veto counts split by young regime, low trend trust, and noisy-water flip pressure.",
+  "V9 C/S/I": "v9 Momentum-context counts split by context activations, InverseBot suppressions, and hard invalidations.",
+  "V9 Context": "v9 activation fingerprint: observer preset, trust score, SOXL percent from open, raw first-window transitions, and non-warmup transition count/rate.",
+};
+
+function researchTooltip(label) {
+  return RESEARCH_TOOLTIP_TEXT[label] || "";
+}
+
+function researchTooltipLabel(label, tooltip = researchTooltip(label)) {
+  const safeLabel = escapeHtml(label);
+  if (!tooltip) {
+    return safeLabel;
+  }
+  return `<span class="has-tooltip" tabindex="0" data-tooltip="${escapeHtml(
+    tooltip,
+  )}">${safeLabel}</span>`;
+}
+
+function researchTh(label, tooltip = researchTooltip(label)) {
+  return `<th>${researchTooltipLabel(label, tooltip)}</th>`;
+}
+
 function renderResearchResults(result = state.lastResearchResult) {
   if (!els.researchResults) return;
   if (!state.researchModeEnabled || !result) {
@@ -1520,6 +1722,10 @@ function renderResearchResults(result = state.lastResearchResult) {
   }
   if (result.kind === "comparison") {
     renderResearchComparison(result);
+    return;
+  }
+  if (result.kind === "shadow_router") {
+    renderShadowRouterReplay(result);
     return;
   }
 
@@ -1666,10 +1872,308 @@ function renderResearchComparison(result) {
       )}
     </div>
     ${renderResearchPresetSummaryTable(presetSummaries)}
+    ${renderSpecialistAuditTable(result.specialist_audit || [])}
     ${renderResearchDateSummaryTable(dateSummaries)}
     ${renderResearchComparisonRunTable(results)}
   `;
   wireResearchResultActions();
+}
+
+function renderShadowRouterReplay(result) {
+  const checkpointSummaries = Array.isArray(result.checkpoint_summaries)
+    ? result.checkpoint_summaries
+    : [];
+  const decisions = Array.isArray(result.decisions) ? result.decisions : [];
+  const authority = result.authority_summary || {};
+  const best = result.best_checkpoint || checkpointSummaries[0] || null;
+  const dateCount = Array.isArray(result.date_summaries)
+    ? result.date_summaries.length
+    : 0;
+  const correctTotal = checkpointSummaries.reduce(
+    (total, row) => total + (numberOrNull(row.correct) || 0),
+    0,
+  );
+  const decisionTotal = checkpointSummaries.reduce(
+    (total, row) => total + (numberOrNull(row.dates) || 0),
+    0,
+  );
+  const aggregateAccuracy = decisionTotal
+    ? (correctTotal / decisionTotal) * 100
+    : null;
+
+  els.researchResults.hidden = false;
+  els.researchResults.innerHTML = `
+    <div class="research-results-head">
+      <div>
+        <p class="eyebrow">SHADOW ROUTER REPLAY</p>
+        <strong>${escapeHtml(result.run_count || 0)} replay runs</strong>
+      </div>
+      <div class="research-result-actions">
+        <span class="research-result-status">${escapeHtml(
+          `${result.preset_count || 0} presets · ${dateCount} dates`,
+        )}</span>
+        <button
+          id="copyResearchOutputButton"
+          type="button"
+          class="secondary"
+        >
+          Copy Output
+        </button>
+      </div>
+    </div>
+    <div class="research-summary-grid">
+      ${renderResearchMetric("Observer", result.observer_preset || "--")}
+      ${renderResearchMetric(
+        "09:45 Authority P/L",
+        formatMoney(authority.authority_total_pl),
+        authority.authority_total_pl,
+      )}
+      ${renderResearchMetric(
+        "Authority Δ",
+        formatMoney(authority.authority_delta_vs_generalist),
+        authority.authority_delta_vs_generalist,
+      )}
+      ${renderResearchMetric(
+        "Routes / Blocked",
+        `${authority.routes || 0} / ${authority.blocked || 0}`,
+      )}
+      ${renderResearchMetric(
+        "Best Checkpoint",
+        best ? best.checkpoint : "--",
+        best?.switch_total_pl ?? best?.selected_total_pl,
+      )}
+      ${renderResearchMetric(
+        "Best Switch P/L",
+        best ? formatMoney(best.switch_total_pl ?? best.selected_total_pl) : "--",
+        best?.switch_total_pl ?? best?.selected_total_pl,
+      )}
+      ${renderResearchMetric(
+        "Best Switch Accuracy",
+        best
+          ? formatPercentMaybe(best.switch_accuracy_percent ?? best.accuracy_percent)
+          : "--",
+        best?.switch_accuracy_percent ?? best?.accuracy_percent,
+      )}
+      ${renderResearchMetric(
+        "All Snapshot Accuracy",
+        aggregateAccuracy === null ? "--" : formatPercentMaybe(aggregateAccuracy),
+        aggregateAccuracy,
+      )}
+      ${renderResearchMetric("Fill Model", formatLabel(result.fill_model || "--"))}
+    </div>
+    ${renderShadowAuthoritySummary(authority)}
+    ${renderShadowCheckpointTable(checkpointSummaries)}
+    ${renderShadowDecisionTable(decisions)}
+  `;
+  wireResearchResultActions();
+}
+
+function renderShadowAuthoritySummary(row) {
+  if (!row || !row.dates) return "";
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>09:45 Authority Candidate</span>
+        <small>v6 gate</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              ${researchTh("Dates")}
+              ${researchTh("Hit")}
+              ${researchTh("Accuracy")}
+              ${researchTh("Authority P/L")}
+              ${researchTh("Generalist P/L")}
+              ${researchTh("Δ vs Gen")}
+              ${researchTh("Best Switch")}
+              ${researchTh("Cost")}
+              ${researchTh("Route")}
+              ${researchTh("Blocked")}
+              ${researchTh("Advisory")}
+              ${researchTh("Default")}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>${escapeHtml(String(row.dates || 0))}</td>
+              <td>${escapeHtml(`${row.correct || 0}/${row.dates || 0}`)}</td>
+              <td>${escapeHtml(formatPercentMaybe(row.accuracy_percent))}</td>
+              <td class="${researchToneClass(row.authority_total_pl)}">${escapeHtml(
+                formatMoney(row.authority_total_pl),
+              )}</td>
+              <td class="${researchToneClass(row.generalist_total_pl)}">${escapeHtml(
+                formatMoney(row.generalist_total_pl),
+              )}</td>
+              <td class="${researchToneClass(row.authority_delta_vs_generalist)}">${escapeHtml(
+                formatMoney(row.authority_delta_vs_generalist),
+              )}</td>
+              <td class="${researchToneClass(row.best_switch_total_pl)}">${escapeHtml(
+                formatMoney(row.best_switch_total_pl),
+              )}</td>
+              <td class="${researchToneClass(-numberOrNull(row.authority_total_cost_dollars))}">${escapeHtml(
+                formatMoney(row.authority_total_cost_dollars),
+              )}</td>
+              <td>${escapeHtml(String(row.routes || 0))}</td>
+              <td>${escapeHtml(String(row.blocked || 0))}</td>
+              <td>${escapeHtml(String(row.advisory_only || 0))}</td>
+              <td>${escapeHtml(String(row.generalist_default || 0))}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderShadowCheckpointTable(rows) {
+  if (!rows.length) return "";
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Checkpoint Scores</span>
+        <small>${rows.length} checkpoints</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              ${researchTh("Checkpoint")}
+              ${researchTh("Switch Hit")}
+              ${researchTh("Switch Acc")}
+              ${researchTh("High Conf")}
+              ${researchTh("Switch P/L")}
+              ${researchTh("Δ vs Gen")}
+              ${researchTh("Best Switch")}
+              ${researchTh("Switch Cost")}
+              ${researchTh("Proxy P/L")}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.checkpoint || "--")}</td>
+                    <td>${escapeHtml(`${row.switch_correct || 0}/${row.dates || 0}`)}</td>
+                    <td>${escapeHtml(
+                      formatPercentMaybe(row.switch_accuracy_percent),
+                    )}</td>
+                    <td>${escapeHtml(String(row.high_confidence_count || 0))}</td>
+                    <td class="${researchToneClass(row.switch_total_pl)}">${escapeHtml(
+                      formatMoney(row.switch_total_pl),
+                    )}</td>
+                    <td class="${researchToneClass(row.switch_delta_vs_generalist_total)}">${escapeHtml(
+                      formatMoney(row.switch_delta_vs_generalist_total),
+                    )}</td>
+                    <td class="${researchToneClass(row.checkpoint_best_total_pl)}">${escapeHtml(
+                      formatMoney(row.checkpoint_best_total_pl),
+                    )}</td>
+                    <td class="${researchToneClass(-numberOrNull(row.switch_total_cost_dollars))}">${escapeHtml(
+                      formatMoney(row.switch_total_cost_dollars),
+                    )}</td>
+                    <td class="${researchToneClass(row.selected_total_pl)}">${escapeHtml(
+                      formatMoney(row.selected_total_pl),
+                    )}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderShadowDecisionTable(rows) {
+  if (!rows.length) return "";
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Checkpoint Decisions</span>
+        <small>${rows.length} snapshots</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              ${researchTh("Date")}
+              ${researchTh("Time")}
+              ${researchTh("Pick")}
+              ${researchTh("Authority")}
+              ${researchTh("Auth P/L")}
+              ${researchTh("Auth Δ")}
+              ${researchTh("Post Best")}
+              ${researchTh("Switch")}
+              ${researchTh("Switch P/L")}
+              ${researchTh("Δ Gen")}
+              ${researchTh("Switch Cost")}
+              ${researchTh("Full-Day Winner")}
+              ${researchTh("Proxy Cost")}
+              ${researchTh("Router Conf")}
+              ${researchTh("SOXL %")}
+              ${researchTh("SOXL DD")}
+              ${researchTh("Trans/hr")}
+              ${researchTh("Regime min")}
+              ${researchTh("Trust")}
+              ${researchTh("Regime")}
+              ${researchTh("Reason")}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map((row) => {
+                const fingerprint = row.fingerprint || {};
+                const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+                return `
+                  <tr>
+                    <td>${escapeHtml(row.date || "--")}</td>
+                    <td>${escapeHtml(row.checkpoint || "--")}</td>
+                    <td>${escapeHtml(row.selected_preset || "--")}</td>
+                    <td>${escapeHtml(row.authority_action || "--")}</td>
+                    <td class="${researchToneClass(row.authority_pl)}">${escapeHtml(
+                      formatMoney(row.authority_pl),
+                    )}</td>
+                    <td class="${researchToneClass(row.authority_delta_vs_generalist)}">${escapeHtml(
+                      formatMoney(row.authority_delta_vs_generalist),
+                    )}</td>
+                    <td>${escapeHtml(row.checkpoint_best_preset || "--")}</td>
+                    <td>${escapeHtml(row.switch_correct ? "HIT" : "MISS")}</td>
+                    <td class="${researchToneClass(row.switch_pl)}">${escapeHtml(
+                      formatMoney(row.switch_pl),
+                    )}</td>
+                    <td class="${researchToneClass(row.switch_delta_vs_generalist)}">${escapeHtml(
+                      formatMoney(row.switch_delta_vs_generalist),
+                    )}</td>
+                    <td class="${researchToneClass(-numberOrNull(row.switch_cost_dollars))}">${escapeHtml(
+                      formatMoney(row.switch_cost_dollars),
+                    )}</td>
+                    <td>${escapeHtml(row.winner || "--")}${row.correct ? " HIT" : ""}</td>
+                    <td class="${researchToneClass(-numberOrNull(row.cost_dollars))}">${escapeHtml(
+                      formatMoney(row.cost_dollars),
+                    )}</td>
+                    <td>${escapeHtml(row.router_confidence || "--")}</td>
+                    <td class="${researchToneClass(fingerprint.source_open_to_current_percent)}">${escapeHtml(
+                      formatPercentMaybe(fingerprint.source_open_to_current_percent),
+                    )}</td>
+                    <td class="${researchToneClass(fingerprint.source_max_drawdown_from_open_percent)}">${escapeHtml(
+                      formatPercentMaybe(fingerprint.source_max_drawdown_from_open_percent),
+                    )}</td>
+                    <td>${escapeHtml(formatNumberMaybe(fingerprint.transitions_per_hour))}</td>
+                    <td>${escapeHtml(formatNumberMaybe(fingerprint.avg_regime_duration_minutes))}</td>
+                    <td>${escapeHtml(formatNumberMaybe(fingerprint.trend_trust_avg))}</td>
+                    <td>${escapeHtml(fingerprint.current_regime || "--")}</td>
+                    <td>${escapeHtml(reasons.join(" "))}</td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 function renderResearchPresetSummaryTable(rows) {
@@ -1686,15 +2190,15 @@ function renderResearchPresetSummaryTable(rows) {
         <table class="research-table research-comparison-table">
           <thead>
             <tr>
-              <th>Preset</th>
-              <th>Total P/L</th>
-              <th>Avg %</th>
-              <th>Date Wins</th>
-              <th>Green/Red</th>
-              <th>Momentum</th>
-              <th>Chop</th>
-              <th>Inverse</th>
-              <th>Worst Date</th>
+              ${researchTh("Preset")}
+              ${researchTh("Total P/L")}
+              ${researchTh("Avg %")}
+              ${researchTh("Date Wins")}
+              ${researchTh("Green/Red")}
+              ${researchTh("Momentum")}
+              ${researchTh("Chop")}
+              ${researchTh("Inverse")}
+              ${researchTh("Worst Date")}
             </tr>
           </thead>
           <tbody>
@@ -1734,6 +2238,66 @@ function renderResearchPresetSummaryTable(rows) {
   `;
 }
 
+function renderSpecialistAuditTable(rows) {
+  if (!rows.length) {
+    return "";
+  }
+  return `
+    <div class="research-section">
+      <div class="research-section-head">
+        <span>Specialist Differentiation Audit</span>
+        <small>target-bot purity</small>
+      </div>
+      <div class="research-table-wrap">
+        <table class="research-table research-comparison-table">
+          <thead>
+            <tr>
+              ${researchTh("Preset")}
+              ${researchTh("Target Bot")}
+              ${researchTh("Total P/L")}
+              ${researchTh("Target P/L")}
+              ${researchTh("Purity")}
+              ${researchTh("Non-target Damage")}
+              ${researchTh("Home Capture")}
+              ${researchTh("Home Target Share")}
+              ${researchTh("Home Miss")}
+              ${researchTh("Diagnosis")}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(renderSpecialistAuditRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderSpecialistAuditRow(row) {
+  return `
+    <tr>
+      <td>${escapeHtml(row.preset_name || "--")}</td>
+      <td>${escapeHtml(row.target_bot || "--")}</td>
+      <td class="${researchToneClass(row.total_pl)}">${escapeHtml(
+        formatMoney(row.total_pl),
+      )}</td>
+      <td class="${researchToneClass(row.target_bot_pl)}">${escapeHtml(
+        formatMoney(row.target_bot_pl),
+      )}</td>
+      <td>${escapeHtml(formatPercentMaybe(row.target_purity_percent))}</td>
+      <td class="${researchToneClass(-Number(row.non_target_damage || 0))}">${escapeHtml(
+        formatMoney(row.non_target_damage),
+      )}</td>
+      <td class="${researchToneClass(row.home_turf_capture_efficiency_percent)}">${escapeHtml(
+        formatPercentMaybe(row.home_turf_capture_efficiency_percent),
+      )}</td>
+      <td>${escapeHtml(formatPercentMaybe(row.home_turf_target_share_percent))}</td>
+      <td>${escapeHtml(formatMoney(row.home_turf_missed_opportunity))}</td>
+      <td>${escapeHtml(formatLabel(row.diagnosis || "--"))}</td>
+    </tr>
+  `;
+}
+
 function renderResearchDateSummaryTable(rows) {
   if (!rows.length) {
     return "";
@@ -1748,16 +2312,16 @@ function renderResearchDateSummaryTable(rows) {
         <table class="research-table research-comparison-table">
           <thead>
             <tr>
-              <th>Date</th>
-              <th>Winner</th>
-              <th>Margin</th>
-              <th>Confidence</th>
-              <th>Worst Cost</th>
-              <th>Trans/hr</th>
-              <th>Regime min</th>
-              <th>Trust</th>
-              <th>30m Trans/hr</th>
-              <th>60m Trans/hr</th>
+              ${researchTh("Date")}
+              ${researchTh("Winner")}
+              ${researchTh("Margin")}
+              ${researchTh("Confidence")}
+              ${researchTh("Worst Cost")}
+              ${researchTh("Trans/hr")}
+              ${researchTh("Regime min")}
+              ${researchTh("Trust")}
+              ${researchTh("30m Trans/hr")}
+              ${researchTh("60m Trans/hr")}
             </tr>
           </thead>
           <tbody>
@@ -1793,6 +2357,43 @@ function renderResearchDateSummaryRow(row) {
   `;
 }
 
+function formatV9Context(row) {
+  const activated = Number(row.v9_momentum_context_activations || 0) > 0;
+  if (!activated && !row.v9_momentum_context_activation_reason) {
+    return "--";
+  }
+  const trust = formatNumberMaybe(row.v9_momentum_context_trust_score);
+  const soxl = formatPercentMaybe(row.v9_momentum_context_soxl_percent);
+  const windowMinutes =
+    row.v9_momentum_context_early_window_minutes == null
+      ? "30"
+      : formatNumberMaybe(row.v9_momentum_context_early_window_minutes);
+  const earlyCount = formatNumberMaybe(
+    row.v9_momentum_context_early_transition_count,
+  );
+  const earlyRate = formatNumberMaybe(
+    row.v9_momentum_context_early_transitions_per_hour,
+  );
+  const nonWarmupCount = formatNumberMaybe(
+    row.v9_momentum_context_early_non_warmup_transition_count,
+  );
+  const nonWarmupRate = formatNumberMaybe(
+    row.v9_momentum_context_early_non_warmup_transitions_per_hour,
+  );
+  const observer = row.v9_momentum_context_observer_preset
+    ? `O ${row.v9_momentum_context_observer_preset} · `
+    : "";
+  const activationReason = row.v9_momentum_context_activation_reason;
+  const blocker =
+    activationReason && activationReason !== "v9_momentum_clean_tape_context"
+      ? ` · ${activationReason}`
+      : "";
+  const invalidation = row.v9_momentum_context_invalidation_reason
+    ? ` · ${row.v9_momentum_context_invalidation_reason}`
+    : "";
+  return `${observer}T ${trust} · SOXL ${soxl} · ${windowMinutes}m raw ${earlyCount}/${earlyRate} · NW ${nonWarmupCount}/${nonWarmupRate}${blocker}${invalidation}`;
+}
+
 function renderResearchComparisonRunTable(rows) {
   if (!rows.length) {
     return "";
@@ -1807,18 +2408,22 @@ function renderResearchComparisonRunTable(rows) {
         <table class="research-table research-comparison-table">
           <thead>
             <tr>
-              <th>Date</th>
-              <th>Preset</th>
-              <th>P/L</th>
-              <th>%</th>
-              <th>Trades</th>
-              <th>Win Rate</th>
-              <th>Momentum</th>
-              <th>Chop</th>
-              <th>Inverse</th>
-              <th>MFE</th>
-              <th>Capture</th>
-              <th>Trans/hr</th>
+              ${researchTh("Date")}
+              ${researchTh("Preset")}
+              ${researchTh("P/L")}
+              ${researchTh("%")}
+              ${researchTh("Trades")}
+              ${researchTh("Win Rate")}
+              ${researchTh("Momentum")}
+              ${researchTh("Chop")}
+              ${researchTh("Inverse")}
+              ${researchTh("MFE")}
+              ${researchTh("Capture")}
+              ${researchTh("Trans/hr")}
+              ${researchTh("Early M/C/I")}
+              ${researchTh("V8 Blocks Y/T/N")}
+              ${researchTh("V9 C/S/I")}
+              ${researchTh("V9 Context")}
             </tr>
           </thead>
           <tbody>
@@ -1859,6 +2464,16 @@ function renderResearchComparisonRunRow(result) {
         formatPercentMaybe(row.session_avg_capture_ratio_percent),
       )}</td>
       <td>${escapeHtml(formatNumberMaybe(fingerprint.transitions_per_hour))}</td>
+      <td>${escapeHtml(
+        `${row.momentum_early_entry_count ?? 0}/${row.chop_early_entry_count ?? 0}/${row.inverse_early_entry_count ?? 0}`,
+      )}</td>
+      <td>${escapeHtml(
+        `${row.v8_young_regime_blocks ?? 0}/${row.v8_low_trust_blocks ?? 0}/${row.v8_noisy_water_blocks ?? 0}`,
+      )}</td>
+      <td>${escapeHtml(
+        `${row.v9_momentum_context_activations ?? 0}/${row.v9_inverse_suppression_blocks ?? 0}/${row.v9_momentum_context_invalidations ?? 0}`,
+      )}</td>
+      <td>${escapeHtml(formatV9Context(row))}</td>
     </tr>
   `;
 }
@@ -1890,6 +2505,9 @@ function researchComparisonMarkdown(result) {
     ? result.date_summaries
     : [];
   const runs = Array.isArray(result.results) ? result.results : [];
+  const specialistAudit = Array.isArray(result.specialist_audit)
+    ? result.specialist_audit
+    : [];
   const leader = presetSummaries[0] || {};
   const lines = [
     "# EdgeWalker Preset Comparison",
@@ -1927,6 +2545,39 @@ function researchComparisonMarkdown(result) {
         formatMoney(row.chop_pl),
         formatMoney(row.inverse_pl),
         `${row.worst_date || "--"} ${formatMoney(row.worst_pl)}`,
+      ]),
+    ),
+    "",
+    "## Specialist Differentiation Audit",
+    markdownRow([
+      "Preset",
+      "Target Bot",
+      "Total P/L",
+      "Target P/L",
+      "Purity",
+      "Non-target Damage",
+      "Home Capture",
+      "Home Target Share",
+      "Home Miss",
+      "Home-Turf Dates",
+      "Diagnosis",
+    ]),
+    markdownDivider(11),
+    ...specialistAudit.map((row) =>
+      markdownRow([
+        row.preset_name || "--",
+        row.target_bot || "--",
+        formatMoney(row.total_pl),
+        formatMoney(row.target_bot_pl),
+        formatPercentMaybe(row.target_purity_percent),
+        formatMoney(row.non_target_damage),
+        formatPercentMaybe(row.home_turf_capture_efficiency_percent),
+        formatPercentMaybe(row.home_turf_target_share_percent),
+        formatMoney(row.home_turf_missed_opportunity),
+        Array.isArray(row.home_turf_dates)
+          ? row.home_turf_dates.join(", ")
+          : "--",
+        formatLabel(row.diagnosis || "--"),
       ]),
     ),
     "",
@@ -1978,8 +2629,12 @@ function researchComparisonMarkdown(result) {
       "MFE",
       "Capture",
       "Trans/hr",
+      "Early M/C/I",
+      "V8 Blocks Y/T/N",
+      "V9 C/S/I",
+      "V9 Context",
     ]),
-    markdownDivider(12),
+    markdownDivider(16),
     ...runs.map((resultRow) => {
       const row = resultRow.row || {};
       const fingerprint = resultRow.fingerprint || {};
@@ -1996,6 +2651,152 @@ function researchComparisonMarkdown(result) {
         formatPercentMaybe(row.session_avg_mfe_percent),
         formatPercentMaybe(row.session_avg_capture_ratio_percent),
         formatNumberMaybe(fingerprint.transitions_per_hour),
+        `${row.momentum_early_entry_count ?? 0}/${row.chop_early_entry_count ?? 0}/${row.inverse_early_entry_count ?? 0}`,
+        `${row.v8_young_regime_blocks ?? 0}/${row.v8_low_trust_blocks ?? 0}/${row.v8_noisy_water_blocks ?? 0}`,
+        `${row.v9_momentum_context_activations ?? 0}/${row.v9_inverse_suppression_blocks ?? 0}/${row.v9_momentum_context_invalidations ?? 0}`,
+        formatV9Context(row),
+      ]);
+    }),
+  ];
+  return lines.join("\n");
+}
+
+function researchShadowRouterMarkdown(result) {
+  const checkpointSummaries = Array.isArray(result.checkpoint_summaries)
+    ? result.checkpoint_summaries
+    : [];
+  const decisions = Array.isArray(result.decisions) ? result.decisions : [];
+  const authority = result.authority_summary || {};
+  const best = result.best_checkpoint || {};
+  const lines = [
+    "# EdgeWalker Shadow Router Replay",
+    "",
+    `Runs: ${result.run_count || 0}`,
+    `Presets: ${result.preset_count || 0}`,
+    `Dates: ${Array.isArray(result.date_summaries) ? result.date_summaries.length : 0}`,
+    `Observer preset: ${result.observer_preset || "--"}`,
+    `Fill model: ${formatLabel(result.fill_model || "--")}`,
+    `Slippage: ${result.slippage_bps ?? "0"} bps`,
+    `Best checkpoint: ${best.checkpoint || "--"} (${formatMoney(
+      best.switch_total_pl ?? best.selected_total_pl,
+    )}, ${formatPercentMaybe(
+      best.switch_accuracy_percent ?? best.accuracy_percent,
+    )} switch accuracy)`,
+    `Switch model: Generalist pre-checkpoint closed P/L + selected preset trades opened at/after checkpoint`,
+    `Authority model: v6 09:45 only; HIGH-confidence specialists route; MODERATE/LOW stay Generalist; extreme early Inverse selloffs and flush-rebound Inverse patterns are blocked for review`,
+    "",
+    "## 09:45 Authority Candidate",
+    markdownRow([
+      "Dates",
+      "Hit",
+      "Accuracy",
+      "Authority P/L",
+      "Generalist P/L",
+      "Δ vs Generalist",
+      "Best Switch P/L",
+      "Authority Cost",
+      "Routes",
+      "Blocked",
+      "Advisory",
+      "Default",
+    ]),
+    markdownDivider(12),
+    markdownRow([
+      authority.dates || 0,
+      `${authority.correct || 0}/${authority.dates || 0}`,
+      formatPercentMaybe(authority.accuracy_percent),
+      formatMoney(authority.authority_total_pl),
+      formatMoney(authority.generalist_total_pl),
+      formatMoney(authority.authority_delta_vs_generalist),
+      formatMoney(authority.best_switch_total_pl),
+      formatMoney(authority.authority_total_cost_dollars),
+      authority.routes || 0,
+      authority.blocked || 0,
+      authority.advisory_only || 0,
+      authority.generalist_default || 0,
+    ]),
+    "",
+    "## Checkpoint Scores",
+    markdownRow([
+      "Checkpoint",
+      "Switch Hit",
+      "Switch Accuracy",
+      "High Conf",
+      "Switch P/L",
+      "Δ vs Generalist",
+      "Best Switch P/L",
+      "Switch Cost",
+      "Proxy Selected P/L",
+      "Proxy Winner P/L",
+    ]),
+    markdownDivider(10),
+    ...checkpointSummaries.map((row) =>
+      markdownRow([
+        row.checkpoint || "--",
+        `${row.switch_correct || 0}/${row.dates || 0}`,
+        formatPercentMaybe(row.switch_accuracy_percent),
+        row.high_confidence_count || 0,
+        formatMoney(row.switch_total_pl),
+        formatMoney(row.switch_delta_vs_generalist_total),
+        formatMoney(row.checkpoint_best_total_pl),
+        formatMoney(row.switch_total_cost_dollars),
+        formatMoney(row.selected_total_pl),
+        formatMoney(row.winner_total_pl),
+      ]),
+    ),
+    "",
+    "## Checkpoint Decisions",
+    markdownRow([
+      "Date",
+      "Time",
+      "Pick",
+      "Authority",
+      "Auth P/L",
+      "Auth Δ",
+      "Post Best",
+      "Switch Hit",
+      "Switch P/L",
+      "Δ Gen",
+      "Switch Cost",
+      "Full-Day Winner",
+      "Proxy Correct",
+      "Proxy Cost",
+      "Router Conf",
+      "SOXL %",
+      "SOXL DD",
+      "Trans/hr",
+      "Regime Min",
+      "Trust",
+      "Regime",
+      "Reasons",
+    ]),
+    markdownDivider(22),
+    ...decisions.map((row) => {
+      const fingerprint = row.fingerprint || {};
+      const reasons = Array.isArray(row.reasons) ? row.reasons.join(" ") : "";
+      return markdownRow([
+        row.date || "--",
+        row.checkpoint || "--",
+        row.selected_preset || "--",
+        row.authority_action || "--",
+        formatMoney(row.authority_pl),
+        formatMoney(row.authority_delta_vs_generalist),
+        row.checkpoint_best_preset || "--",
+        row.switch_correct ? "YES" : "NO",
+        formatMoney(row.switch_pl),
+        formatMoney(row.switch_delta_vs_generalist),
+        formatMoney(row.switch_cost_dollars),
+        row.winner || "--",
+        row.correct ? "YES" : "NO",
+        formatMoney(row.cost_dollars),
+        row.router_confidence || "--",
+        formatPercentMaybe(fingerprint.source_open_to_current_percent),
+        formatPercentMaybe(fingerprint.source_max_drawdown_from_open_percent),
+        formatNumberMaybe(fingerprint.transitions_per_hour),
+        formatNumberMaybe(fingerprint.avg_regime_duration_minutes),
+        formatNumberMaybe(fingerprint.trend_trust_avg),
+        fingerprint.current_regime || "--",
+        reasons,
       ]);
     }),
   ];
@@ -2048,6 +2849,8 @@ async function copyResearchOutput() {
   const text =
     result.kind === "comparison"
       ? researchComparisonMarkdown(result)
+      : result.kind === "shadow_router"
+      ? researchShadowRouterMarkdown(result)
       : researchSingleRunMarkdown(result);
   try {
     if (navigator.clipboard?.writeText) {
@@ -2069,10 +2872,10 @@ async function copyResearchOutput() {
   }
 }
 
-function renderResearchMetric(label, value, toneValue = null) {
+function renderResearchMetric(label, value, toneValue = null, tooltip = researchTooltip(label)) {
   return `
     <div class="research-metric">
-      <span>${escapeHtml(label)}</span>
+      ${researchTooltipLabel(label, tooltip)}
       <strong class="${researchToneClass(toneValue)}">${escapeHtml(value)}</strong>
     </div>
   `;
@@ -2628,6 +3431,70 @@ async function runResearchComparison() {
       : "";
     setResearchMessage(
       `Comparison complete: ${result.run_count || 0} replay runs.${leaderText}`,
+      "success",
+    );
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+  } finally {
+    stopResearchProgress();
+    state.researchBusy = false;
+    syncResearchPresetButtons();
+  }
+}
+
+async function runShadowRouterReplay() {
+  ensureBacktestDefaults();
+  const dates = parseResearchCompareDates();
+  if (!dates.length) {
+    setResearchMessage("Add at least one comparison date.", "warning");
+    return;
+  }
+  const presets = selectedResearchComparePresets();
+  if (presets.length < 2) {
+    setResearchMessage("Choose at least two saved presets to evaluate.", "warning");
+    return;
+  }
+  state.researchBusy = true;
+  syncResearchPresetButtons();
+  const runCount = dates.length * presets.length;
+  setResearchMessage(
+    `Evaluating shadow router across ${dates.length} dates...`,
+  );
+  startResearchProgress(`Running ${runCount} replay runs for shadow router`);
+  try {
+    await saveSettings({
+      rethrow: true,
+      messageSetter: setResearchMessage,
+      button: null,
+    });
+    const payload = {
+      dates,
+      data_feed: els.backtestFeed?.value || els.dataFeed?.value || "iex",
+      starting_account_value: els.backtestStartingAccount?.value || "100000",
+      fill_model: els.backtestFillModel?.value || "next_bar_open",
+      slippage_bps: els.backtestSlippage?.value || "0",
+      presets: presets.map((preset) => ({
+        name: preset.name,
+        version: preset.version || "v1",
+        notes: preset.notes || "",
+        config: preset.config || {},
+      })),
+    };
+    const result = await request("/api/research/shadow-router", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.lastResearchResult = result;
+    renderResearchResults(result);
+    const best = result.best_checkpoint || {};
+    const authority = result.authority_summary || {};
+    const bestText = best.checkpoint
+      ? ` Best raw checkpoint: ${best.checkpoint} at ${formatMoney(
+          best.switch_total_pl ?? best.selected_total_pl,
+        )}. 09:45 authority: ${formatMoney(authority.authority_total_pl)}.`
+      : "";
+    setResearchMessage(
+      `Shadow router replay complete: ${result.run_count || 0} replay runs.${bestText}`,
       "success",
     );
   } catch (error) {
@@ -3530,6 +4397,51 @@ function formatLabel(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function formatAuthorityRole(value) {
+  const labels = {
+    generalist: "Generalist",
+    momentum: "Momentum",
+    inverse: "Inverse",
+  };
+  const normalized = String(value || "").toLowerCase();
+  return labels[normalized] || formatLabel(value || "Generalist");
+}
+
+function renderPresetAuthority(authority) {
+  if (!els.authority) return;
+  if (!authority) {
+    const armed = els.presetAuthorityMode?.value === PRESET_AUTHORITY_MODE_V6;
+    els.authority.textContent = armed ? "v6 armed" : "Off";
+    els.authority.dataset.tooltip = armed
+      ? "v6 authority is selected locally. Start Edgewalker to arm the saved Lead preset bundle."
+      : "Preset authority is disabled.";
+    return;
+  }
+
+  const action = authority.authority_action || "PENDING";
+  const selectedRole = authority.selected_role || "generalist";
+  const rawRole = authority.raw_role || selectedRole;
+  const confidence = authority.router_confidence || "--";
+  if (action === "ROUTE") {
+    els.authority.textContent = `v6 ${formatAuthorityRole(selectedRole)}`;
+  } else if (action === "BLOCKED_REVIEW") {
+    els.authority.textContent = "v6 blocked";
+  } else if (action === "ADVISORY_ONLY") {
+    els.authority.textContent = "v6 advisory";
+  } else if (action === "GENERALIST_DEFAULT") {
+    els.authority.textContent = "Generalist";
+  } else if (action === "PENDING") {
+    els.authority.textContent = "v6 pending";
+  } else {
+    els.authority.textContent = formatLabel(action);
+  }
+
+  const reason = authority.authority_reason || "No authority reason reported yet.";
+  els.authority.dataset.tooltip = `${formatLabel(action)}. Raw: ${formatAuthorityRole(
+    rawRole,
+  )}. Selected: ${formatAuthorityRole(selectedRole)}. Confidence: ${confidence}. ${reason}`;
+}
+
 function setTone(element, value) {
   element.classList.remove("is-positive", "is-negative", "is-neutral");
   const parsed = numberOrNull(value);
@@ -3540,12 +4452,13 @@ function setTone(element, value) {
   }
 }
 
-function renderDecision(status, performance) {
+function renderDecision(status, performance, presetAuthority = null) {
   if (!status) {
     els.regime.textContent = "Waiting";
     els.activeBot.textContent = "Waiting";
     els.routedSymbol.textContent = "None";
     els.action.textContent = "Waiting";
+    renderPresetAuthority(presetAuthority);
     return;
   }
 
@@ -3557,6 +4470,7 @@ function renderDecision(status, performance) {
     : "None";
   els.routedSymbol.textContent = status.routed_symbol || "None";
   els.action.textContent = formatLabel(status.action_taken);
+  renderPresetAuthority(status.preset_authority || presetAuthority);
   els.portfolio.textContent = formatMoney(status.portfolio_value);
   els.buyingPower.textContent = formatMoney(status.buying_power);
   els.sourcePrice.textContent = formatPrice(status.source_price);
@@ -3901,6 +4815,9 @@ function render(data) {
     state.latestAccountValue = latestAccountValue;
   }
   hydrateForm(data);
+  if (!state.running && !state.busy) {
+    syncPresetAuthorityBaseConfig();
+  }
   syncResearchStartingAccount();
 
   const waitingForOpen =
@@ -3955,7 +4872,11 @@ function render(data) {
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);
   els.error.textContent = data.last_error || "";
-  renderDecision(data.edgewalker_status, data.performance);
+  renderDecision(
+    data.edgewalker_status,
+    data.performance,
+    data.edgewalker_status?.preset_authority || data.preset_authority,
+  );
   renderLog(data);
   handleRuntimeSounds(data, wasRunning);
 }
@@ -4030,11 +4951,33 @@ function hideTooltip() {
 }
 
 function setupTooltips() {
-  document.querySelectorAll("[data-tooltip]").forEach((target) => {
-    target.addEventListener("mouseenter", () => showTooltip(target));
-    target.addEventListener("mouseleave", hideTooltip);
-    target.addEventListener("focus", () => showTooltip(target));
-    target.addEventListener("blur", hideTooltip);
+  if (state.tooltipsSetup) {
+    return;
+  }
+  state.tooltipsSetup = true;
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target) {
+      showTooltip(target);
+    }
+  });
+  document.addEventListener("mouseout", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target && !target.contains(event.relatedTarget)) {
+      hideTooltip();
+    }
+  });
+  document.addEventListener("focusin", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target) {
+      showTooltip(target);
+    }
+  });
+  document.addEventListener("focusout", (event) => {
+    const target = event.target.closest?.("[data-tooltip]");
+    if (target) {
+      hideTooltip();
+    }
   });
   window.addEventListener("scroll", hideTooltip, { passive: true });
   window.addEventListener("resize", hideTooltip);
@@ -4054,6 +4997,10 @@ if (els.runBacktest) {
 
 if (els.runResearchCompare) {
   els.runResearchCompare.addEventListener("click", runResearchComparison);
+}
+
+if (els.runShadowRouter) {
+  els.runShadowRouter.addEventListener("click", runShadowRouterReplay);
 }
 
 if (els.saveResearchPreset) {
@@ -4152,8 +5099,10 @@ setupOperatorGuide();
 setupCollapsibleSections();
 setupActivityLog();
 setupTooltips();
+setupPresetAuthorityMode();
 ensureBacktestDefaults();
 renderResearchPresetLibrary();
+syncPresetAuthorityBaseConfig();
 renderResearchMode();
 loadSettings().catch((error) => {
   if (els.error) {

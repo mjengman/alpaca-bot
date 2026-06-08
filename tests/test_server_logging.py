@@ -48,6 +48,15 @@ from server import (
     _research_compare_date_summary,
     _research_compare_preset_summaries,
     _research_fingerprint,
+    _research_specialist_audit,
+    _runtime_source_price_path,
+    _shadow_router_allows_persistence_override,
+    _shadow_router_authority_decision,
+    _shadow_router_authority_summary,
+    _shadow_router_checkpoint_summaries,
+    _shadow_router_decision,
+    _shadow_router_persist_decision,
+    _shadow_router_pick,
     alpaca_environment_settings,
     build_operator_spreadsheet_daily_row,
     build_summary_prompt,
@@ -60,6 +69,7 @@ from server import (
     set_live_trading_armed,
     set_live_trading_disarmed,
 )
+from research import _session_metrics
 from trade_metrics import enrich_trades_with_bar_extremes
 from trade_metrics import bot_archaeology_report
 
@@ -354,6 +364,16 @@ class ServerLoggingTest(unittest.TestCase):
                         else None
                     ),
                     "trend_trust": {"score": "50"},
+                    "source_price": str(100 + minute),
+                    "source_bar_open": str(100 + minute),
+                    "source_bar_high": str(101 + minute),
+                    "source_bar_low": str(99 + minute),
+                    "source_bar_close": str(100.5 + minute),
+                    "inverse_price": str(50 - minute / 10),
+                    "inverse_bar_open": str(50 - minute / 10),
+                    "inverse_bar_high": str(50.1 - minute / 10),
+                    "inverse_bar_low": str(49.8 - minute / 10),
+                    "inverse_bar_close": str(49.9 - minute / 10),
                 }
             )
         trades = [
@@ -388,6 +408,14 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(full["route_invalidation_rate"], 50)
         self.assertEqual(full["trailing_stop_rate"], 50)
         self.assertEqual(full["avg_mfe_percent"], 1.5)
+        self.assertEqual(full["source_open_to_current_percent"], 59.5)
+        self.assertEqual(full["source_max_drawdown_from_open_percent"], -1)
+        self.assertEqual(full["source_max_runup_from_open_percent"], 60)
+        self.assertEqual(full["inverse_open_to_current_percent"], -12)
+        self.assertEqual(full["inverse_max_drawdown_from_open_percent"], -12.2)
+        self.assertEqual(full["current_regime"], "DOWNTREND")
+        self.assertEqual(full["uptrend_minutes"], 20)
+        self.assertEqual(full["downtrend_minutes"], 30)
         self.assertEqual(early["cycles"], 30)
         self.assertEqual(early["closed_trades"], 1)
         self.assertEqual(early["route_invalidation_rate"], 100)
@@ -425,6 +453,509 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["misclassification_costs"][0]["preset_name"], "Lead_Momentum_Specialist")
         self.assertEqual(preset_summaries[0]["preset_name"], "Lead_Inverse_Specialist")
         self.assertEqual(preset_summaries[0]["date_wins"], 1)
+
+    def test_research_specialist_audit_scores_target_purity_and_home_turf_capture(self) -> None:
+        def result(
+            date: str,
+            total_pl: str,
+            momentum_pl: str,
+            chop_pl: str,
+            inverse_pl: str,
+            runup: str,
+            momentum_trades: int,
+            closed_trades: int,
+        ) -> dict[str, object]:
+            return {
+                "date": date,
+                "preset_id": "Lead_Momentum_Specialist::v1",
+                "preset_name": "Lead_Momentum_Specialist",
+                "preset_version": "v1",
+                "row": {
+                    "realized_pl_dollars": total_pl,
+                    "starting_account_value": "100",
+                    "position_sizing_mode": "DYNAMIC",
+                    "position_allocation_percent": "25",
+                    "position_notional": "25",
+                    "closed_trades": closed_trades,
+                    "momentum_pl": momentum_pl,
+                    "chop_pl": chop_pl,
+                    "inverse_pl": inverse_pl,
+                },
+                "bot_performance": [
+                    {"bot": MOMENTUM_BOT, "trade_count": momentum_trades},
+                    {"bot": CHOP_BOT, "trade_count": 0},
+                    {"bot": INVERSE_BOT, "trade_count": 0},
+                ],
+                "fingerprint": {
+                    "source_max_runup_from_open_percent": runup,
+                    "inverse_max_runup_from_open_percent": "0",
+                },
+            }
+
+        audit = _research_specialist_audit(
+            [
+                result("2026-06-01", "2", "1.5", "0.2", "0.3", "10", 2, 3),
+                result("2026-06-02", "1", "1", "-0.1", "0.1", "8", 1, 2),
+                result("2026-06-03", "-0.5", "-0.2", "0", "-0.3", "1", 0, 1),
+            ]
+        )
+
+        row = audit[0]
+
+        self.assertEqual(row["preset_name"], "Lead_Momentum_Specialist")
+        self.assertEqual(row["target_bot"], MOMENTUM_BOT)
+        self.assertEqual(row["total_pl"], 2.5)
+        self.assertEqual(row["target_bot_pl"], 2.3)
+        self.assertEqual(row["non_target_damage"], 0.4)
+        self.assertEqual(row["target_purity_percent"], 62.16)
+        self.assertEqual(row["target_trade_share_percent"], 50.0)
+        self.assertEqual(row["home_turf_capture_efficiency_percent"], 48.42)
+        self.assertEqual(row["home_turf_missed_opportunity"], 2.45)
+        self.assertEqual(row["home_turf_target_share_percent"], 92.0)
+        self.assertEqual(row["diagnosis"], "SPECIALIST_CONFIRMED")
+
+    def test_research_specialist_audit_does_not_confirm_negative_target_engine(self) -> None:
+        def result(
+            date: str,
+            total_pl: str,
+            momentum_pl: str,
+            chop_pl: str,
+            inverse_pl: str,
+            runup: str,
+        ) -> dict[str, object]:
+            return {
+                "date": date,
+                "preset_id": "Lead_Momentum_Specialist::v1",
+                "preset_name": "Lead_Momentum_Specialist",
+                "preset_version": "v1",
+                "row": {
+                    "realized_pl_dollars": total_pl,
+                    "starting_account_value": "100",
+                    "position_sizing_mode": "DYNAMIC",
+                    "position_allocation_percent": "25",
+                    "position_notional": "25",
+                    "closed_trades": 3,
+                    "momentum_pl": momentum_pl,
+                    "chop_pl": chop_pl,
+                    "inverse_pl": inverse_pl,
+                },
+                "bot_performance": [
+                    {"bot": MOMENTUM_BOT, "trade_count": 1},
+                    {"bot": CHOP_BOT, "trade_count": 1},
+                    {"bot": INVERSE_BOT, "trade_count": 1},
+                ],
+                "fingerprint": {
+                    "source_max_runup_from_open_percent": runup,
+                    "inverse_max_runup_from_open_percent": "0",
+                },
+            }
+
+        audit = _research_specialist_audit(
+            [
+                result("2026-03-09", "1.59", "1.59", "0", "0", "70"),
+                result("2026-03-10", "0.69", "0.63", "0.06", "0", "55"),
+                result("2026-03-02", "-0.96", "-0.72", "-0.24", "0", "45"),
+                result("2026-03-19", "-0.35", "-0.48", "0.13", "0", "60"),
+                result("2026-03-06", "0.14", "0.19", "-0.05", "0", "40"),
+                result("2026-03-11", "-3.00", "-3.00", "0", "0", "1"),
+            ]
+        )
+
+        row = audit[0]
+
+        self.assertLess(row["target_bot_pl"], 0)
+        self.assertLess(row["home_turf_capture_efficiency_percent"], 10)
+        self.assertEqual(row["diagnosis"], "WEAK_TARGET_ENGINE")
+
+    def test_shadow_router_pick_uses_transparent_fingerprint_rules(self) -> None:
+        momentum = _shadow_router_pick(
+            {
+                "transitions_per_hour": 2.5,
+                "avg_regime_duration_minutes": 20,
+                "trend_trust_avg": 55,
+                "source_open_to_current_percent": 3.2,
+                "source_max_drawdown_from_open_percent": -0.5,
+                "source_max_runup_from_open_percent": 2.2,
+                "current_regime": "UPTREND",
+            }
+        )
+        inverse = _shadow_router_pick(
+            {
+                "transitions_per_hour": 6,
+                "avg_regime_duration_minutes": 10,
+                "trend_trust_avg": 40,
+                "source_open_to_current_percent": -3.2,
+                "source_max_drawdown_from_open_percent": -3,
+                "current_regime": "DOWNTREND",
+            }
+        )
+        generalist = _shadow_router_pick(
+            {
+                "transitions_per_hour": 6,
+                "avg_regime_duration_minutes": 9,
+                "trend_trust_avg": 55,
+                "source_open_to_current_percent": 0.2,
+                "source_max_drawdown_from_open_percent": -0.5,
+                "current_regime": "SIDEWAYS",
+            }
+        )
+        early_momentum = _shadow_router_pick(
+            {
+                "transitions_per_hour": 0,
+                "avg_regime_duration_minutes": 15,
+                "source_open_to_current_percent": 3,
+                "source_max_drawdown_from_open_percent": -0.5,
+                "source_max_runup_from_open_percent": 3.2,
+                "current_regime": "WARMUP",
+            }
+        )
+        shallow_early_selloff = _shadow_router_pick(
+            {
+                "transitions_per_hour": 0,
+                "avg_regime_duration_minutes": 15,
+                "source_open_to_current_percent": -2.8,
+                "source_max_drawdown_from_open_percent": -3,
+                "current_regime": "WARMUP",
+            }
+        )
+        rebound_momentum = _shadow_router_pick(
+            {
+                "transitions_per_hour": 2,
+                "avg_regime_duration_minutes": 19.5,
+                "trend_trust_avg": 66,
+                "source_open_to_current_percent": 2.6,
+                "source_max_drawdown_from_open_percent": -5.4,
+                "source_max_runup_from_open_percent": 2.8,
+                "current_regime": "UPTREND",
+            }
+        )
+
+        self.assertEqual(momentum["role"], "momentum")
+        self.assertEqual(momentum["confidence"], "HIGH")
+        self.assertEqual(inverse["role"], "inverse")
+        self.assertEqual(inverse["confidence"], "HIGH")
+        self.assertEqual(generalist["role"], "generalist")
+        self.assertEqual(early_momentum["role"], "momentum")
+        self.assertEqual(shallow_early_selloff["role"], "generalist")
+        self.assertEqual(rebound_momentum["role"], "momentum")
+
+    def test_shadow_router_decision_scores_against_eventual_winner(self) -> None:
+        role_presets = {
+            "generalist": {
+                "id": "Lead_Generalist::v1",
+                "name": "Lead_Generalist",
+                "version": "v1",
+            },
+            "momentum": {
+                "id": "Lead_Momentum_Specialist::v1",
+                "name": "Lead_Momentum_Specialist",
+                "version": "v1",
+            },
+            "inverse": {
+                "id": "Lead_Inverse_Specialist::v1",
+                "name": "Lead_Inverse_Specialist",
+                "version": "v1",
+            },
+        }
+        observer = {
+            "date": "2026-06-05",
+            "preset_id": "Lead_Generalist::v1",
+            "preset_name": "Lead_Generalist",
+            "preset_version": "v1",
+            "early_windows": {
+                "60": {
+                    "transitions_per_hour": 6,
+                    "avg_regime_duration_minutes": 10,
+                    "trend_trust_avg": 40,
+                    "source_open_to_current_percent": -2,
+                    "source_max_drawdown_from_open_percent": -3,
+                    "current_regime": "DOWNTREND",
+                }
+            },
+            "checkpoint_trade_windows": {
+                "60": {
+                    "pre_pl": "1",
+                    "post_pl": "-3",
+                    "post_trade_count": 2,
+                }
+            },
+        }
+        results = [
+            {
+                "date": "2026-06-05",
+                "preset_id": "Lead_Generalist::v1",
+                "preset_name": "Lead_Generalist",
+                "row": {
+                    "realized_pl_dollars": "-2",
+                    "account_change_percent": "-2",
+                },
+                "checkpoint_trade_windows": {
+                    "60": {
+                        "pre_pl": "1",
+                        "post_pl": "-3",
+                        "post_trade_count": 2,
+                    }
+                },
+            },
+            {
+                "date": "2026-06-05",
+                "preset_id": "Lead_Inverse_Specialist::v1",
+                "preset_name": "Lead_Inverse_Specialist",
+                "row": {
+                    "realized_pl_dollars": "3",
+                    "account_change_percent": "3",
+                },
+                "checkpoint_trade_windows": {
+                    "60": {
+                        "pre_pl": "-1",
+                        "post_pl": "4",
+                        "post_trade_count": 3,
+                    }
+                },
+            },
+        ]
+        date_summary = {
+            "date": "2026-06-05",
+            "winner": "Lead_Inverse_Specialist",
+            "winner_version": "v1",
+            "winner_pl": 3,
+            "winner_account_change_percent": 3,
+            "winner_confidence": "HIGH",
+        }
+
+        decision = _shadow_router_decision(
+            date_summary=date_summary,
+            checkpoint={"label": "10:30", "window_minutes": 60},
+            observer_result=observer,
+            role_presets=role_presets,
+            results=results,
+        )
+        summary = _shadow_router_checkpoint_summaries([decision])[2]
+
+        self.assertEqual(decision["selected_preset"], "Lead_Inverse_Specialist")
+        self.assertTrue(decision["correct"])
+        self.assertEqual(decision["cost_dollars"], 0.0)
+        self.assertTrue(decision["switch_correct"])
+        self.assertEqual(decision["generalist_pre_pl"], 1.0)
+        self.assertEqual(decision["selected_post_pl"], 4.0)
+        self.assertEqual(decision["switch_pl"], 5.0)
+        self.assertEqual(decision["switch_delta_vs_generalist"], 7.0)
+        self.assertEqual(summary["checkpoint"], "10:30")
+        self.assertEqual(summary["accuracy_percent"], 100)
+        self.assertEqual(summary["switch_accuracy_percent"], 100)
+        self.assertEqual(summary["selected_total_pl"], 3.0)
+        self.assertEqual(summary["switch_total_pl"], 5.0)
+        self.assertEqual(summary["switch_delta_vs_generalist_total"], 7.0)
+
+    def test_shadow_router_persists_high_confidence_early_specialist(self) -> None:
+        role_presets = {
+            "generalist": {
+                "id": "Lead_Generalist::v1",
+                "name": "Lead_Generalist",
+                "version": "v1",
+            },
+            "momentum": {
+                "id": "Lead_Momentum_Specialist::v1",
+                "name": "Lead_Momentum_Specialist",
+                "version": "v1",
+            },
+            "inverse": {
+                "id": "Lead_Inverse_Specialist::v1",
+                "name": "Lead_Inverse_Specialist",
+                "version": "v1",
+            },
+        }
+        persisted = {
+            "date": "2026-05-19",
+            "selected_role": "momentum",
+            "selected_preset": "Lead_Momentum_Specialist",
+            "router_confidence": "HIGH",
+        }
+        current = {
+            "date": "2026-05-19",
+            "selected_role": "generalist",
+            "selected_preset": "Lead_Generalist",
+            "selected_version": "v1",
+            "router_confidence": "LOW",
+            "winner": "Lead_Momentum_Specialist",
+            "winner_version": "v1",
+            "winner_pl": 2,
+            "winner_account_change_percent": 2,
+            "reasons": ["No specialist threshold cleared."],
+        }
+        results = [
+            {
+                "date": "2026-05-19",
+                "preset_id": "Lead_Generalist::v1",
+                "row": {
+                    "realized_pl_dollars": "0",
+                    "account_change_percent": "0",
+                },
+            },
+            {
+                "date": "2026-05-19",
+                "preset_id": "Lead_Momentum_Specialist::v1",
+                "row": {
+                    "realized_pl_dollars": "2",
+                    "account_change_percent": "2",
+                },
+            },
+        ]
+
+        self.assertFalse(
+            _shadow_router_allows_persistence_override(persisted, current)
+        )
+        persisted_current = _shadow_router_persist_decision(
+            current_decision=current,
+            persisted_decision=persisted,
+            role_presets=role_presets,
+            results=results,
+        )
+
+        self.assertEqual(
+            persisted_current["selected_preset"],
+            "Lead_Momentum_Specialist",
+        )
+        self.assertTrue(persisted_current["correct"])
+        self.assertEqual(persisted_current["cost_dollars"], 0.0)
+        self.assertTrue(persisted_current["persistence_applied"])
+
+    def test_shadow_router_v6_authority_gates_early_inverse(self) -> None:
+        role_presets = {
+            "generalist": {
+                "id": "Lead_Generalist::v1",
+                "name": "Lead_Generalist",
+                "version": "v1",
+            },
+            "momentum": {
+                "id": "Lead_Momentum_Specialist::v1",
+                "name": "Lead_Momentum_Specialist",
+                "version": "v1",
+            },
+            "inverse": {
+                "id": "Lead_Inverse_Specialist::v1",
+                "name": "Lead_Inverse_Specialist",
+                "version": "v1",
+            },
+        }
+        observer = {
+            "date": "2026-06-05",
+            "preset_id": "Lead_Generalist::v1",
+            "preset_name": "Lead_Generalist",
+            "checkpoint_trade_windows": {
+                "15": {"pre_pl": "0", "post_pl": "-2", "post_trade_count": 1}
+            },
+        }
+        results = [
+            observer,
+            {
+                "date": "2026-06-05",
+                "preset_id": "Lead_Inverse_Specialist::v1",
+                "preset_name": "Lead_Inverse_Specialist",
+                "checkpoint_trade_windows": {
+                    "15": {"pre_pl": "0", "post_pl": "1", "post_trade_count": 1}
+                },
+            },
+        ]
+        base_decision = {
+            "date": "2026-06-05",
+            "checkpoint": "09:45",
+            "window_minutes": 15,
+            "selected_role": "inverse",
+            "selected_preset": "Lead_Inverse_Specialist",
+            "router_confidence": "HIGH",
+            "generalist_pre_pl": 0,
+            "generalist_post_pl": -2,
+            "generalist_checkpoint_pl": -2,
+            "checkpoint_best_preset": "Lead_Inverse_Specialist",
+            "checkpoint_best_preset_id": "Lead_Inverse_Specialist::v1",
+            "checkpoint_best_switch_pl": 1,
+            "fingerprint": {
+                "source_open_to_current_percent": -4.5,
+                "source_max_drawdown_from_open_percent": -4.5,
+                "transitions_per_hour": 0,
+                "current_regime": "WARMUP",
+            },
+        }
+
+        routed = {
+            **base_decision,
+            **_shadow_router_authority_decision(
+                decision=base_decision,
+                observer_result=observer,
+                role_presets=role_presets,
+                results=results,
+            ),
+        }
+        blocked_decision = {
+            **base_decision,
+            "date": "2026-05-18",
+            "fingerprint": {
+                **base_decision["fingerprint"],
+                "source_open_to_current_percent": -8,
+                "source_max_drawdown_from_open_percent": -8,
+            },
+        }
+        blocked = {
+            **blocked_decision,
+            **_shadow_router_authority_decision(
+                decision=blocked_decision,
+                observer_result=observer,
+                role_presets=role_presets,
+                results=results,
+            ),
+        }
+        flush_rebound_decision = {
+            **base_decision,
+            "date": "2026-03-30",
+            "fingerprint": {
+                **base_decision["fingerprint"],
+                "source_open_to_current_percent": -4.86,
+                "source_max_drawdown_from_open_percent": -6.6,
+            },
+        }
+        flush_rebound_blocked = {
+            **flush_rebound_decision,
+            **_shadow_router_authority_decision(
+                decision=flush_rebound_decision,
+                observer_result=observer,
+                role_presets=role_presets,
+                results=results,
+            ),
+        }
+        summary = _shadow_router_authority_summary(
+            [routed, blocked, flush_rebound_blocked]
+        )
+
+        self.assertEqual(routed["authority_action"], "ROUTE")
+        self.assertEqual(
+            routed["authority_model"],
+            "v6_0945_high_confidence_with_rebound_block",
+        )
+        self.assertEqual(routed["authority_preset"], "Lead_Inverse_Specialist")
+        self.assertEqual(routed["authority_pl"], 1.0)
+        self.assertEqual(blocked["authority_action"], "BLOCKED_REVIEW")
+        self.assertEqual(blocked["authority_preset"], "Lead_Generalist")
+        self.assertEqual(flush_rebound_blocked["authority_action"], "BLOCKED_REVIEW")
+        self.assertEqual(
+            flush_rebound_blocked["authority_preset"],
+            "Lead_Generalist",
+        )
+        self.assertIn("bounced materially", flush_rebound_blocked["authority_reason"])
+        self.assertEqual(summary["routes"], 1)
+        self.assertEqual(summary["blocked"], 2)
+
+    def test_runtime_source_price_path_tracks_flush_rebound(self) -> None:
+        path = _runtime_source_price_path(
+            [
+                {"o": 100, "h": 101, "l": 96, "c": 97},
+                {"o": 97, "h": 98, "l": 93.4, "c": 95.14},
+            ]
+        )
+
+        self.assertEqual(path["source_open_to_current_percent"], -4.86)
+        self.assertEqual(path["source_max_drawdown_from_open_percent"], -6.6)
+        self.assertEqual(path["source_max_runup_from_open_percent"], 1.0)
 
     def test_inversebot_archaeology_returns_ranked_hypotheses(self) -> None:
         report = bot_archaeology_report(
@@ -954,6 +1485,82 @@ class ServerLoggingTest(unittest.TestCase):
             POSITION_LIFECYCLE_OPENING,
         )
         self.assertEqual(summary["latest_fill"]["filled_avg_price"], "99.5")
+
+    def test_research_session_metrics_include_v8_blocks_and_bot_early_entries(self) -> None:
+        records = [
+            {
+                "action_taken": "no_entry_signal",
+                "console_lines": [
+                    "[ENTRY] MomentumBot check: entry_signal=False reason=v8_regime_too_young",
+                    "[ENTRY] BLOCKED bot=MomentumBot reason=v8_regime_too_young",
+                ],
+            },
+            {
+                "action_taken": "no_entry_signal",
+                "console_lines": [
+                    "[ENTRY] InverseBot check: entry_signal=False reason=v8_trend_trust_below_minimum",
+                ],
+            },
+            {
+                "action_taken": "no_entry_signal",
+                "console_lines": [
+                    "[ENTRY] InverseBot check: entry_signal=False reason=v8_noisy_water_filter",
+                ],
+            },
+            {
+                "action_taken": "no_entry_signal",
+                "console_lines": [
+                    "[ENTRY] InverseBot check: entry_signal=False reason=v9_momentum_context_suppresses_inverse",
+                ],
+                "v9_momentum_context": {
+                    "active": True,
+                    "activated_at": "2026-06-08T14:00:00Z",
+                },
+            },
+            {
+                "action_taken": "no_entry_signal",
+                "console_lines": [],
+                "v9_momentum_context": {
+                    "active": False,
+                    "activated_at": "2026-06-08T14:00:00Z",
+                    "invalidated_at": "2026-06-08T15:00:00Z",
+                },
+            },
+            {
+                "action_taken": "market_buy",
+                "active_bot": MOMENTUM_BOT,
+                "trend_trust": {"regime_age_minutes": 2},
+            },
+            {
+                "action_taken": "market_buy",
+                "active_bot": CHOP_BOT,
+                "trend_trust": {"regime_age_minutes": 1},
+            },
+            {
+                "action_taken": "market_buy",
+                "active_bot": INVERSE_BOT,
+                "trend_trust": {"regime_age_minutes": 3},
+            },
+            {
+                "action_taken": "market_buy",
+                "active_bot": INVERSE_BOT,
+                "trend_trust": {"regime_age_minutes": 8},
+            },
+        ]
+
+        metrics = _session_metrics(records, [])
+
+        self.assertEqual(metrics["v8_young_regime_blocks"], 1)
+        self.assertEqual(metrics["v8_low_trust_blocks"], 1)
+        self.assertEqual(metrics["v8_noisy_water_blocks"], 1)
+        self.assertEqual(metrics["v9_momentum_context_activations"], 1)
+        self.assertEqual(metrics["v9_inverse_suppression_blocks"], 1)
+        self.assertEqual(metrics["v9_momentum_context_invalidations"], 1)
+        self.assertEqual(metrics["early_entry_count"], 3)
+        self.assertEqual(metrics["momentum_early_entry_count"], 1)
+        self.assertEqual(metrics["chop_early_entry_count"], 1)
+        self.assertEqual(metrics["inverse_early_entry_count"], 1)
+        self.assertEqual(metrics["entry_regime_age_median"], Decimal("3"))
 
     def test_order_visibility_summary_prefers_closing_state_for_pending_sell(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)

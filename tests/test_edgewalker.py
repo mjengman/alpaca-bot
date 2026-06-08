@@ -14,6 +14,7 @@ from bot import (
     AlpacaClient,
     BotError,
     BotConfig,
+    BotRoute,
     BotStateStore,
     BROKER_CATEGORY_INSUFFICIENT_BUYING_POWER,
     BROKER_CATEGORY_MARKET_CLOSED,
@@ -34,10 +35,16 @@ from bot import (
     LIFECYCLE_POSITION_OPENED,
     LIFECYCLE_POSITION_MANAGED,
     LIFECYCLE_ADAPTIVE_POSTURE_SELECTED,
+    LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+    INVERSE_BOT,
+    MOMENTUM_BOT,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
+    SOXL,
+    SOXS,
     LifecycleLedger,
+    NY_TZ,
     _last_completed_bar_end,
     bar_end_age_seconds,
     classify_broker_error,
@@ -260,12 +267,14 @@ class EdgeWalkerBotTest(unittest.TestCase):
         setup_state: Any | None = None,
         bot_config: BotConfig | None = None,
         market_data: FakeMarketData | None = None,
+        setup_lifecycle: Any | None = None,
     ) -> tuple[str, Any]:
         output, status, _records = self.run_bot_with_lifecycle(
             client,
             setup_state,
             bot_config,
             market_data,
+            setup_lifecycle,
         )
         return output, status
 
@@ -275,12 +284,15 @@ class EdgeWalkerBotTest(unittest.TestCase):
         setup_state: Any | None = None,
         bot_config: BotConfig | None = None,
         market_data: FakeMarketData | None = None,
+        setup_lifecycle: Any | None = None,
     ) -> tuple[str, Any, list[dict[str, Any]]]:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_store = BotStateStore(Path(tmpdir) / "state.json")
             lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
             if setup_state:
                 setup_state(state_store)
+            if setup_lifecycle:
+                setup_lifecycle(lifecycle_ledger)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 status = EdgeWalkerBot(
@@ -292,10 +304,41 @@ class EdgeWalkerBotTest(unittest.TestCase):
                 ).run_once()
             return output.getvalue(), status, lifecycle_ledger.read_all()
 
+    def survived_regime(
+        self,
+        regime: str,
+        *,
+        gap_percent: str = "0.30",
+        minutes: int = 12,
+        recent_flips: int = 0,
+    ) -> Any:
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_regime_state(regime, Decimal(gap_percent))
+            data = state_store._read()
+            regime_state = data["regime"]
+            now = datetime.now(timezone.utc)
+            regime_state["regime_since"] = (
+                now - timedelta(minutes=minutes)
+            ).isoformat()
+            regime_state["transitions"] = [
+                {
+                    "from": "SIDEWAYS",
+                    "to": regime,
+                    "at": (now - timedelta(minutes=index + 1)).isoformat(),
+                }
+                for index in range(recent_flips)
+            ]
+            state_store._write(data)
+
+        return setup_state
+
     def test_warmup_blocks_regime_routing_until_slow_sma_history_exists(self) -> None:
         client = FakeClient({"SOXL": bars("100", "99")})
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("DOWNTREND"),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [])
@@ -582,7 +625,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
             latest_quotes={"SOXL": {"bp": "99", "ap": "99", "t": now_text}},
         )
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("DOWNTREND"),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [])
@@ -837,7 +883,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
             }
         )
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("DOWNTREND"),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [("SOXS", Decimal("25"))])
@@ -857,7 +906,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
             }
         )
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("DOWNTREND"),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [("SOXS", Decimal("25"))])
@@ -869,6 +921,347 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.routed_symbol, "SOXS")
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_v7_bull_day_bias_blocks_fresh_inverse_entry(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "106", "105", "104"),
+                "SOXS": bars("8.00", "8.05", "8.10", "8.13"),
+            }
+        )
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("[V7] Day path: bias=BULL_BIAS", output)
+        self.assertIn("reason=v7_bull_bias_blocks_inverse", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_v8_fresh_directional_regime_blocks_entry_until_survives(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status = self.run_bot(client)
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("[V8] Directional survivability", output)
+        self.assertIn("reason=v8_regime_too_young", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_v8_noisy_water_filter_blocks_survived_directional_entry(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("UPTREND", recent_flips=6),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("[V8] Directional survivability", output)
+        self.assertIn("reason=v8_noisy_water_filter", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_v9_active_momentum_context_suppresses_inverse_entry(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            self.survived_regime("DOWNTREND")(state_store)
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": True,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "101.4", "101.2", "101.0"),
+                "SOXS": bars("8.00", "8.05", "8.10", "8.12"),
+            }
+        )
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                preset_name="Lead_Momentum_Specialist",
+                regime_gap_threshold=Decimal("0.05"),
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("reason=v9_momentum_context_suppresses_inverse", output)
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+        self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
+        self.assertEqual(records[-1]["bot"], "InverseBot")
+
+    def test_v9_dirty_active_context_releases_inverse_entry_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": True,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            data = state_store._read()
+            data["regime"] = {
+                "regime": "DOWNTREND",
+                "transitions": [
+                    {
+                        "from": "UPTREND",
+                        "to": "DOWNTREND",
+                        "at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            }
+            state_store._write(data)
+            bot = EdgeWalkerBot(
+                replace(config(), preset_name="Lead_Momentum_Specialist"),
+                FakeClient({"SOXL": bars("100", "106", "100")}),
+                state_store,
+            )
+
+            decision = bot._v9_entry_policy_decision(
+                BotRoute(INVERSE_BOT, SOXS, True),
+                None,
+            )
+            context = state_store.get_v9_momentum_context()
+
+        self.assertIsNone(decision)
+        self.assertFalse(context["active"])
+        self.assertTrue(context["invalidated"])
+        self.assertEqual(
+            context["invalidation_reason"],
+            "momentum_drawdown_with_dirty_tape",
+        )
+
+    def test_v9_first_30m_non_warmup_transition_blocks_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Lead_Momentum_Specialist",
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 1,
+                        "early_non_warmup_transitions_per_hour": 2,
+                        "trend_trust_score": 60,
+                        "source_open_to_current_percent": 1,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertEqual(decision["early_transition_count"], 1)
+        self.assertEqual(decision["early_non_warmup_transition_count"], 1)
+        self.assertEqual(decision["observer_preset"], "Lead_Generalist")
+        self.assertFalse(decision["active"])
+        self.assertIn(
+            "first_30m_non_warmup_transition_count_not_zero",
+            decision["activation_reason"],
+        )
+
+    def test_v9_observer_warmup_exit_only_activates_momentum_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Lead_Momentum_Specialist",
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 60,
+                        "source_open_to_current_percent": 2.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+            session_open = bot._v9_session_open()
+            data = state_store._read()
+            data["regime"] = {
+                "regime": "UPTREND",
+                "transitions": [
+                    {
+                        "from": "UPTREND",
+                        "to": "DOWNTREND",
+                        "at": (session_open + timedelta(minutes=31)).isoformat(),
+                    }
+                ],
+            }
+            state_store._write(data)
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertEqual(decision["early_transition_count"], 1)
+        self.assertEqual(decision["early_non_warmup_transition_count"], 0)
+        self.assertEqual(decision["observer_preset"], "Lead_Generalist")
+        self.assertTrue(decision["active"])
+        self.assertEqual(decision["activation_reason"], "v9_momentum_clean_tape_context")
+
+    def test_v9_requires_material_soxl_reclaim_at_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Lead_Momentum_Specialist",
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 60,
+                        "source_open_to_current_percent": 1.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertFalse(decision["active"])
+        self.assertIn(
+            "soxl_below_v9_momentum_floor",
+            decision["activation_reason"],
+        )
+
+    def test_v9_dirty_drawdown_blocks_momentum_context_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Lead_Momentum_Specialist",
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 60,
+                        "source_open_to_current_percent": 2,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "106", "100")}),
+                state_store,
+            )
+            data = state_store._read()
+            data["regime"] = {
+                "regime": "DOWNTREND",
+                "transitions": [
+                    {
+                        "from": "UPTREND",
+                        "to": "DOWNTREND",
+                        "at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            }
+            state_store._write(data)
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(INVERSE_BOT, SOXS, True)
+            )
+
+        self.assertFalse(decision["active"])
+        self.assertIn(
+            "momentum_drawdown_with_dirty_tape",
+            decision["activation_reason"],
+        )
+
+    def test_v9_missing_observer_context_blocks_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(config(), preset_name="Lead_Momentum_Specialist"),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertFalse(decision["active"])
+        self.assertIn("observer_context_unavailable", decision["activation_reason"])
+
+    def test_v7_route_invalidation_breaker_pauses_fresh_entries(self) -> None:
+        def setup_lifecycle(ledger: LifecycleLedger) -> None:
+            for index in range(3):
+                ledger.record(
+                    LIFECYCLE_POSITION_CLOSED,
+                    bot="MomentumBot",
+                    symbol="SOXL",
+                    side="sell",
+                    qty="0.1",
+                    reason="route_invalidated_exit",
+                    order_id=f"sell-{index}",
+                )
+
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status = self.run_bot(
+            client,
+            setup_lifecycle=setup_lifecycle,
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("[V7] Fresh entries paused", output)
+        self.assertIn("reason=v7_route_invalidation_breaker", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, "MomentumBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
 
     def test_conservative_inverse_still_requires_fresh_cross(self) -> None:
         client = FakeClient(
@@ -997,7 +1390,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
     def test_balanced_directional_buys_valid_soxl_continuation_without_fresh_cross(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "102")})
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("UPTREND"),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
@@ -1044,6 +1440,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         output, status = self.run_bot(
             client,
+            setup_state=self.survived_regime("UPTREND"),
             bot_config=replace(config(), directional_mode="AGGRESSIVE"),
         )
 
@@ -1062,6 +1459,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         output, status, records = self.run_bot_with_lifecycle(
             client,
+            setup_state=self.survived_regime("UPTREND"),
             bot_config=replace(config(), directional_mode="ADAPTIVE"),
         )
 

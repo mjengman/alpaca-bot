@@ -84,6 +84,8 @@ NARRATIVE_GROUNDING_VERSION = "ledger-grounded-v2"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
+PRESET_AUTHORITY_MODE_V6 = "V6_0945"
+PRESET_AUTHORITY_MODEL_V6 = "v6_0945_high_confidence_with_rebound_block"
 OPERATOR_SPREADSHEET_COLUMNS = [
     "date",
     "mode",
@@ -170,6 +172,25 @@ RESEARCH_SPREADSHEET_COLUMNS = [
     "preset_version",
     "entry_regime_age_median",
     "early_entry_count",
+    "momentum_early_entry_count",
+    "chop_early_entry_count",
+    "inverse_early_entry_count",
+    "v8_young_regime_blocks",
+    "v8_low_trust_blocks",
+    "v8_noisy_water_blocks",
+    "v9_momentum_context_activations",
+    "v9_inverse_suppression_blocks",
+    "v9_momentum_context_invalidations",
+    "v9_momentum_context_activation_reason",
+    "v9_momentum_context_observer_preset",
+    "v9_momentum_context_trust_score",
+    "v9_momentum_context_soxl_percent",
+    "v9_momentum_context_early_transition_count",
+    "v9_momentum_context_early_transitions_per_hour",
+    "v9_momentum_context_early_non_warmup_transition_count",
+    "v9_momentum_context_early_non_warmup_transitions_per_hour",
+    "v9_momentum_context_early_window_minutes",
+    "v9_momentum_context_invalidation_reason",
     *OPERATOR_SPREADSHEET_COLUMNS,
 ]
 ALLOWED_UI_ORIGINS = {
@@ -233,6 +254,7 @@ class RunnerSnapshot:
     broker_state: dict[str, Any]
     performance: dict[str, Any]
     order_state: dict[str, Any]
+    preset_authority: dict[str, Any] | None
     last_error: str | None
 
 
@@ -263,6 +285,8 @@ class BotRunner:
         self._last_regime: str | None = None
         self._spreadsheet_auto_posted_dates = self._load_spreadsheet_posted_dates()
         self._spreadsheet_auto_post_attempted_dates: set[str] = set()
+        self._preset_authority_plan: dict[str, Any] | None = None
+        self._preset_authority_state: dict[str, Any] = {}
 
     def _initial_config(self) -> tuple[BotConfig, str | None]:
         try:
@@ -280,13 +304,23 @@ class BotRunner:
         with self._lock:
             return self._snapshot_locked()
 
-    def start(self, config: BotConfig) -> RunnerSnapshot:
+    def start(
+        self,
+        config: BotConfig,
+        preset_authority_plan: dict[str, Any] | None = None,
+    ) -> RunnerSnapshot:
         with self._lock:
             if self._running:
                 return self._snapshot_locked()
 
-            self._config = config
-            self._market_data.ensure_running(config)
+            launch_config = self._preset_authority_launch_config(
+                config,
+                preset_authority_plan,
+            )
+            self._config = launch_config
+            self._preset_authority_plan = preset_authority_plan
+            self._preset_authority_state = {}
+            self._market_data.ensure_running(launch_config)
             self._running = True
             self._last_started_at = now_iso()
             self._last_stopped_at = None
@@ -301,7 +335,7 @@ class BotRunner:
             self._stop_event = stop_event
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(config, stop_event),
+                args=(launch_config, stop_event),
                 name="alpaca-bot-runner",
                 daemon=True,
             )
@@ -325,12 +359,38 @@ class BotRunner:
         self.stop()
         self._market_data.stop()
 
-    def run_once(self, config: BotConfig) -> RunnerSnapshot:
+    def run_once(
+        self,
+        config: BotConfig,
+        preset_authority_plan: dict[str, Any] | None = None,
+    ) -> RunnerSnapshot:
+        launch_config = self._preset_authority_launch_config(
+            config,
+            preset_authority_plan,
+        )
         with self._lock:
-            self._config = config
-            self._market_data.ensure_running(config)
-        self._run_cycle(config)
+            self._config = launch_config
+            self._preset_authority_plan = preset_authority_plan
+            self._preset_authority_state = {}
+            self._market_data.ensure_running(launch_config)
+        self._run_cycle(launch_config)
         return self.snapshot()
+
+    def _preset_authority_launch_config(
+        self,
+        config: BotConfig,
+        preset_authority_plan: dict[str, Any] | None,
+    ) -> BotConfig:
+        if (
+            preset_authority_plan
+            and preset_authority_plan.get("mode") == PRESET_AUTHORITY_MODE_V6
+        ):
+            role_configs = preset_authority_plan.get("role_configs")
+            if isinstance(role_configs, dict):
+                generalist_config = role_configs.get("generalist")
+                if isinstance(generalist_config, BotConfig):
+                    return generalist_config
+        return config
 
     def _loop(self, config: BotConfig, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -531,21 +591,221 @@ class BotRunner:
             encoding="utf-8",
         )
 
+    def _preset_authority_effective_config(
+        self,
+        base_config: BotConfig,
+        run_timestamp: datetime,
+    ) -> tuple[BotConfig, list[str], dict[str, Any] | None]:
+        plan = self._preset_authority_plan
+        if not plan or plan.get("mode") != PRESET_AUTHORITY_MODE_V6:
+            return base_config, [], None
+
+        role_configs = plan.get("role_configs")
+        if not isinstance(role_configs, dict):
+            return base_config, [], None
+
+        now_ny = run_timestamp.astimezone(NY_TZ)
+        session_date = now_ny.date().isoformat()
+        state = self._preset_authority_state
+        if state.get("session_date") != session_date:
+            state = {
+                "session_date": session_date,
+                "evaluated": False,
+                "selected_role": "generalist",
+                "authority_action": "PENDING",
+                "authority_reason": "Waiting for 09:45 ET authority checkpoint.",
+            }
+            self._preset_authority_state = state
+
+        selected_role = _optional_text(state.get("selected_role")) or "generalist"
+        if state.get("evaluated"):
+            return role_configs.get(selected_role, base_config), [], dict(state)
+
+        current_minutes = now_ny.hour * 60 + now_ny.minute
+        checkpoint_minutes = 9 * 60 + 45
+        expiry_minutes = 10 * 60
+        if current_minutes < checkpoint_minutes:
+            return role_configs.get("generalist", base_config), [], dict(state)
+
+        if current_minutes >= expiry_minutes:
+            state.update(
+                {
+                    "evaluated": True,
+                    "selected_role": "generalist",
+                    "authority_action": "GENERALIST_DEFAULT",
+                    "router_confidence": "LOW",
+                    "authority_reason": (
+                        "v6 09:45 authority window expired before evaluation; "
+                        "staying with Lead_Generalist."
+                    ),
+                    "evaluated_at": now_ny.isoformat(timespec="seconds"),
+                }
+            )
+            return (
+                role_configs.get("generalist", base_config),
+                [self._preset_authority_log_line(state)],
+                dict(state),
+            )
+
+        decision = self._preset_authority_v6_decision(plan)
+        selected_role = (
+            _optional_text(decision.get("selected_role")) or "generalist"
+        )
+        state.update(decision)
+        state.update(
+            {
+                "session_date": session_date,
+                "evaluated": True,
+                "selected_role": selected_role,
+                "evaluated_at": now_ny.isoformat(timespec="seconds"),
+            }
+        )
+        return (
+            role_configs.get(selected_role, base_config),
+            [self._preset_authority_log_line(state)],
+            dict(state),
+        )
+
+    def _preset_authority_v6_decision(
+        self,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        role_names = plan.get("role_names") if isinstance(plan.get("role_names"), dict) else {}
+        bars = self._market_data.get_recent_bars(SOXL, 120)
+        path = _runtime_source_price_path(bars)
+        source_return = path.get("source_open_to_current_percent")
+        source_drawdown = path.get("source_max_drawdown_from_open_percent")
+        source_runup = path.get("source_max_runup_from_open_percent")
+
+        if source_return is None or source_drawdown is None:
+            return {
+                "authority_model": PRESET_AUTHORITY_MODEL_V6,
+                "authority_action": "GENERALIST_DEFAULT",
+                "selected_role": "generalist",
+                "raw_role": "generalist",
+                "router_confidence": "LOW",
+                "authority_preset": role_names.get("generalist", "Lead_Generalist"),
+                "authority_reason": (
+                    "v6 authority could not read enough regular-session SOXL bars; "
+                    "staying with Lead_Generalist."
+                ),
+                **path,
+            }
+
+        raw_role = "generalist"
+        confidence = "LOW"
+        reasons: list[str] = []
+        if source_return >= 2.75 and source_drawdown > -1.5:
+            raw_role = "momentum"
+            confidence = "HIGH" if source_return >= 4 else "MODERATE"
+            reasons.append(f"SOXL is positive early from open ({source_return:g}%).")
+            if source_runup is not None:
+                reasons.append(f"SOXL early runup reached {source_runup:g}%.")
+        elif source_return <= -4 and source_drawdown <= -4:
+            raw_role = "inverse"
+            confidence = "HIGH"
+            reasons.append(f"SOXL is sharply negative early ({source_return:g}%).")
+            reasons.append(f"SOXL early drawdown reached {source_drawdown:g}%.")
+        else:
+            reasons.append("No specialist threshold cleared; stay with the generalist.")
+
+        action = "GENERALIST_DEFAULT"
+        selected_role = "generalist"
+        authority_reason = " ".join(reasons)
+        if raw_role != "generalist" and confidence != "HIGH":
+            action = "ADVISORY_ONLY"
+            authority_reason = (
+                f"09:45 {raw_role} signal was {confidence}; v6 only grants "
+                "authority to HIGH-confidence specialist calls. "
+                + authority_reason
+            )
+        elif raw_role == "inverse" and source_return <= -7 and source_drawdown <= -7:
+            action = "BLOCKED_REVIEW"
+            authority_reason = (
+                "Extreme 09:45 selloff is quarantined for review; v6 stays "
+                "with Lead_Generalist. "
+                + authority_reason
+            )
+        elif raw_role == "inverse" and source_return - source_drawdown >= 1.5:
+            action = "BLOCKED_REVIEW"
+            rebound_gap = source_return - source_drawdown
+            authority_reason = (
+                "09:45 Inverse signal already bounced materially from the early "
+                f"drawdown ({rebound_gap:g} percentage points); v6 stays with "
+                "Lead_Generalist. "
+                + authority_reason
+            )
+        elif raw_role in {"momentum", "inverse"} and confidence == "HIGH":
+            action = "ROUTE"
+            selected_role = raw_role
+            authority_reason = (
+                f"09:45 {raw_role} signal is HIGH confidence and no v6 block fired. "
+                + authority_reason
+            )
+
+        return {
+            "authority_model": PRESET_AUTHORITY_MODEL_V6,
+            "authority_action": action,
+            "selected_role": selected_role,
+            "raw_role": raw_role,
+            "router_confidence": confidence,
+            "authority_preset": role_names.get(
+                selected_role,
+                role_names.get("generalist", "Lead_Generalist"),
+            ),
+            "authority_reason": authority_reason,
+            **path,
+        }
+
+    def _preset_authority_log_line(self, state: dict[str, Any]) -> str:
+        source_return = state.get("source_open_to_current_percent")
+        source_drawdown = state.get("source_max_drawdown_from_open_percent")
+        soxl_text = (
+            f" soxl={source_return:+.2f}%"
+            if isinstance(source_return, (int, float))
+            else ""
+        )
+        drawdown_text = (
+            f" dd={source_drawdown:+.2f}%"
+            if isinstance(source_drawdown, (int, float))
+            else ""
+        )
+        return (
+            "[AUTHORITY] "
+            f"model={state.get('authority_model') or PRESET_AUTHORITY_MODEL_V6} "
+            f"action={state.get('authority_action')} "
+            f"raw={state.get('raw_role') or '--'} "
+            f"selected={state.get('selected_role') or 'generalist'} "
+            f"confidence={state.get('router_confidence') or '--'}"
+            f"{soxl_text}{drawdown_text} "
+            f"reason={state.get('authority_reason') or '--'}"
+        )
+
     def _run_cycle(self, config: BotConfig) -> None:
         output = io.StringIO()
         error: str | None = None
         edgewalker_status: dict[str, Any] | None = None
+        authority_state: dict[str, Any] | None = None
         broker_state = broker_constraint_payload(broker_constraint_ok())
         run_timestamp = datetime.now(timezone.utc)
         try:
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 self._market_data.ensure_running(config)
+                effective_config, authority_lines, authority_state = (
+                    self._preset_authority_effective_config(config, run_timestamp)
+                )
+                if effective_config.data_feed != config.data_feed:
+                    self._market_data.ensure_running(effective_config)
+                for line in authority_lines:
+                    print(line)
                 status = EdgeWalkerBot(
-                    config,
-                    AlpacaClient(config),
+                    effective_config,
+                    AlpacaClient(effective_config),
                     market_data=self._market_data,
                 ).run_once()
                 edgewalker_status = asdict(status)
+                if authority_state:
+                    edgewalker_status["preset_authority"] = authority_state
         except BotError as exc:
             error = str(exc)
             broker_state = self._broker_state_for_cycle_error(error, run_timestamp)
@@ -557,8 +817,9 @@ class BotRunner:
         if error:
             lines.append(f"[error] {error}")
 
+        logged_config = effective_config if "effective_config" in locals() else config
         with self._lock:
-            self._config = config
+            self._config = logged_config
             self._cycle_count += 1
             cycle_id = self._cycle_count
             self._last_run_at = now_iso()
@@ -572,7 +833,7 @@ class BotRunner:
             self._last_output = lines[-40:] if lines else ["Cycle complete."]
             self._append_activity_locked(self._last_output)
             self._append_cycle_log_locked(
-                config=config,
+                config=logged_config,
                 cycle_id=cycle_id,
                 timestamp=run_timestamp,
                 console_lines=lines,
@@ -778,8 +1039,28 @@ class BotRunner:
                 lifecycle_records,
                 BotStateStore().get_pending_orders(),
             ),
+            preset_authority=self._preset_authority_snapshot_locked(),
             last_error=self._last_error,
         )
+
+    def _preset_authority_snapshot_locked(self) -> dict[str, Any] | None:
+        plan = self._preset_authority_plan
+        if not plan or plan.get("mode") != PRESET_AUTHORITY_MODE_V6:
+            return None
+        if self._preset_authority_state:
+            return dict(self._preset_authority_state)
+        role_names = plan.get("role_names") if isinstance(plan.get("role_names"), dict) else {}
+        return {
+            "authority_model": PRESET_AUTHORITY_MODEL_V6,
+            "authority_action": "PENDING",
+            "selected_role": "generalist",
+            "raw_role": "generalist",
+            "router_confidence": None,
+            "authority_preset": role_names.get("generalist", "Lead_Generalist"),
+            "authority_reason": (
+                "v6 authority is armed and waiting for the 09:45 ET checkpoint."
+            ),
+        }
 
 
 def lifecycle_performance_summary(
@@ -1736,6 +2017,11 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
             raise BotError(
                 'Live trading is not armed. Open Settings and type "LIVE" first.'
             )
+    v9_observer_context = payload.get("v9ObserverContext")
+    if not isinstance(v9_observer_context, dict):
+        v9_observer_context = payload.get("v9_observer_context")
+    if not isinstance(v9_observer_context, dict):
+        v9_observer_context = base.v9_observer_context
 
     return replace(
         base,
@@ -1762,7 +2048,92 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         trail_percent=decimal_from_payload(payload, "trailPercent", base.trail_percent),
         fast_sma_minutes=fast_sma,
         slow_sma_minutes=slow_sma,
+        preset_name=_optional_text(
+            payload.get("presetName")
+            or payload.get("preset_name")
+            or payload.get("name")
+        ),
+        v9_observer_context=(
+            dict(v9_observer_context)
+            if isinstance(v9_observer_context, dict)
+            else None
+        ),
     )
+
+
+def _preset_authority_role_from_payload(item: dict[str, Any]) -> str | None:
+    explicit_role = _optional_text(item.get("role"))
+    if explicit_role:
+        normalized = explicit_role.strip().lower()
+        if normalized in {"generalist", "momentum", "inverse"}:
+            return normalized
+    name = _optional_text(item.get("name") or item.get("preset_name"))
+    if not name:
+        return None
+    lowered = name.lower()
+    if "general" in lowered:
+        return "generalist"
+    if "momentum" in lowered:
+        return "momentum"
+    if "inverse" in lowered:
+        return "inverse"
+    return None
+
+
+def preset_authority_plan_from_payload(
+    payload: dict[str, Any],
+    base_config: BotConfig,
+) -> dict[str, Any] | None:
+    mode = str(payload.get("presetAuthorityMode", "OFF")).strip().upper()
+    if mode in {"", "OFF", "NONE"}:
+        return None
+    if mode != PRESET_AUTHORITY_MODE_V6:
+        raise BotError("presetAuthorityMode must be OFF or V6_0945.")
+
+    raw_presets = payload.get("presetAuthorityPresets")
+    if not isinstance(raw_presets, list):
+        raise BotError("v6 preset authority requires saved Lead preset payloads.")
+
+    role_configs: dict[str, BotConfig] = {}
+    role_names: dict[str, str] = {}
+    for item in raw_presets:
+        if not isinstance(item, dict):
+            continue
+        role = _preset_authority_role_from_payload(item)
+        config_payload = item.get("config")
+        if role is None or not isinstance(config_payload, dict):
+            continue
+        merged_payload = {
+            **config_payload,
+            "dryRun": base_config.dry_run,
+            "presetName": (
+                _optional_text(item.get("name") or item.get("preset_name"))
+                or role.title()
+            ),
+        }
+        role_configs[role] = config_from_payload(merged_payload)
+        role_names[role] = (
+            _optional_text(item.get("name") or item.get("preset_name"))
+            or role.title()
+        )
+
+    missing = [
+        role
+        for role in ("generalist", "momentum", "inverse")
+        if role not in role_configs
+    ]
+    if missing:
+        raise BotError(
+            "v6 preset authority requires saved Lead presets for: "
+            + ", ".join(missing)
+        )
+
+    return {
+        "mode": PRESET_AUTHORITY_MODE_V6,
+        "model": PRESET_AUTHORITY_MODEL_V6,
+        "role_configs": role_configs,
+        "role_names": role_names,
+    }
 
 
 def _log_date_from_path(path: Path) -> str | None:
@@ -2094,6 +2465,61 @@ def _float_from_value(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bar_float(bar: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _float_from_value(bar.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _runtime_source_price_path(bars: list[dict[str, Any]]) -> dict[str, Any]:
+    open_price: float | None = None
+    current_price: float | None = None
+    lows: list[float] = []
+    highs: list[float] = []
+
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+        bar_open = _bar_float(bar, "o", "open", "c", "close")
+        bar_high = _bar_float(bar, "h", "high", "c", "close", "o", "open")
+        bar_low = _bar_float(bar, "l", "low", "c", "close", "o", "open")
+        bar_close = _bar_float(bar, "c", "close", "o", "open")
+        if open_price is None and bar_open is not None:
+            open_price = bar_open
+        if bar_high is not None:
+            highs.append(bar_high)
+        if bar_low is not None:
+            lows.append(bar_low)
+        if bar_close is not None:
+            current_price = bar_close
+
+    if open_price is None or current_price is None or open_price == 0:
+        return {
+            "source_open_to_current_percent": None,
+            "source_max_drawdown_from_open_percent": None,
+            "source_max_runup_from_open_percent": None,
+        }
+
+    low_price = min(lows) if lows else current_price
+    high_price = max(highs) if highs else current_price
+    return {
+        "source_open_to_current_percent": round(
+            (current_price - open_price) / open_price * 100,
+            2,
+        ),
+        "source_max_drawdown_from_open_percent": round(
+            (low_price - open_price) / open_price * 100,
+            2,
+        ),
+        "source_max_runup_from_open_percent": round(
+            (high_price - open_price) / open_price * 100,
+            2,
+        ),
+    }
 
 
 def _entry_block_reason_from_line(line: str) -> str | None:
@@ -2872,6 +3298,11 @@ def config_from_research_payload(payload: dict[str, Any]) -> BotConfig:
         dry_run=False,
         data_feed=data_feed,
         trading_base_url="research://simulated-broker",
+        preset_name=_optional_text(
+            payload.get("preset_name")
+            or payload.get("presetName")
+            or payload.get("name")
+        ),
     )
 
 
@@ -3089,6 +3520,79 @@ def _trades_closed_in_window(
     return closed
 
 
+def _trade_datetime(trade: dict[str, Any], key: str) -> datetime | None:
+    raw_value = _optional_text(trade.get(key))
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _trades_opened_at_or_after_window(
+    trades: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+    window_minutes: int | None,
+) -> list[dict[str, Any]]:
+    if window_minutes is None or not records:
+        return trades
+    first_at = _record_datetime(records[0])
+    if first_at is None:
+        return []
+    cutoff = first_at + timedelta(minutes=window_minutes)
+    opened: list[dict[str, Any]] = []
+    for trade in trades:
+        opened_at = _trade_datetime(trade, "opened_at")
+        if opened_at is not None and opened_at >= cutoff:
+            opened.append(trade)
+    return opened
+
+
+def _trade_window_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    total = Decimal("0")
+    wins = 0
+    for trade in trades:
+        value = _decimal_from_value(trade.get("realized_pl"))
+        if value is None:
+            continue
+        total += value
+        if value > 0:
+            wins += 1
+    trade_count = len(trades)
+    return {
+        "pl": _rounded_number(total),
+        "trade_count": trade_count,
+        "win_rate": round(wins / trade_count * 100, 2) if trade_count else 0,
+    }
+
+
+def _research_checkpoint_trade_windows(
+    records: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    windows: dict[str, dict[str, Any]] = {}
+    for window_minutes in (15, 30, 60, 90):
+        first_at = _record_datetime(records[0]) if records else None
+        cutoff = first_at + timedelta(minutes=window_minutes) if first_at else None
+        pre_summary = _trade_window_summary(
+            _trades_closed_in_window(trades, records, window_minutes)
+        )
+        post_summary = _trade_window_summary(
+            _trades_opened_at_or_after_window(trades, records, window_minutes)
+        )
+        windows[str(window_minutes)] = {
+            "cutoff": cutoff.isoformat(timespec="seconds") if cutoff else None,
+            "pre_pl": pre_summary["pl"],
+            "pre_trade_count": pre_summary["trade_count"],
+            "pre_win_rate": pre_summary["win_rate"],
+            "post_pl": post_summary["pl"],
+            "post_trade_count": post_summary["trade_count"],
+            "post_win_rate": post_summary["win_rate"],
+        }
+    return windows
+
+
 def _research_regime_segments(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     current_regime: str | None = None
@@ -3137,6 +3641,20 @@ def _research_fingerprint(
     window_trades = _trades_closed_in_window(trades, records, window_minutes)
     cycles = len(window_records)
     transitions = sum(1 for record in window_records if record.get("regime_transition"))
+    non_warmup_transition_count = 0
+    for record in window_records:
+        transition = record.get("regime_transition")
+        if not isinstance(transition, dict):
+            continue
+        from_regime = str(transition.get("from") or "").upper()
+        to_regime = str(transition.get("to") or "").upper()
+        if not from_regime or not to_regime:
+            continue
+        if from_regime in {"WARMUP", "UNKNOWN", "NONE"}:
+            continue
+        if to_regime in {"WARMUP", "UNKNOWN", "NONE"}:
+            continue
+        non_warmup_transition_count += 1
     hours = max(cycles / 60, 1 / 60)
     segments = _research_regime_segments(window_records)
     active_segments = [
@@ -3172,6 +3690,111 @@ def _research_fingerprint(
         if _optional_text(trade.get("exit_reason")) == "trailing_stop_breached"
     ]
 
+    empty_price_path = {
+        "open_to_current_percent": None,
+        "max_drawdown_from_open_percent": None,
+        "max_runup_from_open_percent": None,
+    }
+
+    def first_float(*values: Any) -> float | None:
+        for value in values:
+            parsed = _float_from_value(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def price_path_from_components(
+        *,
+        open_price: float | None,
+        current_price: float | None,
+        lows: list[float],
+        highs: list[float],
+    ) -> dict[str, Any]:
+        if open_price is None or current_price is None or open_price == 0:
+            return dict(empty_price_path)
+        low_price = min(lows) if lows else current_price
+        high_price = max(highs) if highs else current_price
+        return {
+            "open_to_current_percent": round(
+                (current_price - open_price) / open_price * 100,
+                2,
+            ),
+            "max_drawdown_from_open_percent": round(
+                (low_price - open_price) / open_price * 100,
+                2,
+            ),
+            "max_runup_from_open_percent": round(
+                (high_price - open_price) / open_price * 100,
+                2,
+            ),
+        }
+
+    def fallback_price_path(*keys: str) -> dict[str, Any]:
+        prices: list[float] = []
+        for record in window_records:
+            for key in keys:
+                price = _float_from_value(record.get(key))
+                if price is not None:
+                    prices.append(price)
+                    break
+        return price_path_from_components(
+            open_price=prices[0] if prices else None,
+            current_price=prices[-1] if prices else None,
+            lows=prices,
+            highs=prices,
+        )
+
+    def bar_price_path(prefix: str, *fallback_keys: str) -> dict[str, Any]:
+        open_price: float | None = None
+        current_price: float | None = None
+        lows: list[float] = []
+        highs: list[float] = []
+        saw_bar = False
+        for record in window_records:
+            bar_open = _float_from_value(record.get(f"{prefix}_bar_open"))
+            bar_high = _float_from_value(record.get(f"{prefix}_bar_high"))
+            bar_low = _float_from_value(record.get(f"{prefix}_bar_low"))
+            bar_close = _float_from_value(record.get(f"{prefix}_bar_close"))
+            if all(
+                value is None for value in (bar_open, bar_high, bar_low, bar_close)
+            ):
+                continue
+            saw_bar = True
+            cycle_open = first_float(bar_open, bar_close, bar_high, bar_low)
+            cycle_high = first_float(bar_high, bar_close, bar_open, bar_low)
+            cycle_low = first_float(bar_low, bar_close, bar_open, bar_high)
+            cycle_close = first_float(bar_close, bar_open, bar_high, bar_low)
+            if open_price is None and cycle_open is not None:
+                open_price = cycle_open
+            if cycle_high is not None:
+                highs.append(cycle_high)
+            if cycle_low is not None:
+                lows.append(cycle_low)
+            if cycle_close is not None:
+                current_price = cycle_close
+        if not saw_bar:
+            return fallback_price_path(*fallback_keys)
+        return price_path_from_components(
+            open_price=open_price,
+            current_price=current_price,
+            lows=lows,
+            highs=highs,
+        )
+
+    source_path = bar_price_path("source", "source_price", "price")
+    inverse_path = bar_price_path("inverse", "inverse_price")
+    regime_counts = {
+        "uptrend_minutes": sum(
+            1 for record in window_records if record.get("regime") == "UPTREND"
+        ),
+        "downtrend_minutes": sum(
+            1 for record in window_records if record.get("regime") == "DOWNTREND"
+        ),
+        "sideways_minutes": sum(
+            1 for record in window_records if record.get("regime") == "SIDEWAYS"
+        ),
+    }
+
     def realized_total(rows: list[dict[str, Any]]) -> float:
         total = Decimal("0")
         for row in rows:
@@ -3186,6 +3809,11 @@ def _research_fingerprint(
         "is_full_session": cycles >= 350 if window_minutes is None else None,
         "regime_transitions": transitions,
         "transitions_per_hour": round(transitions / hours, 2),
+        "non_warmup_regime_transitions": non_warmup_transition_count,
+        "non_warmup_transitions_per_hour": round(
+            non_warmup_transition_count / hours,
+            2,
+        ),
         "avg_regime_duration_minutes": (
             round(sum(durations) / len(durations), 2) if durations else None
         ),
@@ -3219,6 +3847,24 @@ def _research_fingerprint(
             quality.get("avg_capture_ratio_percent")
         ),
         "avg_hold_seconds": _rounded_float(quality.get("avg_hold_seconds")),
+        "current_regime": (
+            _optional_text(window_records[-1].get("regime")) if window_records else None
+        ),
+        "source_open_to_current_percent": source_path["open_to_current_percent"],
+        "source_max_drawdown_from_open_percent": source_path[
+            "max_drawdown_from_open_percent"
+        ],
+        "source_max_runup_from_open_percent": source_path[
+            "max_runup_from_open_percent"
+        ],
+        "inverse_open_to_current_percent": inverse_path["open_to_current_percent"],
+        "inverse_max_drawdown_from_open_percent": inverse_path[
+            "max_drawdown_from_open_percent"
+        ],
+        "inverse_max_runup_from_open_percent": inverse_path[
+            "max_runup_from_open_percent"
+        ],
+        **regime_counts,
     }
 
 
@@ -3240,12 +3886,290 @@ def _research_result_summary(
         "inversebot_archaeology": performance.get("inversebot_archaeology") or {},
         "fingerprint": _research_fingerprint(records, trades),
         "early_windows": {
+            "15": _research_fingerprint(records, trades, window_minutes=15),
             "30": _research_fingerprint(records, trades, window_minutes=30),
             "60": _research_fingerprint(records, trades, window_minutes=60),
+            "90": _research_fingerprint(records, trades, window_minutes=90),
         },
+        "checkpoint_trade_windows": _research_checkpoint_trade_windows(
+            records,
+            trades,
+        ),
         "trade_count": len(trades),
         "cycles": len(records),
     }
+
+
+def _v9_observer_context_from_result(
+    result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    early_windows = result.get("early_windows")
+    if not isinstance(early_windows, dict):
+        return None
+    fingerprint = early_windows.get("30")
+    if not isinstance(fingerprint, dict):
+        return None
+
+    transition_count = _float_from_value(fingerprint.get("regime_transitions"))
+    transitions_per_hour = _float_from_value(fingerprint.get("transitions_per_hour"))
+    non_warmup_transition_count = _float_from_value(
+        fingerprint.get("non_warmup_regime_transitions")
+    )
+    non_warmup_transitions_per_hour = _float_from_value(
+        fingerprint.get("non_warmup_transitions_per_hour")
+    )
+    trend_trust = _float_from_value(fingerprint.get("trend_trust_avg"))
+    source_percent = _float_from_value(
+        fingerprint.get("source_open_to_current_percent")
+    )
+    window_minutes = _float_from_value(fingerprint.get("window_minutes")) or 30
+
+    return {
+        "observer_preset": result.get("preset_name"),
+        "early_transition_count": int(transition_count or 0),
+        "early_transitions_per_hour": (
+            _rounded_number(transitions_per_hour)
+            if transitions_per_hour is not None
+            else None
+        ),
+        "early_non_warmup_transition_count": int(
+            non_warmup_transition_count or 0
+        ),
+        "early_non_warmup_transitions_per_hour": (
+            _rounded_number(non_warmup_transitions_per_hour)
+            if non_warmup_transitions_per_hour is not None
+            else None
+        ),
+        "trend_trust_score": int(round(trend_trust)) if trend_trust is not None else None,
+        "source_open_to_current_percent": (
+            _rounded_number(source_percent) if source_percent is not None else None
+        ),
+        "early_transition_window_minutes": int(window_minutes),
+    }
+
+
+def _research_target_bot_for_preset(preset_name: str) -> str | None:
+    normalized = preset_name.lower()
+    if "momentum" in normalized:
+        return MOMENTUM_BOT
+    if "inverse" in normalized:
+        return INVERSE_BOT
+    return None
+
+
+def _research_bot_pl(row: dict[str, Any], bot_name: str) -> Decimal:
+    key_by_bot = {
+        MOMENTUM_BOT: "momentum_pl",
+        CHOP_BOT: "chop_pl",
+        INVERSE_BOT: "inverse_pl",
+    }
+    return _decimal_from_value(row.get(key_by_bot.get(bot_name, ""))) or Decimal("0")
+
+
+def _research_bot_trade_count(result: dict[str, Any], bot_name: str) -> int:
+    for item in result.get("bot_performance") or []:
+        if not isinstance(item, dict) or item.get("bot") != bot_name:
+            continue
+        return int(_float_from_value(item.get("trade_count")) or 0)
+    return 0
+
+
+def _research_position_budget(row: dict[str, Any]) -> Decimal:
+    starting = _decimal_from_value(row.get("starting_account_value")) or Decimal("0")
+    allocation = _decimal_from_value(row.get("position_allocation_percent"))
+    notional = _decimal_from_value(row.get("position_notional"))
+    sizing_mode = (_optional_text(row.get("position_sizing_mode")) or "").upper()
+    if sizing_mode == "DYNAMIC" and allocation is not None:
+        return starting * allocation / Decimal("100")
+    return notional or Decimal("0")
+
+
+def _research_target_move_percent(result: dict[str, Any], target_bot: str) -> Decimal:
+    fingerprint = result.get("fingerprint") if isinstance(result.get("fingerprint"), dict) else {}
+    if target_bot == MOMENTUM_BOT:
+        return max(
+            _decimal_from_value(
+                fingerprint.get("source_max_runup_from_open_percent")
+            )
+            or Decimal("0"),
+            Decimal("0"),
+        )
+    if target_bot == INVERSE_BOT:
+        return max(
+            _decimal_from_value(
+                fingerprint.get("inverse_max_runup_from_open_percent")
+            )
+            or Decimal("0"),
+            Decimal("0"),
+        )
+    return Decimal("0")
+
+
+def _research_theoretical_target_pl(result: dict[str, Any], target_bot: str) -> Decimal:
+    row = result.get("row") if isinstance(result.get("row"), dict) else {}
+    return _research_position_budget(row) * _research_target_move_percent(
+        result,
+        target_bot,
+    ) / Decimal("100")
+
+
+def _percent_decimal(numerator: Decimal, denominator: Decimal) -> Decimal | None:
+    if denominator == 0:
+        return None
+    return numerator / denominator * Decimal("100")
+
+
+def _rounded_optional_number(value: Decimal | None) -> float | str:
+    if value is None:
+        return ""
+    return _rounded_number(value)
+
+
+def _research_specialist_audit(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        grouped.setdefault(result["preset_id"], []).append(result)
+
+    audits: list[dict[str, Any]] = []
+    for preset_id, preset_results in grouped.items():
+        first = preset_results[0]
+        preset_name = first["preset_name"]
+        target_bot = _research_target_bot_for_preset(preset_name)
+        if not target_bot:
+            continue
+
+        target_pl = Decimal("0")
+        total_pl = Decimal("0")
+        total_abs_bot_pl = Decimal("0")
+        non_target_pl = Decimal("0")
+        non_target_damage = Decimal("0")
+        target_trades = 0
+        total_trades = 0
+        home_rows = sorted(
+            preset_results,
+            key=lambda row: _research_target_move_percent(row, target_bot),
+            reverse=True,
+        )[:5]
+        home_target_pl = Decimal("0")
+        home_preset_pl = Decimal("0")
+        home_non_target_pl = Decimal("0")
+        home_non_target_damage = Decimal("0")
+        home_theoretical_pl = Decimal("0")
+        home_target_trades = 0
+        home_total_trades = 0
+
+        for result in preset_results:
+            row = result.get("row") if isinstance(result.get("row"), dict) else {}
+            row_total_pl = (
+                _decimal_from_value(row.get("realized_pl_dollars")) or Decimal("0")
+            )
+            row_target_pl = _research_bot_pl(row, target_bot)
+            total_pl += row_total_pl
+            target_pl += row_target_pl
+            target_trades += _research_bot_trade_count(result, target_bot)
+            total_trades += int(_float_from_value(row.get("closed_trades")) or 0)
+            for bot_name in BOT_PERFORMANCE_ORDER:
+                bot_pl = _research_bot_pl(row, bot_name)
+                total_abs_bot_pl += abs(bot_pl)
+                if bot_name == target_bot:
+                    continue
+                non_target_pl += bot_pl
+                if bot_pl < 0:
+                    non_target_damage += abs(bot_pl)
+
+        for result in home_rows:
+            row = result.get("row") if isinstance(result.get("row"), dict) else {}
+            row_total_pl = (
+                _decimal_from_value(row.get("realized_pl_dollars")) or Decimal("0")
+            )
+            row_target_pl = _research_bot_pl(row, target_bot)
+            home_preset_pl += row_total_pl
+            home_target_pl += row_target_pl
+            home_theoretical_pl += _research_theoretical_target_pl(result, target_bot)
+            home_target_trades += _research_bot_trade_count(result, target_bot)
+            home_total_trades += int(_float_from_value(row.get("closed_trades")) or 0)
+            for bot_name in BOT_PERFORMANCE_ORDER:
+                if bot_name == target_bot:
+                    continue
+                bot_pl = _research_bot_pl(row, bot_name)
+                home_non_target_pl += bot_pl
+                if bot_pl < 0:
+                    home_non_target_damage += abs(bot_pl)
+
+        purity = _percent_decimal(abs(target_pl), total_abs_bot_pl)
+        trade_share = _percent_decimal(
+            Decimal(target_trades),
+            Decimal(total_trades),
+        )
+        home_target_share = _percent_decimal(home_target_pl, home_preset_pl)
+        if home_target_share is not None and home_target_share < 0:
+            home_target_share = None
+        home_capture = _percent_decimal(home_target_pl, home_theoretical_pl)
+        home_missed = home_theoretical_pl - home_target_pl
+        if home_missed < 0:
+            home_missed = Decimal("0")
+
+        if (
+            target_pl > 0
+            and home_preset_pl > 0
+            and home_target_pl > 0
+            and (home_target_share or Decimal("0")) >= Decimal("70")
+            and (home_capture or Decimal("0")) >= Decimal("20")
+        ):
+            diagnosis = "SPECIALIST_CONFIRMED"
+        elif target_pl > 0 and non_target_damage > abs(target_pl):
+            diagnosis = "REAL_BUT_POLLUTED"
+        elif (
+            target_pl <= 0
+            or home_target_trades == 0
+            or (home_capture or Decimal("0")) < Decimal("10")
+        ):
+            diagnosis = "WEAK_TARGET_ENGINE"
+        else:
+            diagnosis = "MIXED_OR_UNPROVEN"
+
+        audits.append(
+            {
+                "preset_id": preset_id,
+                "preset_name": preset_name,
+                "preset_version": first["preset_version"],
+                "target_bot": target_bot,
+                "total_pl": _rounded_number(total_pl),
+                "target_bot_pl": _rounded_number(target_pl),
+                "non_target_bot_pl": _rounded_number(non_target_pl),
+                "non_target_damage": _rounded_number(non_target_damage),
+                "target_purity_percent": _rounded_optional_number(purity),
+                "target_trade_share_percent": _rounded_optional_number(trade_share),
+                "home_turf_dates": [row["date"] for row in home_rows],
+                "home_turf_preset_pl": _rounded_number(home_preset_pl),
+                "home_turf_target_bot_pl": _rounded_number(home_target_pl),
+                "home_turf_non_target_bot_pl": _rounded_number(home_non_target_pl),
+                "home_turf_non_target_damage": _rounded_number(
+                    home_non_target_damage
+                ),
+                "home_turf_target_share_percent": _rounded_optional_number(
+                    home_target_share
+                ),
+                "home_turf_capture_efficiency_percent": _rounded_optional_number(
+                    home_capture
+                ),
+                "home_turf_missed_opportunity": _rounded_number(home_missed),
+                "home_turf_target_trades": home_target_trades,
+                "home_turf_total_trades": home_total_trades,
+                "diagnosis": diagnosis,
+            }
+        )
+
+    return sorted(
+        audits,
+        key=lambda row: (
+            _decimal_from_value(row.get("home_turf_preset_pl")) or Decimal("0"),
+            _decimal_from_value(row.get("target_bot_pl")) or Decimal("0"),
+        ),
+        reverse=True,
+    )
 
 
 def _research_winner_confidence(margin_percent: Decimal) -> str:
@@ -3423,8 +4347,17 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
         raise BotError("Limit one comparison batch to 60 replay runs.")
 
     results: list[dict[str, Any]] = []
+    role_presets = _shadow_router_role_presets(presets)
+    observer_preset = role_presets["generalist"]
+    observer_preset_id = observer_preset["id"]
+    ordered_presets = [
+        observer_preset,
+        *[preset for preset in presets if preset["id"] != observer_preset_id],
+    ]
     for date_text in dates:
-        for preset in presets:
+        observer_summary: dict[str, Any] | None = None
+        date_results: dict[str, dict[str, Any]] = {}
+        for preset in ordered_presets:
             run_payload = {
                 **preset["config"],
                 "backtest_date": date_text,
@@ -3444,10 +4377,21 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
                 "preset_name": preset["name"],
                 "preset_version": preset["version"],
             }
+            if observer_summary is not None and preset["id"] != observer_preset_id:
+                observer_context = _v9_observer_context_from_result(observer_summary)
+                if observer_context is not None:
+                    run_payload["v9ObserverContext"] = observer_context
             config = config_from_research_payload(run_payload)
             request = research_request_from_payload(run_payload, config)
             result = run_research_backtest(config, request)
-            results.append(_research_result_summary(result, preset))
+            summary = _research_result_summary(result, preset)
+            date_results[preset["id"]] = summary
+            if preset["id"] == observer_preset_id:
+                observer_summary = summary
+        for preset in presets:
+            summary = date_results.get(preset["id"])
+            if summary is not None:
+                results.append(summary)
 
     date_summaries = [
         _research_compare_date_summary(
@@ -3457,6 +4401,7 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
         for date_text in dates
     ]
     preset_summaries = _research_compare_preset_summaries(results, date_summaries)
+    specialist_audit = _research_specialist_audit(results)
     return {
         "status": "completed",
         "kind": "comparison",
@@ -3472,6 +4417,969 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
         "results": results,
         "date_summaries": date_summaries,
         "preset_summaries": preset_summaries,
+        "specialist_audit": specialist_audit,
+    }
+
+
+SHADOW_ROUTER_CHECKPOINTS = (
+    {"label": "09:45", "window_minutes": 15},
+    {"label": "10:00", "window_minutes": 30},
+    {"label": "10:30", "window_minutes": 60},
+    {"label": "11:00", "window_minutes": 90},
+)
+
+
+def _shadow_router_role_presets(
+    presets: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    def find_role(pattern: str) -> dict[str, Any] | None:
+        for preset in presets:
+            if pattern in preset["name"].lower():
+                return preset
+        return None
+
+    generalist = find_role("general") or presets[0]
+    momentum = find_role("momentum") or generalist
+    inverse = find_role("inverse") or generalist
+    return {
+        "generalist": generalist,
+        "momentum": momentum,
+        "inverse": inverse,
+    }
+
+
+def _shadow_router_pick(fingerprint: dict[str, Any]) -> dict[str, Any]:
+    transitions_per_hour = _float_from_value(fingerprint.get("transitions_per_hour"))
+    avg_regime_minutes = _float_from_value(
+        fingerprint.get("avg_regime_duration_minutes")
+    )
+    trend_trust = _float_from_value(fingerprint.get("trend_trust_avg"))
+    source_return = _float_from_value(
+        fingerprint.get("source_open_to_current_percent")
+    )
+    source_drawdown = _float_from_value(
+        fingerprint.get("source_max_drawdown_from_open_percent")
+    )
+    source_runup = _float_from_value(
+        fingerprint.get("source_max_runup_from_open_percent")
+    )
+    current_regime = _optional_text(fingerprint.get("current_regime")) or ""
+    uptrend_minutes = _float_from_value(fingerprint.get("uptrend_minutes")) or 0
+    downtrend_minutes = _float_from_value(fingerprint.get("downtrend_minutes")) or 0
+    reasons: list[str] = []
+
+    if transitions_per_hour is None:
+        return {
+            "role": "generalist",
+            "confidence": "LOW",
+            "reasons": ["No transition fingerprint available."],
+        }
+
+    is_warmup_checkpoint = (
+        current_regime == "WARMUP"
+        or (transitions_per_hour == 0 and trend_trust is None)
+    )
+    if is_warmup_checkpoint:
+        if (
+            source_return is not None
+            and source_return >= 2.75
+            and (source_drawdown is None or source_drawdown > -1.5)
+        ):
+            reasons.append(f"SOXL is positive early from open ({source_return:g}%).")
+            if source_runup is not None:
+                reasons.append(f"SOXL early runup reached {source_runup:g}%.")
+            return {
+                "role": "momentum",
+                "confidence": "HIGH" if source_return >= 4 else "MODERATE",
+                "reasons": reasons,
+            }
+        if (
+            source_return is not None
+            and source_return <= -4
+            and source_drawdown is not None
+            and source_drawdown <= -4
+        ):
+            reasons.append(f"SOXL is sharply negative early ({source_return:g}%).")
+            reasons.append(f"SOXL early drawdown reached {source_drawdown:g}%.")
+            return {
+                "role": "inverse",
+                "confidence": "HIGH",
+                "reasons": reasons,
+            }
+        reasons.append("No specialist threshold cleared; stay with the generalist.")
+        return {
+            "role": "generalist",
+            "confidence": "LOW",
+            "reasons": reasons,
+        }
+
+    bearish_price = source_return is not None and source_return <= -1.5
+    bearish_damage = source_drawdown is not None and source_drawdown <= -2.5
+    bullish_price = source_return is not None and source_return >= 1.5
+    downside_context = (
+        current_regime == "DOWNTREND"
+        or bearish_damage
+        or (trend_trust is not None and trend_trust < 45)
+        or downtrend_minutes > uptrend_minutes
+    )
+    hostile_churn = (
+        transitions_per_hour >= 5
+        and avg_regime_minutes is not None
+        and avg_regime_minutes < 6
+        and (trend_trust is None or trend_trust < 45)
+    )
+    rebound_momentum = (
+        source_return is not None
+        and source_return >= 2.25
+        and source_drawdown is not None
+        and source_drawdown <= -2.5
+        and current_regime == "UPTREND"
+        and transitions_per_hour <= 3.5
+        and avg_regime_minutes is not None
+        and avg_regime_minutes >= 13
+        and trend_trust is not None
+        and trend_trust >= 60
+    )
+
+    if rebound_momentum:
+        reasons.append(f"SOXL reclaimed from open ({source_return:g}%).")
+        reasons.append(f"Earlier drawdown reached {source_drawdown:g}%.")
+        reasons.append(
+            f"Low transition pressure ({transitions_per_hour:g}/hr) with mature UPTREND structure."
+        )
+        reasons.append(f"Trend Trust is supportive ({trend_trust:g}).")
+        return {
+            "role": "momentum",
+            "confidence": "HIGH" if source_return >= 4 else "MODERATE",
+            "reasons": reasons,
+        }
+
+    if bearish_price and downside_context:
+        reasons.append(f"SOXL is negative from open ({source_return:g}%).")
+        if current_regime == "DOWNTREND":
+            reasons.append("Current regime is DOWNTREND.")
+        if bearish_damage:
+            reasons.append(f"SOXL drawdown from open reached {source_drawdown:g}%.")
+        if trend_trust is not None and trend_trust < 45:
+            reasons.append(f"Trend Trust is weak ({trend_trust:g}).")
+        if downtrend_minutes > uptrend_minutes:
+            reasons.append("Downtrend minutes exceed uptrend minutes.")
+        confidence = (
+            "HIGH"
+            if source_return <= -3
+            and (bearish_damage or current_regime == "DOWNTREND")
+            else "MODERATE"
+        )
+        return {
+            "role": "inverse",
+            "confidence": confidence,
+            "reasons": reasons,
+        }
+
+    if hostile_churn:
+        reasons.append(f"High transition pressure ({transitions_per_hour:g}/hr).")
+        reasons.append(f"Very short average regime duration ({avg_regime_minutes:g}m).")
+        if trend_trust is not None:
+            reasons.append(f"Trend Trust is weak ({trend_trust:g}).")
+        return {
+            "role": "inverse",
+            "confidence": "MODERATE",
+            "reasons": reasons,
+        }
+
+    if (
+        bullish_price
+        and
+        transitions_per_hour <= 3.5
+        and avg_regime_minutes is not None
+        and avg_regime_minutes >= 16
+        and trend_trust is not None
+        and trend_trust >= 50
+        and current_regime != "DOWNTREND"
+        and (source_drawdown is None or source_drawdown > -2.5)
+    ):
+        reasons.append(f"SOXL is positive from open ({source_return:g}%).")
+        reasons.append(
+            f"Low transition pressure ({transitions_per_hour:g}/hr) with mature regimes."
+        )
+        reasons.append(f"Trend Trust is supportive ({trend_trust:g}).")
+        if source_runup is not None:
+            reasons.append(f"SOXL runup from open reached {source_runup:g}%.")
+        confidence = (
+            "HIGH"
+            if source_return >= 3
+            and transitions_per_hour <= 2.5
+            and avg_regime_minutes >= 20
+            and trend_trust >= 50
+            else "MODERATE"
+        )
+        return {
+            "role": "momentum",
+            "confidence": confidence,
+            "reasons": reasons,
+        }
+
+    reasons.append("No specialist threshold cleared; stay with the generalist.")
+    return {
+        "role": "generalist",
+        "confidence": "LOW",
+        "reasons": reasons,
+    }
+
+
+def _result_by_preset_id(
+    results: list[dict[str, Any]],
+    date_text: str,
+    preset_id: str,
+) -> dict[str, Any] | None:
+    for result in results:
+        if result["date"] == date_text and result["preset_id"] == preset_id:
+            return result
+    return None
+
+
+def _checkpoint_window_decimal(
+    result: dict[str, Any] | None,
+    window_key: str,
+    field: str,
+) -> Decimal:
+    if not result:
+        return Decimal("0")
+    windows = (
+        result.get("checkpoint_trade_windows")
+        if isinstance(result.get("checkpoint_trade_windows"), dict)
+        else {}
+    )
+    window = windows.get(window_key) if isinstance(windows, dict) else None
+    if not isinstance(window, dict):
+        return Decimal("0")
+    return _decimal_from_value(window.get(field)) or Decimal("0")
+
+
+def _checkpoint_window_number(
+    result: dict[str, Any] | None,
+    window_key: str,
+    field: str,
+) -> int:
+    if not result:
+        return 0
+    windows = (
+        result.get("checkpoint_trade_windows")
+        if isinstance(result.get("checkpoint_trade_windows"), dict)
+        else {}
+    )
+    window = windows.get(window_key) if isinstance(windows, dict) else None
+    if not isinstance(window, dict):
+        return 0
+    value = _float_from_value(window.get(field))
+    return int(value or 0)
+
+
+def _shadow_router_switch_context(
+    *,
+    date_text: str,
+    window_key: str,
+    observer_result: dict[str, Any],
+    selected_result: dict[str, Any] | None,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    generalist_pre_pl = _checkpoint_window_decimal(
+        observer_result,
+        window_key,
+        "pre_pl",
+    )
+    generalist_post_pl = _checkpoint_window_decimal(
+        observer_result,
+        window_key,
+        "post_pl",
+    )
+    selected_post_pl = _checkpoint_window_decimal(
+        selected_result,
+        window_key,
+        "post_pl",
+    )
+    switch_pl = generalist_pre_pl + selected_post_pl
+    generalist_checkpoint_pl = generalist_pre_pl + generalist_post_pl
+    date_results = [result for result in results if result.get("date") == date_text]
+    best_result = max(
+        date_results,
+        key=lambda result: _checkpoint_window_decimal(
+            result,
+            window_key,
+            "post_pl",
+        ),
+        default=None,
+    )
+    checkpoint_best_post_pl = _checkpoint_window_decimal(
+        best_result,
+        window_key,
+        "post_pl",
+    )
+    checkpoint_best_switch_pl = generalist_pre_pl + checkpoint_best_post_pl
+    selected_preset_id = selected_result.get("preset_id") if selected_result else None
+    checkpoint_best_preset_id = (
+        best_result.get("preset_id") if isinstance(best_result, dict) else None
+    )
+    checkpoint_best_name = (
+        best_result.get("preset_name") if isinstance(best_result, dict) else None
+    )
+    return {
+        "switch_model": "generalist_pre_then_selected_opened_after_checkpoint",
+        "generalist_pre_pl": _rounded_number(generalist_pre_pl),
+        "generalist_post_pl": _rounded_number(generalist_post_pl),
+        "generalist_checkpoint_pl": _rounded_number(generalist_checkpoint_pl),
+        "selected_post_pl": _rounded_number(selected_post_pl),
+        "selected_post_trades": _checkpoint_window_number(
+            selected_result,
+            window_key,
+            "post_trade_count",
+        ),
+        "generalist_post_trades": _checkpoint_window_number(
+            observer_result,
+            window_key,
+            "post_trade_count",
+        ),
+        "switch_pl": _rounded_number(switch_pl),
+        "switch_delta_vs_generalist": _rounded_number(
+            selected_post_pl - generalist_post_pl
+        ),
+        "checkpoint_best_preset": checkpoint_best_name,
+        "checkpoint_best_preset_id": checkpoint_best_preset_id,
+        "checkpoint_best_post_pl": _rounded_number(checkpoint_best_post_pl),
+        "checkpoint_best_switch_pl": _rounded_number(checkpoint_best_switch_pl),
+        "switch_correct": bool(
+            selected_preset_id and selected_preset_id == checkpoint_best_preset_id
+        ),
+        "switch_cost_dollars": _rounded_number(
+            checkpoint_best_switch_pl - switch_pl
+        ),
+    }
+
+
+def _shadow_router_switch_update_from_decision(
+    current_decision: dict[str, Any],
+    selected_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    window_minutes = current_decision.get("window_minutes")
+    if window_minutes is None:
+        return {}
+    window_key = str(window_minutes)
+    generalist_pre_pl = (
+        _decimal_from_value(current_decision.get("generalist_pre_pl"))
+        or Decimal("0")
+    )
+    generalist_post_pl = (
+        _decimal_from_value(current_decision.get("generalist_post_pl"))
+        or Decimal("0")
+    )
+    selected_post_pl = _checkpoint_window_decimal(
+        selected_result,
+        window_key,
+        "post_pl",
+    )
+    switch_pl = generalist_pre_pl + selected_post_pl
+    checkpoint_best_switch_pl = (
+        _decimal_from_value(current_decision.get("checkpoint_best_switch_pl"))
+        or Decimal("0")
+    )
+    selected_preset_id = selected_result.get("preset_id") if selected_result else None
+    checkpoint_best_preset_id = _optional_text(
+        current_decision.get("checkpoint_best_preset_id")
+    )
+    return {
+        "selected_post_pl": _rounded_number(selected_post_pl),
+        "selected_post_trades": _checkpoint_window_number(
+            selected_result,
+            window_key,
+            "post_trade_count",
+        ),
+        "switch_pl": _rounded_number(switch_pl),
+        "switch_delta_vs_generalist": _rounded_number(
+            selected_post_pl - generalist_post_pl
+        ),
+        "switch_correct": bool(
+            selected_preset_id and selected_preset_id == checkpoint_best_preset_id
+        ),
+        "switch_cost_dollars": _rounded_number(
+            checkpoint_best_switch_pl - switch_pl
+        ),
+    }
+
+
+def _shadow_router_authority_update_from_decision(
+    current_decision: dict[str, Any],
+    authority_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    window_minutes = current_decision.get("window_minutes")
+    if window_minutes is None:
+        return {}
+    window_key = str(window_minutes)
+    generalist_pre_pl = (
+        _decimal_from_value(current_decision.get("generalist_pre_pl"))
+        or Decimal("0")
+    )
+    generalist_post_pl = (
+        _decimal_from_value(current_decision.get("generalist_post_pl"))
+        or Decimal("0")
+    )
+    authority_post_pl = _checkpoint_window_decimal(
+        authority_result,
+        window_key,
+        "post_pl",
+    )
+    authority_pl = generalist_pre_pl + authority_post_pl
+    checkpoint_best_switch_pl = (
+        _decimal_from_value(current_decision.get("checkpoint_best_switch_pl"))
+        or Decimal("0")
+    )
+    authority_preset_id = (
+        authority_result.get("preset_id") if authority_result else None
+    )
+    checkpoint_best_preset_id = _optional_text(
+        current_decision.get("checkpoint_best_preset_id")
+    )
+    return {
+        "authority_post_pl": _rounded_number(authority_post_pl),
+        "authority_post_trades": _checkpoint_window_number(
+            authority_result,
+            window_key,
+            "post_trade_count",
+        ),
+        "authority_pl": _rounded_number(authority_pl),
+        "authority_delta_vs_generalist": _rounded_number(
+            authority_post_pl - generalist_post_pl
+        ),
+        "authority_correct": bool(
+            authority_preset_id and authority_preset_id == checkpoint_best_preset_id
+        ),
+        "authority_cost_dollars": _rounded_number(
+            checkpoint_best_switch_pl - authority_pl
+        ),
+    }
+
+
+def _shadow_router_authority_decision(
+    *,
+    decision: dict[str, Any],
+    observer_result: dict[str, Any],
+    role_presets: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    checkpoint = _optional_text(decision.get("checkpoint")) or ""
+    raw_role = _optional_text(decision.get("selected_role")) or "generalist"
+    raw_confidence = _optional_text(decision.get("router_confidence")) or "LOW"
+    fingerprint = decision.get("fingerprint") if isinstance(decision.get("fingerprint"), dict) else {}
+    source_return = _float_from_value(
+        fingerprint.get("source_open_to_current_percent")
+    )
+    source_drawdown = _float_from_value(
+        fingerprint.get("source_max_drawdown_from_open_percent")
+    )
+    transitions_per_hour = _float_from_value(fingerprint.get("transitions_per_hour"))
+    trend_trust = _float_from_value(fingerprint.get("trend_trust_avg"))
+    avg_regime_minutes = _float_from_value(
+        fingerprint.get("avg_regime_duration_minutes")
+    )
+    reasons: list[str] = []
+
+    def authority_payload(
+        *,
+        action: str,
+        role: str,
+        preset: dict[str, Any],
+        reason: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        result = _result_by_preset_id(
+            results,
+            decision["date"],
+            preset["id"],
+        )
+        if result is None and preset["id"] == observer_result.get("preset_id"):
+            result = observer_result
+        return {
+            "authority_model": "v6_0945_high_confidence_with_rebound_block",
+            "authority_enabled": enabled,
+            "authority_action": action,
+            "authority_role": role,
+            "authority_preset": preset["name"],
+            "authority_version": preset["version"],
+            "authority_reason": reason,
+            **_shadow_router_authority_update_from_decision(decision, result),
+        }
+
+    generalist_preset = role_presets["generalist"]
+
+    if checkpoint != "09:45":
+        return authority_payload(
+            action="LOG_ONLY",
+            role="generalist",
+            preset=generalist_preset,
+            reason="v6 authority is limited to the 09:45 checkpoint; later checkpoints are logged for research only.",
+            enabled=False,
+        )
+
+    if raw_role == "generalist":
+        return authority_payload(
+            action="GENERALIST_DEFAULT",
+            role="generalist",
+            preset=generalist_preset,
+            reason="09:45 did not clear a specialist threshold.",
+            enabled=True,
+        )
+
+    if raw_confidence != "HIGH":
+        return authority_payload(
+            action="ADVISORY_ONLY",
+            role="generalist",
+            preset=generalist_preset,
+            reason=(
+                f"09:45 {raw_role} signal was {raw_confidence}; v6 only grants "
+                "authority to HIGH-confidence specialist calls."
+            ),
+            enabled=True,
+        )
+
+    extreme_early_selloff = (
+        raw_role == "inverse"
+        and source_return is not None
+        and source_return <= -7
+        and source_drawdown is not None
+        and source_drawdown <= -7
+    )
+    if extreme_early_selloff:
+        return authority_payload(
+            action="BLOCKED_REVIEW",
+            role="generalist",
+            preset=generalist_preset,
+            reason=(
+                "Extreme 09:45 selloff is quarantined for human review; "
+                "research split between May 18 false-positive and May 27 correct "
+                "Inverse mitigation."
+            ),
+            enabled=True,
+        )
+
+    inverse_flush_rebound_risk = (
+        raw_role == "inverse"
+        and source_return is not None
+        and source_drawdown is not None
+        and source_return - source_drawdown >= 1.5
+    )
+    if inverse_flush_rebound_risk:
+        rebound_gap = source_return - source_drawdown
+        return authority_payload(
+            action="BLOCKED_REVIEW",
+            role="generalist",
+            preset=generalist_preset,
+            reason=(
+                "09:45 Inverse signal already bounced materially from the early "
+                f"drawdown ({rebound_gap:g} percentage points); v6 blocks "
+                "automatic Inverse because the panic evidence may have expired."
+            ),
+            enabled=True,
+        )
+
+    sustained_bear_false_positive_risk = (
+        raw_role == "inverse"
+        and source_drawdown is not None
+        and source_drawdown <= -7
+        and (transitions_per_hour is None or transitions_per_hour <= 3)
+        and trend_trust is not None
+        and trend_trust >= 60
+        and avg_regime_minutes is not None
+        and avg_regime_minutes >= 13
+    )
+    if sustained_bear_false_positive_risk:
+        return authority_payload(
+            action="BLOCKED_REVIEW",
+            role="generalist",
+            preset=generalist_preset,
+            reason=(
+                "Large downside tape has stable, trusted structure; v6 blocks "
+                "automatic Inverse because this resembles the sustained-bear "
+                "false-positive family."
+            ),
+            enabled=True,
+        )
+
+    authority_preset = role_presets.get(raw_role, generalist_preset)
+    reasons.append(
+        f"09:45 {raw_role} signal is HIGH confidence and no v6 block fired."
+    )
+    return authority_payload(
+        action="ROUTE",
+        role=raw_role,
+        preset=authority_preset,
+        reason=" ".join(reasons),
+        enabled=True,
+    )
+
+
+def _shadow_router_decision(
+    *,
+    date_summary: dict[str, Any],
+    checkpoint: dict[str, Any],
+    observer_result: dict[str, Any],
+    role_presets: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    date_text = date_summary["date"]
+    window_key = str(checkpoint["window_minutes"])
+    fingerprint = observer_result.get("early_windows", {}).get(window_key) or {}
+    pick = _shadow_router_pick(fingerprint)
+    selected_preset = role_presets[pick["role"]]
+    selected_result = _result_by_preset_id(results, date_text, selected_preset["id"])
+    winner_id = f"{date_summary['winner']}::{date_summary['winner_version']}"
+    selected_pl = (
+        _decimal_from_value(selected_result["row"].get("realized_pl_dollars"))
+        if selected_result
+        else Decimal("0")
+    ) or Decimal("0")
+    selected_pct = (
+        _decimal_from_value(selected_result["row"].get("account_change_percent"))
+        if selected_result
+        else Decimal("0")
+    ) or Decimal("0")
+    winner_pl = _decimal_from_value(date_summary.get("winner_pl")) or Decimal("0")
+    winner_pct = (
+        _decimal_from_value(date_summary.get("winner_account_change_percent"))
+        or Decimal("0")
+    )
+    cost_dollars = winner_pl - selected_pl
+    cost_percent = winner_pct - selected_pct
+    correct = selected_preset["id"] == winner_id
+    switch_context = _shadow_router_switch_context(
+        date_text=date_text,
+        window_key=window_key,
+        observer_result=observer_result,
+        selected_result=selected_result,
+        results=results,
+    )
+    return {
+        "date": date_text,
+        "checkpoint": checkpoint["label"],
+        "window_minutes": checkpoint["window_minutes"],
+        "observer_preset": observer_result["preset_name"],
+        "selected_role": pick["role"],
+        "selected_preset": selected_preset["name"],
+        "selected_version": selected_preset["version"],
+        "selected_pl": _rounded_number(selected_pl),
+        "selected_account_change_percent": _rounded_number(selected_pct),
+        "winner": date_summary["winner"],
+        "winner_version": date_summary["winner_version"],
+        "winner_pl": date_summary["winner_pl"],
+        "winner_account_change_percent": date_summary[
+            "winner_account_change_percent"
+        ],
+        "eventual_winner_confidence": date_summary["winner_confidence"],
+        "router_confidence": pick["confidence"],
+        "correct": correct,
+        "cost_dollars": _rounded_number(cost_dollars),
+        "cost_percent": _rounded_number(cost_percent),
+        "fingerprint": fingerprint,
+        "reasons": pick["reasons"],
+        **switch_context,
+    }
+
+
+def _shadow_router_allows_persistence_override(
+    persisted_decision: dict[str, Any],
+    current_decision: dict[str, Any],
+) -> bool:
+    persisted_role = _optional_text(persisted_decision.get("selected_role"))
+    current_role = _optional_text(current_decision.get("selected_role"))
+    if not persisted_role or not current_role:
+        return True
+    if current_role == persisted_role:
+        return True
+    return (
+        current_role != "generalist"
+        and _optional_text(current_decision.get("router_confidence")) == "HIGH"
+    )
+
+
+def _shadow_router_persist_decision(
+    *,
+    current_decision: dict[str, Any],
+    persisted_decision: dict[str, Any],
+    role_presets: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    date_text = current_decision["date"]
+    persisted_role = _optional_text(persisted_decision.get("selected_role"))
+    if not persisted_role or persisted_role not in role_presets:
+        return current_decision
+    selected_preset = role_presets[persisted_role]
+    selected_result = _result_by_preset_id(results, date_text, selected_preset["id"])
+    selected_pl = (
+        _decimal_from_value(selected_result["row"].get("realized_pl_dollars"))
+        if selected_result
+        else Decimal("0")
+    ) or Decimal("0")
+    selected_pct = (
+        _decimal_from_value(selected_result["row"].get("account_change_percent"))
+        if selected_result
+        else Decimal("0")
+    ) or Decimal("0")
+    winner_id = f"{current_decision['winner']}::{current_decision['winner_version']}"
+    winner_pl = _decimal_from_value(current_decision.get("winner_pl")) or Decimal("0")
+    winner_pct = (
+        _decimal_from_value(current_decision.get("winner_account_change_percent"))
+        or Decimal("0")
+    )
+    persisted_name = selected_preset["name"]
+    current_name = _optional_text(current_decision.get("selected_preset")) or "--"
+    current_confidence = (
+        _optional_text(current_decision.get("router_confidence")) or "--"
+    )
+    reasons = [
+        (
+            f"Retained 09:45 HIGH-confidence {persisted_name} bias; "
+            f"current raw pick was {current_name} ({current_confidence})."
+        ),
+        *list(current_decision.get("reasons") or []),
+    ]
+    switch_updates = _shadow_router_switch_update_from_decision(
+        current_decision,
+        selected_result,
+    )
+    return {
+        **current_decision,
+        "selected_role": persisted_role,
+        "selected_preset": persisted_name,
+        "selected_version": selected_preset["version"],
+        "selected_pl": _rounded_number(selected_pl),
+        "selected_account_change_percent": _rounded_number(selected_pct),
+        "router_confidence": "HIGH",
+        "persistence_applied": True,
+        "correct": selected_preset["id"] == winner_id,
+        "cost_dollars": _rounded_number(winner_pl - selected_pl),
+        "cost_percent": _rounded_number(winner_pct - selected_pct),
+        "reasons": reasons,
+        **switch_updates,
+    }
+
+
+def _shadow_router_checkpoint_summaries(
+    decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for checkpoint in SHADOW_ROUTER_CHECKPOINTS:
+        rows = [
+            row
+            for row in decisions
+            if row["window_minutes"] == checkpoint["window_minutes"]
+        ]
+        total = len(rows)
+        correct = sum(1 for row in rows if row["correct"])
+        switch_correct = sum(1 for row in rows if row.get("switch_correct"))
+        selected_pl = sum(
+            (_decimal_from_value(row.get("selected_pl")) or Decimal("0"))
+            for row in rows
+        )
+        winner_pl = sum(
+            (_decimal_from_value(row.get("winner_pl")) or Decimal("0"))
+            for row in rows
+        )
+        total_cost = sum(
+            (_decimal_from_value(row.get("cost_dollars")) or Decimal("0"))
+            for row in rows
+        )
+        switch_pl = sum(
+            (_decimal_from_value(row.get("switch_pl")) or Decimal("0"))
+            for row in rows
+        )
+        generalist_checkpoint_pl = sum(
+            (_decimal_from_value(row.get("generalist_checkpoint_pl")) or Decimal("0"))
+            for row in rows
+        )
+        checkpoint_best_switch_pl = sum(
+            (_decimal_from_value(row.get("checkpoint_best_switch_pl")) or Decimal("0"))
+            for row in rows
+        )
+        switch_cost = sum(
+            (_decimal_from_value(row.get("switch_cost_dollars")) or Decimal("0"))
+            for row in rows
+        )
+        high_confidence_rows = [
+            row for row in rows if row.get("router_confidence") == "HIGH"
+        ]
+        summaries.append(
+            {
+                "checkpoint": checkpoint["label"],
+                "window_minutes": checkpoint["window_minutes"],
+                "dates": total,
+                "correct": correct,
+                "accuracy_percent": round(correct / total * 100, 2) if total else 0,
+                "switch_correct": switch_correct,
+                "switch_accuracy_percent": (
+                    round(switch_correct / total * 100, 2) if total else 0
+                ),
+                "high_confidence_count": len(high_confidence_rows),
+                "switch_total_pl": _rounded_number(switch_pl),
+                "generalist_checkpoint_total_pl": _rounded_number(
+                    generalist_checkpoint_pl
+                ),
+                "switch_delta_vs_generalist_total": _rounded_number(
+                    switch_pl - generalist_checkpoint_pl
+                ),
+                "checkpoint_best_total_pl": _rounded_number(
+                    checkpoint_best_switch_pl
+                ),
+                "switch_total_cost_dollars": _rounded_number(switch_cost),
+                "avg_switch_cost_dollars": _rounded_number(
+                    switch_cost / Decimal(total or 1)
+                ),
+                "selected_total_pl": _rounded_number(selected_pl),
+                "winner_total_pl": _rounded_number(winner_pl),
+                "total_cost_dollars": _rounded_number(total_cost),
+                "avg_cost_dollars": _rounded_number(
+                    total_cost / Decimal(total or 1)
+                ),
+            }
+        )
+    return summaries
+
+
+def _shadow_router_authority_summary(
+    decisions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = [
+        row
+        for row in decisions
+        if row.get("checkpoint") == "09:45" and row.get("authority_enabled")
+    ]
+    total = len(rows)
+    authority_pl = sum(
+        (_decimal_from_value(row.get("authority_pl")) or Decimal("0"))
+        for row in rows
+    )
+    generalist_pl = sum(
+        (_decimal_from_value(row.get("generalist_checkpoint_pl")) or Decimal("0"))
+        for row in rows
+    )
+    best_pl = sum(
+        (_decimal_from_value(row.get("checkpoint_best_switch_pl")) or Decimal("0"))
+        for row in rows
+    )
+    authority_cost = sum(
+        (_decimal_from_value(row.get("authority_cost_dollars")) or Decimal("0"))
+        for row in rows
+    )
+    correct = sum(1 for row in rows if row.get("authority_correct"))
+    action_counts: dict[str, int] = {}
+    for row in rows:
+        action = _optional_text(row.get("authority_action")) or "UNKNOWN"
+        action_counts[action] = action_counts.get(action, 0) + 1
+    return {
+        "checkpoint": "09:45",
+        "dates": total,
+        "correct": correct,
+        "accuracy_percent": round(correct / total * 100, 2) if total else 0,
+        "authority_total_pl": _rounded_number(authority_pl),
+        "generalist_total_pl": _rounded_number(generalist_pl),
+        "authority_delta_vs_generalist": _rounded_number(
+            authority_pl - generalist_pl
+        ),
+        "best_switch_total_pl": _rounded_number(best_pl),
+        "authority_total_cost_dollars": _rounded_number(authority_cost),
+        "avg_authority_cost_dollars": _rounded_number(
+            authority_cost / Decimal(total or 1)
+        ),
+        "routes": action_counts.get("ROUTE", 0),
+        "blocked": action_counts.get("BLOCKED_REVIEW", 0),
+        "advisory_only": action_counts.get("ADVISORY_ONLY", 0),
+        "generalist_default": action_counts.get("GENERALIST_DEFAULT", 0),
+        "action_counts": action_counts,
+    }
+
+
+def run_research_shadow_router_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    comparison = run_research_comparison_from_payload(payload)
+    dates = comparison["dates"]
+    presets = _parse_research_compare_presets(payload)
+    role_presets = _shadow_router_role_presets(presets)
+    observer_preset = role_presets["generalist"]
+    results = comparison["results"]
+    decisions: list[dict[str, Any]] = []
+    for date_summary in comparison["date_summaries"]:
+        observer_result = _result_by_preset_id(
+            results,
+            date_summary["date"],
+            observer_preset["id"],
+        )
+        if not observer_result:
+            continue
+        persisted_decision: dict[str, Any] | None = None
+        for checkpoint in SHADOW_ROUTER_CHECKPOINTS:
+            decision = _shadow_router_decision(
+                date_summary=date_summary,
+                checkpoint=checkpoint,
+                observer_result=observer_result,
+                role_presets=role_presets,
+                results=results,
+            )
+            if (
+                checkpoint["label"] == "09:45"
+                and decision["selected_role"] != "generalist"
+                and decision["router_confidence"] == "HIGH"
+            ):
+                persisted_decision = decision
+            elif persisted_decision and not _shadow_router_allows_persistence_override(
+                persisted_decision,
+                decision,
+            ):
+                decision = _shadow_router_persist_decision(
+                    current_decision=decision,
+                    persisted_decision=persisted_decision,
+                    role_presets=role_presets,
+                    results=results,
+                )
+            decision = {
+                **decision,
+                **_shadow_router_authority_decision(
+                    decision=decision,
+                    observer_result=observer_result,
+                    role_presets=role_presets,
+                    results=results,
+                ),
+            }
+            decisions.append(decision)
+
+    checkpoint_summaries = _shadow_router_checkpoint_summaries(decisions)
+    authority_summary = _shadow_router_authority_summary(decisions)
+    best_checkpoint = sorted(
+        checkpoint_summaries,
+        key=lambda row: (
+            _decimal_from_value(row.get("switch_total_pl")) or Decimal("0"),
+            _decimal_from_value(row.get("switch_accuracy_percent")) or Decimal("0"),
+        ),
+        reverse=True,
+    )[0] if checkpoint_summaries else None
+    return {
+        **comparison,
+        "kind": "shadow_router",
+        "observer_preset": observer_preset["name"],
+        "role_presets": {
+            role: {
+                "preset_name": preset["name"],
+                "preset_version": preset["version"],
+            }
+            for role, preset in role_presets.items()
+        },
+        "checkpoints": list(SHADOW_ROUTER_CHECKPOINTS),
+        "decisions": decisions,
+        "checkpoint_summaries": checkpoint_summaries,
+        "authority_summary": authority_summary,
+        "best_checkpoint": best_checkpoint,
+        "research_note": (
+            "Shadow router replay is research-only. The legacy proxy compares "
+            "whole-day selected preset results; switch scoring uses Generalist "
+            "pre-checkpoint closed P/L plus selected-preset trades opened at or "
+            "after the checkpoint."
+        ),
+        "dates": dates,
     }
 
 
@@ -4476,6 +6384,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     raise BotError("Stop the live/paper loop before running research.")
                 self.send_json(run_research_comparison_from_payload(payload))
                 return
+            if self.path == "/api/research/shadow-router":
+                self.require_local_ui_request("research shadow router requests")
+                if self.runner.snapshot().running:
+                    raise BotError("Stop the live/paper loop before running research.")
+                self.send_json(run_research_shadow_router_from_payload(payload))
+                return
             if self.path == "/api/live-arm":
                 self.require_local_ui_request()
                 confirmation = str(payload.get("confirmation", ""))
@@ -4546,11 +6460,19 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/api/start":
-                snapshot = self.runner.start(config_from_payload(payload))
+                config = config_from_payload(payload)
+                snapshot = self.runner.start(
+                    config,
+                    preset_authority_plan_from_payload(payload, config),
+                )
             elif self.path == "/api/stop":
                 snapshot = self.runner.stop()
             elif self.path == "/api/run-once":
-                snapshot = self.runner.run_once(config_from_payload(payload))
+                config = config_from_payload(payload)
+                snapshot = self.runner.run_once(
+                    config,
+                    preset_authority_plan_from_payload(payload, config),
+                )
             else:
                 self.send_json({"error": "Not found"}, status=404)
                 return

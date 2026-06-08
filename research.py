@@ -552,7 +552,98 @@ def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]
     ]
     entry_ages = []
     early_entries = 0
+    early_entries_by_bot = {
+        "MomentumBot": 0,
+        "ChopBot": 0,
+        "InverseBot": 0,
+    }
+    v8_block_counts = {
+        "v8_regime_too_young": 0,
+        "v8_trend_trust_below_minimum": 0,
+        "v8_noisy_water_filter": 0,
+    }
+    v9_counts = {
+        "context_activations": 0,
+        "inverse_suppressions": 0,
+        "context_invalidations": 0,
+    }
+    v9_context_summary: dict[str, Any] = {}
+    v9_activation_keys: set[str] = set()
+    v9_invalidation_keys: set[str] = set()
     for record in records:
+        console_lines = record.get("console_lines") or []
+        if isinstance(console_lines, list):
+            console_text = "\n".join(str(line) for line in console_lines)
+            for reason in v8_block_counts:
+                if f"reason={reason}" in console_text:
+                    v8_block_counts[reason] += 1
+            if "reason=v9_momentum_context_suppresses_inverse" in console_text:
+                v9_counts["inverse_suppressions"] += 1
+        v9_context = record.get("v9_momentum_context")
+        if isinstance(v9_context, dict):
+            activation_reason = v9_context.get("activation_reason")
+            if (
+                v9_context.get("evaluated")
+                and not v9_context_summary
+                and "not_momentum_context" not in str(activation_reason or "")
+            ):
+                v9_context_summary = {
+                    "activation_reason": activation_reason,
+                    "observer_preset": v9_context.get("observer_preset"),
+                    "trust_score": v9_context.get("trend_trust_score"),
+                    "soxl_percent": v9_context.get(
+                        "source_open_to_current_percent"
+                    ),
+                    "early_transition_count": v9_context.get(
+                        "early_transition_count"
+                    ),
+                    "early_transitions_per_hour": v9_context.get(
+                        "early_transitions_per_hour"
+                    ),
+                    "early_non_warmup_transition_count": v9_context.get(
+                        "early_non_warmup_transition_count"
+                    ),
+                    "early_non_warmup_transitions_per_hour": v9_context.get(
+                        "early_non_warmup_transitions_per_hour"
+                    ),
+                    "early_transition_window_minutes": v9_context.get(
+                        "early_transition_window_minutes"
+                    ),
+                }
+            activated_at = v9_context.get("activated_at")
+            if activated_at and activated_at not in v9_activation_keys:
+                v9_activation_keys.add(str(activated_at))
+                v9_counts["context_activations"] += 1
+                v9_context_summary = {
+                    "activation_reason": activation_reason,
+                    "observer_preset": v9_context.get("observer_preset"),
+                    "trust_score": v9_context.get("trend_trust_score"),
+                    "soxl_percent": v9_context.get(
+                        "source_open_to_current_percent"
+                    ),
+                    "early_transition_count": v9_context.get(
+                        "early_transition_count"
+                    ),
+                    "early_transitions_per_hour": v9_context.get(
+                        "early_transitions_per_hour"
+                    ),
+                    "early_non_warmup_transition_count": v9_context.get(
+                        "early_non_warmup_transition_count"
+                    ),
+                    "early_non_warmup_transitions_per_hour": v9_context.get(
+                        "early_non_warmup_transitions_per_hour"
+                    ),
+                    "early_transition_window_minutes": v9_context.get(
+                        "early_transition_window_minutes"
+                    ),
+                }
+            invalidated_at = v9_context.get("invalidated_at")
+            if invalidated_at and invalidated_at not in v9_invalidation_keys:
+                v9_invalidation_keys.add(str(invalidated_at))
+                v9_counts["context_invalidations"] += 1
+                v9_context_summary["invalidation_reason"] = v9_context.get(
+                    "invalidation_reason"
+                )
         if record.get("action_taken") != "market_buy":
             continue
         trust = record.get("trend_trust")
@@ -563,6 +654,9 @@ def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]
         entry_ages.append(age_decimal)
         if age_decimal <= Decimal("3"):
             early_entries += 1
+            bot_name = str(record.get("active_bot") or "")
+            if bot_name in early_entries_by_bot:
+                early_entries_by_bot[bot_name] += 1
     exit_reason_counts: dict[str, int] = {}
     exit_reason_pl: dict[str, Decimal] = {}
     for trade in trades:
@@ -582,6 +676,43 @@ def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]
         ),
         "entry_regime_age_median": entry_median,
         "early_entry_count": early_entries,
+        "momentum_early_entry_count": early_entries_by_bot["MomentumBot"],
+        "chop_early_entry_count": early_entries_by_bot["ChopBot"],
+        "inverse_early_entry_count": early_entries_by_bot["InverseBot"],
+        "v8_young_regime_blocks": v8_block_counts["v8_regime_too_young"],
+        "v8_low_trust_blocks": v8_block_counts[
+            "v8_trend_trust_below_minimum"
+        ],
+        "v8_noisy_water_blocks": v8_block_counts["v8_noisy_water_filter"],
+        "v9_momentum_context_activations": v9_counts["context_activations"],
+        "v9_inverse_suppression_blocks": v9_counts["inverse_suppressions"],
+        "v9_momentum_context_invalidations": v9_counts["context_invalidations"],
+        "v9_momentum_context_activation_reason": v9_context_summary.get(
+            "activation_reason"
+        ),
+        "v9_momentum_context_observer_preset": v9_context_summary.get(
+            "observer_preset"
+        ),
+        "v9_momentum_context_trust_score": v9_context_summary.get("trust_score"),
+        "v9_momentum_context_soxl_percent": v9_context_summary.get("soxl_percent"),
+        "v9_momentum_context_early_transition_count": v9_context_summary.get(
+            "early_transition_count"
+        ),
+        "v9_momentum_context_early_transitions_per_hour": v9_context_summary.get(
+            "early_transitions_per_hour"
+        ),
+        "v9_momentum_context_early_non_warmup_transition_count": (
+            v9_context_summary.get("early_non_warmup_transition_count")
+        ),
+        "v9_momentum_context_early_non_warmup_transitions_per_hour": (
+            v9_context_summary.get("early_non_warmup_transitions_per_hour")
+        ),
+        "v9_momentum_context_early_window_minutes": v9_context_summary.get(
+            "early_transition_window_minutes"
+        ),
+        "v9_momentum_context_invalidation_reason": v9_context_summary.get(
+            "invalidation_reason"
+        ),
         "exit_reason_counts": exit_reason_counts,
         "exit_reason_pl": exit_reason_pl,
     }
@@ -616,6 +747,7 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         previous_regime: str | None = None
         for index in range(max_cycles):
             current_bar = bars_by_symbol[SOXL][index]
+            inverse_bar = bars_by_symbol[SOXS][index]
             current_time = parse_market_timestamp(current_bar.get("t"))
             if current_time is None:
                 continue
@@ -684,6 +816,14 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
                     "error": error,
                     "regime_transition": regime_transition,
                     **(status_dict or {}),
+                    "source_bar_open": current_bar.get("o"),
+                    "source_bar_high": current_bar.get("h"),
+                    "source_bar_low": current_bar.get("l"),
+                    "source_bar_close": current_bar.get("c"),
+                    "inverse_bar_open": inverse_bar.get("o"),
+                    "inverse_bar_high": inverse_bar.get("h"),
+                    "inverse_bar_low": inverse_bar.get("l"),
+                    "inverse_bar_close": inverse_bar.get("c"),
                     "price": (status_dict or {}).get("source_price"),
                     "account_value": (status_dict or {}).get("portfolio_value"),
                     "performance": performance,
@@ -732,6 +872,51 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "preset_version": request.preset_version,
         "entry_regime_age_median": _rounded(metrics["entry_regime_age_median"]),
         "early_entry_count": int(metrics["early_entry_count"]),
+        "momentum_early_entry_count": int(metrics["momentum_early_entry_count"]),
+        "chop_early_entry_count": int(metrics["chop_early_entry_count"]),
+        "inverse_early_entry_count": int(metrics["inverse_early_entry_count"]),
+        "v8_young_regime_blocks": int(metrics["v8_young_regime_blocks"]),
+        "v8_low_trust_blocks": int(metrics["v8_low_trust_blocks"]),
+        "v8_noisy_water_blocks": int(metrics["v8_noisy_water_blocks"]),
+        "v9_momentum_context_activations": int(
+            metrics["v9_momentum_context_activations"]
+        ),
+        "v9_inverse_suppression_blocks": int(
+            metrics["v9_inverse_suppression_blocks"]
+        ),
+        "v9_momentum_context_invalidations": int(
+            metrics["v9_momentum_context_invalidations"]
+        ),
+        "v9_momentum_context_activation_reason": metrics[
+            "v9_momentum_context_activation_reason"
+        ],
+        "v9_momentum_context_observer_preset": metrics[
+            "v9_momentum_context_observer_preset"
+        ],
+        "v9_momentum_context_trust_score": metrics[
+            "v9_momentum_context_trust_score"
+        ],
+        "v9_momentum_context_soxl_percent": metrics[
+            "v9_momentum_context_soxl_percent"
+        ],
+        "v9_momentum_context_early_transition_count": metrics[
+            "v9_momentum_context_early_transition_count"
+        ],
+        "v9_momentum_context_early_transitions_per_hour": metrics[
+            "v9_momentum_context_early_transitions_per_hour"
+        ],
+        "v9_momentum_context_early_non_warmup_transition_count": metrics[
+            "v9_momentum_context_early_non_warmup_transition_count"
+        ],
+        "v9_momentum_context_early_non_warmup_transitions_per_hour": metrics[
+            "v9_momentum_context_early_non_warmup_transitions_per_hour"
+        ],
+        "v9_momentum_context_early_window_minutes": metrics[
+            "v9_momentum_context_early_window_minutes"
+        ],
+        "v9_momentum_context_invalidation_reason": metrics[
+            "v9_momentum_context_invalidation_reason"
+        ],
         "date": date_text,
         "mode": config.directional_mode,
         "starting_account_value": _rounded(starting),

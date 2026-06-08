@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 TRADING_BASE_URL_DEFAULT = "https://paper-api.alpaca.markets/v2"
@@ -75,6 +76,7 @@ LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
 LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
 LIFECYCLE_ADAPTIVE_POSTURE_SELECTED = "ADAPTIVE_POSTURE_SELECTED"
+LIFECYCLE_SHADOW_ENTRY_SUPPRESSED = "SHADOW_ENTRY_SUPPRESSED"
 POSITION_LIFECYCLE_OPENING = "OPENING"
 POSITION_LIFECYCLE_OPEN = "OPEN"
 POSITION_LIFECYCLE_CLOSING = "CLOSING"
@@ -94,6 +96,31 @@ BROKER_CATEGORY_ASSET_NOT_TRADABLE = "ASSET_NOT_TRADABLE"
 BROKER_CATEGORY_GENERIC_REJECTION = "GENERIC_BROKER_REJECTION"
 BUYING_POWER_ORDER_BUFFER_PERCENT = Decimal("5")
 MONEY_STEP = Decimal("0.01")
+V7_DAY_BIAS_BULL = "BULL_BIAS"
+V7_DAY_BIAS_BEAR = "BEAR_BIAS"
+V7_DAY_BIAS_NEUTRAL = "NEUTRAL"
+V7_BULL_CURRENT_MIN_PERCENT = Decimal("1.50")
+V7_BULL_RUNUP_MIN_PERCENT = Decimal("4.00")
+V7_BULL_FAILURE_CURRENT_PERCENT = Decimal("-2.00")
+V7_BULL_FAILURE_DRAWDOWN_PERCENT = Decimal("-4.00")
+V7_BEAR_CURRENT_MAX_PERCENT = Decimal("-2.00")
+V7_BEAR_DRAWDOWN_MIN_PERCENT = Decimal("-4.00")
+V7_ROUTE_INVALIDATION_EXIT_LIMIT = 3
+V7_INVERSE_LOSS_LIMIT = 2
+V7_BOT_LOSS_LIMIT = 4
+V8_DIRECTIONAL_MIN_REGIME_AGE_MINUTES = Decimal("8")
+V8_DIRECTIONAL_MIN_TREND_TRUST_SCORE = 45
+V8_DIRECTIONAL_MAX_FLIPS_60M = 5
+V9_MOMENTUM_MIN_TREND_TRUST_SCORE = 45
+V9_MOMENTUM_MIN_SOURCE_PERCENT = Decimal("2.00")
+V9_MOMENTUM_MAX_TRANSITIONS_PER_HOUR = Decimal("8")
+V9_MOMENTUM_EARLY_WINDOW_MINUTES = 30
+V9_MOMENTUM_ACTIVATION_GRACE_MINUTES = 15
+V9_MOMENTUM_INVALIDATION_DRAWDOWN_FROM_HIGH_PERCENT = Decimal("-5")
+V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON = "v9_momentum_context_suppresses_inverse"
+V9_MOMENTUM_CONTEXT_ACTIVATION_REASON = "v9_momentum_clean_tape_context"
+V9_MOMENTUM_CONTEXT_INVALIDATION_REASON = "v9_momentum_context_invalidated"
+NY_TZ = ZoneInfo("America/New_York")
 
 
 class BotError(Exception):
@@ -194,6 +221,8 @@ class BotConfig:
     adaptive_shadow_enabled: bool
     data_feed: str
     dry_run: bool
+    preset_name: str | None = None
+    v9_observer_context: dict[str, Any] | None = None
 
     @classmethod
     def from_env(cls, environment_override: str | None = None) -> "BotConfig":
@@ -345,6 +374,8 @@ class BotConfig:
             adaptive_shadow_enabled=env_bool("ADAPTIVE_SHADOW_ENABLED", True),
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", False),
+            preset_name=os.environ.get("PRESET_NAME") or None,
+            v9_observer_context=None,
         )
 
 
@@ -866,6 +897,17 @@ class EntryDecision:
 
 
 @dataclass(frozen=True)
+class SourcePricePath:
+    open_price: Decimal
+    current_price: Decimal
+    high_price: Decimal
+    low_price: Decimal
+    current_percent: Decimal
+    runup_percent: Decimal
+    drawdown_percent: Decimal
+
+
+@dataclass(frozen=True)
 class AdaptivePosture:
     selected_mode: str
     confidence: str
@@ -933,6 +975,7 @@ class EdgeWalkerStatus:
     trade_age_seconds: float | None
     latest_quote_time: str | None
     quote_age_seconds: float | None
+    v9_momentum_context: dict[str, Any] | None
 
 
 def parse_clock_time(value: Any, field_name: str) -> datetime | None:
@@ -1028,6 +1071,23 @@ class BotStateStore:
         regime_state = data.get("regime", {})
         return regime_state if isinstance(regime_state, dict) else {}
 
+    def get_v9_momentum_context(self) -> dict[str, Any]:
+        data = self._read()
+        v9_state = data.get("v9", {})
+        if not isinstance(v9_state, dict):
+            return {}
+        context = v9_state.get("momentum_context", {})
+        return context if isinstance(context, dict) else {}
+
+    def set_v9_momentum_context(self, context: dict[str, Any]) -> None:
+        data = self._read()
+        v9_state = data.setdefault("v9", {})
+        if not isinstance(v9_state, dict):
+            v9_state = {}
+            data["v9"] = v9_state
+        v9_state["momentum_context"] = lifecycle_json_value(context)
+        self._write(data)
+
     def set_regime_state(self, regime: str, gap_percent: Decimal) -> None:
         data = self._read()
         existing = data.get("regime", {})
@@ -1086,7 +1146,13 @@ class BotStateStore:
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"trailing": {}, "entries": {}, "regime": {}, "orders": {}}
+            return {
+                "trailing": {},
+                "entries": {},
+                "regime": {},
+                "orders": {},
+                "v9": {},
+            }
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -2065,6 +2131,7 @@ class EdgeWalkerBot:
             current_regime_state,
         )
         route = RegimeRouter().route(signal.regime)
+        self._v9_update_momentum_context(route)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
         print(
@@ -2312,6 +2379,15 @@ class EdgeWalkerBot:
             )
 
         entry_decision = self._entry_decision_for_route(route, soxl_snapshot)
+        if entry_decision.signal:
+            policy_decision = self._v8_entry_policy_decision(route, soxl_snapshot)
+            if policy_decision is None:
+                policy_decision = self._v9_entry_policy_decision(
+                    route,
+                    soxl_snapshot,
+                )
+            if policy_decision is not None:
+                entry_decision = policy_decision
         entry_signal = entry_decision.signal
         print(
             f"[ENTRY] {route.active_bot} check: "
@@ -2601,6 +2677,7 @@ class EdgeWalkerBot:
                 if freshness
                 else data_status.get("quote_age_seconds")
             ),
+            v9_momentum_context=self._v9_momentum_context_for_status(),
         )
 
     def _current_effective_directional_mode(self) -> str | None:
@@ -3249,6 +3326,617 @@ class EdgeWalkerBot:
         if self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE:
             return DIRECTIONAL_MODE_BALANCED
         return self.config.directional_mode
+
+    def _v9_entry_policy_decision(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision | None:
+        del soxl_snapshot
+        if route.active_bot != INVERSE_BOT:
+            return None
+
+        context = self._v9_active_momentum_context()
+        if context is None:
+            return None
+
+        invalidation_reason = self._v9_momentum_context_invalidation_reason()
+        if invalidation_reason:
+            self._v9_invalidate_momentum_context(context, invalidation_reason)
+            print(
+                "[V9] Momentum context invalidated before suppression: "
+                f"reason={invalidation_reason}"
+            )
+            return None
+
+        path = self._v7_source_price_path()
+        current_percent = path.current_percent if path is not None else None
+        routed_symbol = route.routed_symbol or SOXS
+        print(
+            "[V9] Momentum context suppresses InverseBot: "
+            f"symbol={routed_symbol} "
+            f"reason={V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON} "
+            f"source_current={self._decimal_text(current_percent)}% "
+            f"activated_at={context.get('activated_at') or '--'}"
+        )
+        self._record_lifecycle(
+            LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+            bot=route.active_bot,
+            symbol=routed_symbol,
+            side="buy",
+            reason=V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON,
+            v9_momentum_context=context,
+            source_open_to_current_percent=current_percent,
+        )
+        return EntryDecision(False, V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON)
+
+    def _v8_entry_policy_decision(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision | None:
+        v7_decision = self._v7_entry_policy_decision(route, soxl_snapshot)
+        if v7_decision is not None:
+            return v7_decision
+        return self._v8_regime_survivability_decision(route)
+
+    def _v8_regime_survivability_decision(
+        self,
+        route: BotRoute,
+    ) -> EntryDecision | None:
+        if route.active_bot not in {MOMENTUM_BOT, INVERSE_BOT}:
+            return None
+
+        telemetry = self._trend_trust or {}
+        age_minutes = Decimal(str(telemetry.get("regime_age_minutes") or 0))
+        score = int(telemetry.get("score") or 0)
+        flips = int(telemetry.get("recent_flip_count_60m") or 0)
+        print(
+            "[V8] Directional survivability: "
+            f"bot={route.active_bot} age={age_minutes}m "
+            f"min_age={V8_DIRECTIONAL_MIN_REGIME_AGE_MINUTES}m "
+            f"trust={score} min_trust={V8_DIRECTIONAL_MIN_TREND_TRUST_SCORE} "
+            f"flips_60m={flips} max_flips={V8_DIRECTIONAL_MAX_FLIPS_60M}"
+        )
+
+        if age_minutes < V8_DIRECTIONAL_MIN_REGIME_AGE_MINUTES:
+            return EntryDecision(False, "v8_regime_too_young")
+        if score < V8_DIRECTIONAL_MIN_TREND_TRUST_SCORE:
+            return EntryDecision(False, "v8_trend_trust_below_minimum")
+        if flips > V8_DIRECTIONAL_MAX_FLIPS_60M:
+            return EntryDecision(False, "v8_noisy_water_filter")
+        return None
+
+    def _v9_update_momentum_context(self, route: BotRoute) -> None:
+        context = self._v9_session_context()
+        active_context = context if context.get("active") else None
+        if active_context and not context.get("invalidated"):
+            invalidation_reason = self._v9_momentum_context_invalidation_reason()
+            if invalidation_reason:
+                self._v9_invalidate_momentum_context(context, invalidation_reason)
+                print(
+                    "[V9] Momentum context invalidated: "
+                    f"reason={invalidation_reason}"
+                )
+            return
+
+        if context.get("evaluated") or not self._v9_in_activation_window():
+            return
+
+        decision = self._v9_momentum_context_activation_decision(route)
+        context.update(decision)
+        context["evaluated"] = True
+        context["evaluated_at"] = self._time_text(datetime.now(timezone.utc))
+        self.state_store.set_v9_momentum_context(context)
+        if context.get("active"):
+            print(
+                "[V9] Momentum context activated: "
+                f"reason={context.get('activation_reason')} "
+                f"transitions={context.get('early_transition_count')} "
+                f"trans_per_hour={context.get('early_transitions_per_hour')} "
+                f"non_warmup={context.get('early_non_warmup_transition_count')} "
+                f"trust={context.get('trend_trust_score')} "
+                f"soxl={context.get('source_open_to_current_percent')}% "
+                f"observer={context.get('observer_preset') or '--'}"
+            )
+        else:
+            print(
+                "[V9] Momentum context inactive: "
+                f"reason={context.get('activation_reason')} "
+                f"preset={self.config.preset_name or '--'}"
+            )
+
+    def _v9_invalidate_momentum_context(
+        self,
+        context: dict[str, Any],
+        reason: str,
+    ) -> None:
+        context.update(
+            {
+                "active": False,
+                "invalidated": True,
+                "invalidated_at": self._time_text(datetime.now(timezone.utc)),
+                "invalidation_reason": reason,
+            }
+        )
+        self.state_store.set_v9_momentum_context(context)
+
+    def _v9_session_context(self) -> dict[str, Any]:
+        current_session = self._v9_session_date()
+        context = self.state_store.get_v9_momentum_context()
+        if context.get("session_date") == current_session:
+            return context
+        return {
+            "session_date": current_session,
+            "active": False,
+            "invalidated": False,
+            "evaluated": False,
+        }
+
+    def _v9_observer_context(self) -> dict[str, Any] | None:
+        context = self.config.v9_observer_context
+        return context if isinstance(context, dict) else None
+
+    def _v9_observer_decimal(
+        self,
+        context: dict[str, Any] | None,
+        key: str,
+    ) -> Decimal | None:
+        if context is None:
+            return None
+        value = context.get(key)
+        if value in (None, ""):
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _v9_observer_int(
+        self,
+        context: dict[str, Any] | None,
+        key: str,
+    ) -> int | None:
+        value = self._v9_observer_decimal(context, key)
+        if value is None:
+            return None
+        return int(value)
+
+    def _v9_momentum_context_activation_decision(
+        self,
+        route: BotRoute,
+    ) -> dict[str, Any]:
+        observer_context = self._v9_observer_context()
+        transition_count = self._v9_observer_int(
+            observer_context,
+            "early_transition_count",
+        )
+        transitions_per_hour = self._v9_observer_decimal(
+            observer_context,
+            "early_transitions_per_hour",
+        )
+        non_warmup_transition_count = self._v9_observer_int(
+            observer_context,
+            "early_non_warmup_transition_count",
+        )
+        non_warmup_transitions_per_hour = self._v9_observer_decimal(
+            observer_context,
+            "early_non_warmup_transitions_per_hour",
+        )
+        trust_score = self._v9_observer_int(observer_context, "trend_trust_score")
+        source_percent = self._v9_observer_decimal(
+            observer_context,
+            "source_open_to_current_percent",
+        )
+        window_minutes = self._v9_observer_int(
+            observer_context,
+            "early_transition_window_minutes",
+        ) or V9_MOMENTUM_EARLY_WINDOW_MINUTES
+        if transitions_per_hour is None and transition_count is not None:
+            transitions_per_hour = (
+                Decimal(transition_count)
+                / Decimal(str(window_minutes))
+                * Decimal("60")
+            )
+        if (
+            non_warmup_transitions_per_hour is None
+            and non_warmup_transition_count is not None
+        ):
+            non_warmup_transitions_per_hour = (
+                Decimal(non_warmup_transition_count)
+                / Decimal(str(window_minutes))
+                * Decimal("60")
+            )
+        reasons: list[str] = []
+        pre_activation_invalidation_reason = (
+            self._v9_momentum_context_invalidation_reason()
+        )
+
+        if not self._v9_is_momentum_context_candidate(route):
+            reasons.append("not_momentum_context")
+        if observer_context is None:
+            reasons.append("observer_context_unavailable")
+        if source_percent is None or source_percent < V9_MOMENTUM_MIN_SOURCE_PERCENT:
+            reasons.append("soxl_below_v9_momentum_floor")
+        if non_warmup_transition_count is None or non_warmup_transition_count != 0:
+            reasons.append("first_30m_non_warmup_transition_count_not_zero")
+        if (
+            non_warmup_transitions_per_hour is None
+            or non_warmup_transitions_per_hour >= V9_MOMENTUM_MAX_TRANSITIONS_PER_HOUR
+        ):
+            reasons.append("early_non_warmup_transition_pressure_too_high")
+        if trust_score is None or trust_score < V9_MOMENTUM_MIN_TREND_TRUST_SCORE:
+            reasons.append("trend_trust_below_v9_minimum")
+        if pre_activation_invalidation_reason:
+            reasons.append(pre_activation_invalidation_reason)
+
+        active = not reasons
+        reason = (
+            V9_MOMENTUM_CONTEXT_ACTIVATION_REASON
+            if active
+            else ",".join(reasons) or "v9_momentum_context_not_qualified"
+        )
+        return {
+            "active": active,
+            "invalidated": False,
+            "activation_reason": reason,
+            "preset_name": self.config.preset_name,
+            "observer_preset": (
+                observer_context.get("observer_preset")
+                if observer_context is not None
+                else None
+            ),
+            "route_bot": route.active_bot,
+            "route_symbol": route.routed_symbol,
+            "early_transition_count": transition_count,
+            "early_transition_window_minutes": window_minutes,
+            "early_transitions_per_hour": (
+                float(transitions_per_hour.quantize(Decimal("0.01")))
+                if transitions_per_hour is not None
+                else None
+            ),
+            "early_non_warmup_transition_count": non_warmup_transition_count,
+            "early_non_warmup_transitions_per_hour": (
+                float(non_warmup_transitions_per_hour.quantize(Decimal("0.01")))
+                if non_warmup_transitions_per_hour is not None
+                else None
+            ),
+            "trend_trust_score": trust_score,
+            "source_open_to_current_percent": (
+                float(source_percent.quantize(Decimal("0.01")))
+                if source_percent is not None
+                else None
+            ),
+            "activated_at": (
+                self._time_text(datetime.now(timezone.utc)) if active else None
+            ),
+        }
+
+    def _v9_momentum_context_invalidation_reason(self) -> str | None:
+        path = self._v7_source_price_path()
+        if path is None:
+            return None
+
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        if now_ny.hour > 10 or (now_ny.hour == 10 and now_ny.minute >= 30):
+            if path.current_percent < 0:
+                return "soxl_below_open_after_1030"
+
+        drawdown_from_high = path.current_percent - path.runup_percent
+        recent_flips = self._v9_non_warmup_flip_count_since(
+            datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        if (
+            drawdown_from_high <= V9_MOMENTUM_INVALIDATION_DRAWDOWN_FROM_HIGH_PERCENT
+            and recent_flips > 0
+        ):
+            return "momentum_drawdown_with_dirty_tape"
+        return None
+
+    def _v9_active_momentum_context(self) -> dict[str, Any] | None:
+        context = self._v9_session_context()
+        if context.get("active") and not context.get("invalidated"):
+            return context
+        return None
+
+    def _v9_momentum_context_for_status(self) -> dict[str, Any] | None:
+        context = self._v9_session_context()
+        if context.get("evaluated") or context.get("active"):
+            return context
+        return None
+
+    def _v9_is_momentum_context_candidate(self, route: BotRoute) -> bool:
+        preset_name = (self.config.preset_name or "").lower()
+        if "momentum" in preset_name:
+            return True
+        if not preset_name and route.active_bot == MOMENTUM_BOT:
+            return True
+        return False
+
+    def _v9_in_activation_window(self) -> bool:
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        minutes = now_ny.hour * 60 + now_ny.minute
+        first_30_close = 9 * 60 + 30 + V9_MOMENTUM_EARLY_WINDOW_MINUTES
+        activation_close = first_30_close + V9_MOMENTUM_ACTIVATION_GRACE_MINUTES
+        return first_30_close <= minutes <= activation_close
+
+    def _v9_session_date(self) -> str:
+        return datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+
+    def _v9_session_open(self) -> datetime:
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        open_ny = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        return open_ny.astimezone(timezone.utc)
+
+    def _v9_session_window_close(self, minutes: int) -> datetime:
+        return self._v9_session_open() + timedelta(minutes=minutes)
+
+    def _v9_elapsed_session_minutes(self) -> Decimal:
+        elapsed_seconds = max(
+            (datetime.now(timezone.utc) - self._v9_session_open()).total_seconds(),
+            0,
+        )
+        return Decimal(str(elapsed_seconds)) / Decimal("60")
+
+    def _v9_non_warmup_flip_count_since(self, cutoff: datetime) -> int:
+        return self._v9_non_warmup_flip_count_between(cutoff, None)
+
+    def _v9_non_warmup_flip_count_between(
+        self,
+        start: datetime,
+        end: datetime | None,
+    ) -> int:
+        regime_state = self.state_store.get_regime_state()
+        transitions = regime_state.get("transitions")
+        if not isinstance(transitions, list):
+            return 0
+        count = 0
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            from_regime = str(transition.get("from") or "").upper()
+            to_regime = str(transition.get("to") or "").upper()
+            if from_regime == WARMUP or to_regime == WARMUP:
+                continue
+            transition_at = parse_market_timestamp(transition.get("at"))
+            if transition_at is None or transition_at < start:
+                continue
+            if end is not None and transition_at >= end:
+                continue
+            if transition_at is not None:
+                count += 1
+        return count
+
+    def _v7_entry_policy_decision(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision | None:
+        del soxl_snapshot
+        stats = self._v7_session_stats()
+        route_invalidated = stats["route_invalidated_exits"]
+        if route_invalidated >= V7_ROUTE_INVALIDATION_EXIT_LIMIT:
+            print(
+                "[V7] Fresh entries paused: "
+                f"route_invalidated_exits={route_invalidated} "
+                f"limit={V7_ROUTE_INVALIDATION_EXIT_LIMIT}."
+            )
+            return EntryDecision(False, "v7_route_invalidation_breaker")
+
+        if route.active_bot == INVERSE_BOT:
+            path = self._v7_source_price_path()
+            if path is not None:
+                bias = self._v7_day_bias(path)
+                bull_failed = self._v7_bull_bias_failed(path)
+                print(
+                    "[V7] Day path: "
+                    f"bias={bias} current={path.current_percent:.2f}% "
+                    f"runup={path.runup_percent:.2f}% "
+                    f"drawdown={path.drawdown_percent:.2f}% "
+                    f"bull_failed={bull_failed}"
+                )
+                if bias == V7_DAY_BIAS_BULL and not bull_failed:
+                    return EntryDecision(False, "v7_bull_bias_blocks_inverse")
+
+        losses_by_bot = stats["losses_by_bot"]
+        pl_by_bot = stats["pl_by_bot"]
+        bot_losses = losses_by_bot.get(route.active_bot, 0)
+        bot_pl = pl_by_bot.get(route.active_bot, Decimal("0"))
+        if (
+            route.active_bot == INVERSE_BOT
+            and bot_losses >= V7_INVERSE_LOSS_LIMIT
+            and bot_pl < 0
+        ):
+            print(
+                "[V7] InverseBot fresh entries paused: "
+                f"losses={bot_losses} realized_pl={format_decimal(bot_pl)}."
+            )
+            return EntryDecision(False, "v7_inverse_loss_breaker")
+        if bot_losses >= V7_BOT_LOSS_LIMIT and bot_pl < 0:
+            print(
+                "[V7] Bot fresh entries paused: "
+                f"bot={route.active_bot} losses={bot_losses} "
+                f"realized_pl={format_decimal(bot_pl)}."
+            )
+            return EntryDecision(False, "v7_bot_loss_breaker")
+        return None
+
+    def _v7_source_price_path(self) -> SourcePricePath | None:
+        try:
+            data_source = self.market_data or self.client
+            bars = data_source.get_recent_bars(SOXL, 420)
+        except (BotError, KeyError):
+            return None
+
+        session_date = self._v7_session_date()
+        session_bars = [
+            bar
+            for bar in bars
+            if self._v7_record_date(bar.get("t")) == session_date
+        ]
+        if len(session_bars) < 2:
+            return None
+
+        open_price = self._v7_bar_decimal(session_bars[0], "o", "c")
+        current_price = self._v7_bar_decimal(session_bars[-1], "c", "o")
+        highs = [
+            value
+            for bar in session_bars
+            if (value := self._v7_bar_decimal(bar, "h", "c", "o")) is not None
+        ]
+        lows = [
+            value
+            for bar in session_bars
+            if (value := self._v7_bar_decimal(bar, "l", "c", "o")) is not None
+        ]
+        if open_price is None or current_price is None or open_price <= 0:
+            return None
+        high_price = max(highs or [open_price, current_price])
+        low_price = min(lows or [open_price, current_price])
+        return SourcePricePath(
+            open_price=open_price,
+            current_price=current_price,
+            high_price=high_price,
+            low_price=low_price,
+            current_percent=(current_price - open_price) / open_price * Decimal("100"),
+            runup_percent=(high_price - open_price) / open_price * Decimal("100"),
+            drawdown_percent=(low_price - open_price) / open_price * Decimal("100"),
+        )
+
+    def _v7_bar_decimal(
+        self,
+        bar: dict[str, Any],
+        *field_names: str,
+    ) -> Decimal | None:
+        for field_name in field_names:
+            value = optional_decimal_from_api(bar.get(field_name), field_name)
+            if value is not None:
+                return value
+        return None
+
+    def _v7_day_bias(self, path: SourcePricePath) -> str:
+        if (
+            path.current_percent >= V7_BULL_CURRENT_MIN_PERCENT
+            or (
+                path.runup_percent >= V7_BULL_RUNUP_MIN_PERCENT
+                and path.current_percent >= Decimal("-0.50")
+            )
+        ):
+            return V7_DAY_BIAS_BULL
+        if (
+            path.current_percent <= V7_BEAR_CURRENT_MAX_PERCENT
+            and path.drawdown_percent <= V7_BEAR_DRAWDOWN_MIN_PERCENT
+        ):
+            return V7_DAY_BIAS_BEAR
+        return V7_DAY_BIAS_NEUTRAL
+
+    def _v7_bull_bias_failed(self, path: SourcePricePath) -> bool:
+        return (
+            path.current_percent <= V7_BULL_FAILURE_CURRENT_PERCENT
+            and path.drawdown_percent <= V7_BULL_FAILURE_DRAWDOWN_PERCENT
+        )
+
+    def _v7_session_stats(self) -> dict[str, Any]:
+        records = self.lifecycle_ledger.read_all()
+        session_date = self._v7_session_date()
+        session_records = [
+            record
+            for record in records
+            if self._v7_record_date(record.get("created_at")) == session_date
+        ]
+        route_invalidated_exits = sum(
+            1
+            for record in session_records
+            if record.get("event_type") == LIFECYCLE_POSITION_CLOSED
+            and record.get("reason") == "route_invalidated_exit"
+        )
+        trade_health = self._v7_trade_health(session_records)
+        return {
+            "route_invalidated_exits": route_invalidated_exits,
+            "losses_by_bot": trade_health["losses_by_bot"],
+            "pl_by_bot": trade_health["pl_by_bot"],
+        }
+
+    def _v7_session_date(self) -> str:
+        return datetime.now(timezone.utc).date().isoformat()
+
+    def _v7_record_date(self, value: Any) -> str | None:
+        parsed = parse_market_timestamp(value)
+        if parsed is None:
+            return None
+        return parsed.astimezone(timezone.utc).date().isoformat()
+
+    def _v7_trade_health(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        lots_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        losses_by_bot: dict[str, int] = {
+            MOMENTUM_BOT: 0,
+            CHOP_BOT: 0,
+            INVERSE_BOT: 0,
+        }
+        pl_by_bot: dict[str, Decimal] = {
+            MOMENTUM_BOT: Decimal("0"),
+            CHOP_BOT: Decimal("0"),
+            INVERSE_BOT: Decimal("0"),
+        }
+
+        for record in records:
+            if record.get("event_type") not in {
+                LIFECYCLE_PARTIAL_FILL,
+                LIFECYCLE_FULL_FILL,
+            }:
+                continue
+            side = str(record.get("side") or "").lower()
+            symbol = record.get("symbol")
+            if not isinstance(symbol, str) or side not in {"buy", "sell"}:
+                continue
+            qty = optional_decimal_from_api(
+                record.get("fill_delta_qty") or record.get("filled_qty"),
+                "filled qty",
+            )
+            price = optional_decimal_from_api(
+                record.get("filled_avg_price"),
+                "filled avg price",
+            )
+            if qty is None or qty <= 0 or price is None:
+                continue
+
+            bot_name = self._v7_bot_name(record.get("bot"))
+            if side == "buy":
+                lots_by_symbol.setdefault(symbol, []).append(
+                    {"qty": qty, "price": price, "bot": bot_name}
+                )
+                continue
+
+            remaining = qty
+            matched_pl_by_bot: dict[str, Decimal] = {}
+            lots = lots_by_symbol.setdefault(symbol, [])
+            while remaining > 0 and lots:
+                lot = lots[0]
+                lot_qty = Decimal(str(lot["qty"]))
+                consumed = min(remaining, lot_qty)
+                lot_bot = bot_name or self._v7_bot_name(lot.get("bot"))
+                if lot_bot in pl_by_bot:
+                    matched_pl_by_bot[lot_bot] = matched_pl_by_bot.get(
+                        lot_bot,
+                        Decimal("0"),
+                    ) + consumed * (price - Decimal(str(lot["price"])))
+                remaining -= consumed
+                lot["qty"] = lot_qty - consumed
+                if lot["qty"] <= 0:
+                    lots.pop(0)
+
+            for matched_bot, matched_pl in matched_pl_by_bot.items():
+                pl_by_bot[matched_bot] += matched_pl
+                if matched_pl < 0:
+                    losses_by_bot[matched_bot] += 1
+
+        return {"losses_by_bot": losses_by_bot, "pl_by_bot": pl_by_bot}
+
+    def _v7_bot_name(self, value: Any) -> str | None:
+        text = str(value) if value not in (None, "") else None
+        if text in {MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT}:
+            return text
+        return None
 
     def _entry_decision_for_route(
         self,
