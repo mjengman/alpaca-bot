@@ -36,6 +36,19 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 
 ## Strategy
 
+Current go-live build: `Router_StrictAuthority_ChopFirewall`.
+
+- MomentumBot uses BalancedTight entries with StrictAuthority: trust >= 66,
+  SOXL >= +4.00%, no first-30m non-warmup transition, and revoke exits on.
+- ChopBot uses Chop_Gap020 with `CHOP_PERMISSION_MODE=FIREWALL`, enabled only
+  when Momentum authority is absent and the runtime observer does not flag dirty
+  tape or deep source drawdown.
+- BalancedPure is a runtime observer/probe only. It supplies V10/Momentum
+  authority context through `BALANCEDPURE_RUNTIME_OBSERVER_ENABLED=true` and has
+  no execution rights in the live router.
+- The browser `Apply Go-Live` button posts the hidden router fields required by
+  the live runner; `Turn On` then starts the validated build.
+
 - Regime source: `SOXL`
 - Regimes: `UPTREND`, `SIDEWAYS`, `DOWNTREND` from fast/slow SMA separation
 - Router: `MomentumBot` trades `SOXL`, `InverseBot` trades `SOXS`, `ChopBot` trades SOXL mean reversion

@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import bot as bot_module
 from bot import (
     AlpacaClient,
     BotError,
@@ -36,13 +37,18 @@ from bot import (
     LIFECYCLE_POSITION_MANAGED,
     LIFECYCLE_ADAPTIVE_POSTURE_SELECTED,
     LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+    CHOP_BOT,
     INVERSE_BOT,
+    MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
     MOMENTUM_BOT,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
     SOXL,
     SOXS,
+    V10_AUTHORITY_STATE_MOMENTUM,
+    V10_AUTHORITY_STATE_NONE,
+    V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
     LifecycleLedger,
     NY_TZ,
     _last_completed_bar_end,
@@ -50,6 +56,40 @@ from bot import (
     classify_broker_error,
     parse_market_timestamp,
 )
+
+
+class FrozenDateTime(datetime):
+    current: datetime = datetime.now(timezone.utc)
+
+    @classmethod
+    def now(cls, tz: Any = None) -> datetime:
+        value = cls.current
+        if tz is not None:
+            value = value.astimezone(tz)
+        else:
+            value = value.replace(tzinfo=None)
+        return cls(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            tzinfo=value.tzinfo,
+            fold=getattr(value, "fold", 0),
+        )
+
+
+@contextlib.contextmanager
+def patched_bot_time(current: datetime):
+    previous = bot_module.datetime
+    FrozenDateTime.current = current.astimezone(timezone.utc)
+    bot_module.datetime = FrozenDateTime
+    try:
+        yield
+    finally:
+        bot_module.datetime = previous
 
 
 def config() -> BotConfig:
@@ -412,6 +452,28 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "ChopBot")
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_enabled_bot_mask_blocks_non_target_route_entries(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "99")})
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(config(), enabled_bots=(MOMENTUM_BOT,)),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=SIDEWAYS active_bot=ChopBot", output)
+        self.assertIn(
+            "entries disabled for routed bot: bot=ChopBot enabled_bots=MomentumBot",
+            output,
+        )
+        self.assertIn("reason=route_disallows_entry", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, CHOP_BOT)
+        self.assertEqual(status.routed_symbol, SOXL)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "chop_no_trade_placeholder")
 
     def test_lifecycle_ledger_records_edgewalker_entry_order(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "99")})
@@ -1014,6 +1076,46 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
         self.assertEqual(records[-1]["bot"], "InverseBot")
 
+    def test_v9_authority_precedes_v8_directional_blocks(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": True,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "102", "98", "101"),
+                "SOXS": bars("8.00", "8.05", "8.10", "8.12"),
+            }
+        )
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                preset_name="Lead_Momentum_Specialist",
+                regime_gap_threshold=Decimal("0.05"),
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("reason=v9_momentum_context_suppresses_inverse", output)
+        self.assertNotIn("reason=v8_regime_too_young", output)
+        self.assertEqual(status.active_bot, "InverseBot")
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(records[-1]["reason"], "v9_momentum_context_suppresses_inverse")
+
     def test_v9_dirty_active_context_releases_inverse_entry_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_store = BotStateStore(Path(tmpdir) / "state.json")
@@ -1059,6 +1161,268 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertTrue(context["invalidated"])
         self.assertEqual(
             context["invalidation_reason"],
+            "momentum_drawdown_with_dirty_tape",
+        )
+
+    def test_momentum_authority_required_blocks_entry_without_active_context(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "101", "102", "103"),
+            }
+        )
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            setup_state=self.survived_regime("UPTREND", minutes=20),
+            bot_config=replace(
+                config(),
+                preset_name="Momentum_BalancedTight_Permission",
+                regime_gap_threshold=Decimal("0.05"),
+                momentum_authority_required=True,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("gate_reason=momentum_authority_required", output)
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+        self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
+        self.assertEqual(
+            records[-1]["reason"],
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+        )
+        self.assertEqual(
+            records[-1]["v10_no_authority_context"]["activation_reason"],
+            "momentum_authority_required",
+        )
+
+    def test_momentum_authority_hard_veto_blocks_active_context_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": True,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            data = state_store._read()
+            data["regime"] = {
+                "regime": "UPTREND",
+                "transitions": [
+                    {
+                        "from": "SIDEWAYS",
+                        "to": "UPTREND",
+                        "at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            }
+            state_store._write(data)
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_Permission",
+                    momentum_authority_required=True,
+                ),
+                FakeClient({"SOXL": bars("100", "106", "100")}),
+                state_store,
+                lifecycle_ledger=lifecycle_ledger,
+            )
+
+            decision = bot._momentum_authority_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+            context = state_store.get_v9_momentum_context()
+            records = lifecycle_ledger.read_all()
+
+        self.assertIsNotNone(decision)
+        self.assertFalse(decision.signal)
+        self.assertEqual(
+            decision.reason,
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+        )
+        self.assertFalse(context["active"])
+        self.assertTrue(context["invalidated"])
+        self.assertEqual(
+            context["invalidation_reason"],
+            "momentum_drawdown_with_dirty_tape",
+        )
+        self.assertEqual(
+            records[-1]["v10_no_authority_context"]["activation_reason"],
+            "momentum_drawdown_with_dirty_tape",
+        )
+
+    def test_momentum_authority_latch_allows_later_entry_after_active_context(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": True,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            data = state_store._read()
+            data["regime"] = {
+                "regime": "UPTREND",
+                "transitions": [
+                    {
+                        "from": "SIDEWAYS",
+                        "to": "UPTREND",
+                        "at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            }
+            state_store._write(data)
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_StrictLatch",
+                    momentum_authority_required=True,
+                    momentum_authority_latch_once_active=True,
+                ),
+                FakeClient({"SOXL": bars("100", "106", "100")}),
+                state_store,
+            )
+
+            decision = bot._momentum_authority_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+            context = state_store.get_v9_momentum_context()
+
+        self.assertIsNone(decision)
+        self.assertTrue(context["momentum_authority_latched"])
+        self.assertTrue(context["active"])
+        self.assertFalse(context["invalidated"])
+
+    def test_momentum_authority_latch_still_blocks_before_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_StrictLatch",
+                    momentum_authority_required=True,
+                    momentum_authority_latch_once_active=True,
+                ),
+                FakeClient({"SOXL": bars("100", "101", "102")}),
+                state_store,
+                lifecycle_ledger=lifecycle_ledger,
+            )
+
+            decision = bot._momentum_authority_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+            context = state_store.get_v9_momentum_context()
+            records = lifecycle_ledger.read_all()
+
+        self.assertIsNotNone(decision)
+        self.assertFalse(decision.signal)
+        self.assertEqual(
+            decision.reason,
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+        )
+        self.assertFalse(context.get("momentum_authority_latched", False))
+        self.assertEqual(
+            records[-1]["v10_no_authority_context"]["activation_reason"],
+            "momentum_authority_required",
+        )
+
+    def test_v10_authority_state_treats_latched_context_as_momentum(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": False,
+                    "invalidated": True,
+                    "evaluated": True,
+                    "invalidation_reason": "momentum_drawdown_with_dirty_tape",
+                    "momentum_authority_latched": True,
+                }
+            )
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_StrictLatch",
+                    momentum_authority_latch_once_active=True,
+                ),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+
+            authority_state = bot._v10_authority_state()
+
+        self.assertEqual(authority_state, V10_AUTHORITY_STATE_MOMENTUM)
+
+    def test_momentum_authority_revoke_exits_owned_position(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            self.survived_regime("UPTREND", minutes=20)(state_store)
+            state_store.set_position_owner(SOXL, MOMENTUM_BOT)
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": False,
+                    "invalidated": True,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "invalidation_reason": "momentum_drawdown_with_dirty_tape",
+                    "invalidated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "102", "103")},
+            positions={SOXL: {"qty": "1.25", "avg_entry_price": "101"}},
+        )
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                preset_name="Momentum_BalancedTight_Permission",
+                regime_gap_threshold=Decimal("0.05"),
+                momentum_authority_required=True,
+                momentum_authority_revoke_exits=True,
+            ),
+        )
+
+        self.assertEqual(client.sells, [(SOXL, Decimal("1.25"))])
+        self.assertIn("Momentum authority revoked", output)
+        self.assertEqual(
+            status.action_taken,
+            "close_momentum_authority_revoked_position_no_same_cycle_reversal",
+        )
+        self.assertEqual(records[-1]["reason"], MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON)
+        self.assertEqual(
+            records[-1]["authority_revoke_reason"],
             "momentum_drawdown_with_dirty_tape",
         )
 
@@ -1141,6 +1505,128 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(decision["observer_preset"], "Lead_Generalist")
         self.assertTrue(decision["active"])
         self.assertEqual(decision["activation_reason"], "v9_momentum_clean_tape_context")
+
+    def test_v9_strict_momentum_authority_threshold_blocks_weak_reclaim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_StrictAuthority",
+                    momentum_authority_min_trust_score=66,
+                    momentum_authority_min_source_percent=Decimal("4.00"),
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 60,
+                        "source_open_to_current_percent": 3.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertFalse(decision["active"])
+        self.assertIn("soxl_below_v9_momentum_floor", decision["activation_reason"])
+        self.assertIn("trend_trust_below_v9_minimum", decision["activation_reason"])
+
+    def test_v9_strict_reclaim_allows_clean_secondary_checkpoint(self) -> None:
+        current_time = datetime(2026, 3, 23, 10, 20, tzinfo=NY_TZ).astimezone(
+            timezone.utc
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_StrictReclaim",
+                    momentum_authority_min_trust_score=66,
+                    momentum_authority_min_source_percent=Decimal("4.00"),
+                    momentum_authority_reclaim_enabled=True,
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 59,
+                        "source_open_to_current_percent": 2.38,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "104.50", latest_at=current_time)}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertTrue(decision["active"])
+        self.assertEqual(
+            decision["activation_reason"],
+            "v9_momentum_strict_reclaim_context",
+        )
+        self.assertEqual(decision["source_open_to_current_percent"], 4.5)
+        self.assertEqual(decision["reclaim_session_non_warmup_transition_count"], 0)
+
+    def test_v9_strict_reclaim_blocks_session_non_warmup_flip(self) -> None:
+        current_time = datetime(2026, 3, 23, 10, 20, tzinfo=NY_TZ).astimezone(
+            timezone.utc
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            data = state_store._read()
+            data["regime"] = {
+                "regime": "DOWNTREND",
+                "transitions": [
+                    {
+                        "from": "UPTREND",
+                        "to": "DOWNTREND",
+                        "at": (current_time - timedelta(minutes=5)).isoformat(),
+                    }
+                ],
+            }
+            state_store._write(data)
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Momentum_BalancedTight_StrictReclaim",
+                    momentum_authority_min_trust_score=66,
+                    momentum_authority_min_source_percent=Decimal("4.00"),
+                    momentum_authority_reclaim_enabled=True,
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 59,
+                        "source_open_to_current_percent": 2.38,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "104.50", latest_at=current_time)}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertFalse(decision["active"])
+        self.assertIn(
+            "reclaim_session_non_warmup_transition_count_not_zero",
+            decision["activation_reason"],
+        )
 
     def test_v9_requires_material_soxl_reclaim_at_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1233,6 +1719,384 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         self.assertFalse(decision["active"])
         self.assertIn("observer_context_unavailable", decision["activation_reason"])
+
+    def test_v9_runtime_observer_context_uses_live_first_30m_telemetry(self) -> None:
+        current_time = datetime(2026, 6, 9, 10, 0, tzinfo=NY_TZ)
+        session_open = current_time.replace(hour=9, minute=30).astimezone(timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store._write(
+                {
+                    "regime": {
+                        "regime": "UPTREND",
+                        "regime_since": session_open.isoformat(),
+                        "transitions": [
+                            {
+                                "from": "WARMUP",
+                                "to": "SIDEWAYS",
+                                "at": (session_open + timedelta(minutes=2)).isoformat(),
+                            },
+                            {
+                                "from": "SIDEWAYS",
+                                "to": "UPTREND",
+                                "at": (session_open + timedelta(minutes=10)).isoformat(),
+                            },
+                            {
+                                "from": "UPTREND",
+                                "to": "SIDEWAYS",
+                                "at": (session_open + timedelta(minutes=35)).isoformat(),
+                            },
+                        ],
+                    },
+                }
+            )
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Router_StrictAuthority_ChopFirewall",
+                    v9_observer_context={
+                        "observer_preset": "BalancedPure_LiveObserver",
+                        "runtime_observer": True,
+                        "execution_rights": "none",
+                    },
+                ),
+                FakeClient(
+                    {
+                        "SOXL": bars(
+                            "100",
+                            "101",
+                            "104.50",
+                            latest_at=current_time,
+                        )
+                    }
+                ),
+                state_store,
+            )
+            bot._trend_trust = {"score": 67}
+
+            observer_context = bot._v9_observer_context()
+
+        self.assertEqual(observer_context["observer_preset"], "BalancedPure_LiveObserver")
+        self.assertEqual(observer_context["early_transition_count"], 2)
+        self.assertEqual(observer_context["early_non_warmup_transition_count"], 1)
+        self.assertEqual(observer_context["early_transitions_per_hour"], 4.0)
+        self.assertEqual(observer_context["early_non_warmup_transitions_per_hour"], 2.0)
+        self.assertEqual(observer_context["trend_trust_score"], 67)
+        self.assertEqual(observer_context["source_open_to_current_percent"], 4.5)
+        self.assertEqual(observer_context["execution_rights"], "none")
+
+    def test_v9_force_no_authority_blocks_research_fallback_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Lead_Momentum_Specialist",
+                    v10_force_no_authority=True,
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 63,
+                        "source_open_to_current_percent": 3.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertFalse(decision["active"])
+        self.assertIn("v10_forced_no_authority_fallback", decision["activation_reason"])
+
+    def test_v10_force_no_authority_suppresses_before_v9_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Router_v1_NoAuthority",
+                    v10_force_no_authority=True,
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 63,
+                        "source_open_to_current_percent": 3.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+                lifecycle_ledger=ledger,
+            )
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+            records = ledger.read_all()
+
+        self.assertIsNotNone(decision)
+        self.assertFalse(decision.signal)
+        self.assertEqual(
+            decision.reason,
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+        )
+        self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
+        self.assertEqual(records[-1]["authority_state"], V10_AUTHORITY_STATE_NONE)
+
+    def test_v10_force_no_authority_works_without_observer_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Chop_BaselineClean",
+                    v10_force_no_authority=True,
+                ),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+                lifecycle_ledger=ledger,
+            )
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+            records = ledger.read_all()
+
+        self.assertIsNotNone(decision)
+        self.assertFalse(decision.signal)
+        self.assertEqual(
+            decision.reason,
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+        )
+        self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
+        self.assertEqual(records[-1]["authority_state"], V10_AUTHORITY_STATE_NONE)
+
+    def test_v10_no_authority_suppresses_directional_entry_with_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_regime_state("UPTREND", Decimal("0.50"))
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": False,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "soxl_below_v9_momentum_floor",
+                }
+            )
+            ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Lead_Momentum_Specialist",
+                    v9_observer_context={
+                        "observer_preset": "Lead_Generalist",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 63,
+                        "source_open_to_current_percent": 1.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+                lifecycle_ledger=ledger,
+            )
+            bot._trend_trust = {
+                "score": 61,
+                "label": "MODERATE",
+                "regime_age_minutes": 12.5,
+                "recent_flip_count_60m": 1,
+            }
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+            records = ledger.read_all()
+
+        self.assertIsNotNone(decision)
+        self.assertFalse(decision.signal)
+        self.assertEqual(
+            decision.reason,
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+        )
+        self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
+        self.assertEqual(records[-1]["reason"], V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON)
+        self.assertEqual(records[-1]["authority_state"], V10_AUTHORITY_STATE_NONE)
+        context = records[-1]["v10_no_authority_context"]
+        self.assertEqual(context["observer_preset"], "Lead_Generalist")
+        self.assertEqual(context["route_bot"], MOMENTUM_BOT)
+        self.assertEqual(context["trend_trust_score"], 61)
+        self.assertEqual(context["early_non_warmup_transition_count"], 0)
+        self.assertEqual(context["source_open_to_current_percent"], 3.0)
+
+    def test_v10_no_authority_precedes_v8_directional_blocks(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": False,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "soxl_below_v9_momentum_floor",
+                }
+            )
+
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                preset_name="Lead_Momentum_Specialist",
+                v9_observer_context={
+                    "observer_preset": "Lead_Generalist",
+                    "early_transition_count": 1,
+                    "early_transitions_per_hour": 2,
+                    "early_non_warmup_transition_count": 0,
+                    "early_non_warmup_transitions_per_hour": 0,
+                    "trend_trust_score": 63,
+                    "source_open_to_current_percent": 1.5,
+                    "early_transition_window_minutes": 30,
+                },
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn(f"reason={V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON}", output)
+        self.assertNotIn("reason=v8_regime_too_young", output)
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(records[-1]["event_type"], LIFECYCLE_SHADOW_ENTRY_SUPPRESSED)
+        self.assertEqual(records[-1]["reason"], V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON)
+
+    def test_v10_waits_for_v9_context_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(config(), preset_name="Lead_Momentum_Specialist"),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+            )
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+
+        self.assertIsNone(decision)
+
+    def test_v10_requires_observer_context_before_no_authority_suppression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": False,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "observer_context_unavailable",
+                }
+            )
+            ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            bot = EdgeWalkerBot(
+                replace(config(), preset_name="Lead_Generalist"),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+                lifecycle_ledger=ledger,
+            )
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+
+        self.assertIsNone(decision)
+        self.assertEqual(ledger.read_all(), [])
+
+    def test_v10_no_authority_preserves_chopbot_exemption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": False,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "soxl_below_v9_momentum_floor",
+                }
+            )
+            bot = EdgeWalkerBot(
+                replace(config(), preset_name="Lead_Momentum_Specialist"),
+                FakeClient({"SOXL": bars("100", "101")}),
+                state_store,
+            )
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute("ChopBot", SOXL, True),
+                None,
+            )
+
+        self.assertIsNone(decision)
+
+    def test_v10_does_not_suppress_while_momentum_authority_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_v9_momentum_context(
+                {
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "active": True,
+                    "invalidated": False,
+                    "evaluated": True,
+                    "activation_reason": "v9_momentum_clean_tape_context",
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            bot = EdgeWalkerBot(
+                replace(config(), preset_name="Lead_Momentum_Specialist"),
+                FakeClient({"SOXL": bars("100", "103")}),
+                state_store,
+            )
+
+            decision = bot._v10_entry_policy_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True),
+                None,
+            )
+
+        self.assertIsNone(decision)
 
     def test_v7_route_invalidation_breaker_pauses_fresh_entries(self) -> None:
         def setup_lifecycle(ledger: LifecycleLedger) -> None:
@@ -1534,6 +2398,146 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.routed_symbol, "SOXL")
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_chop_loose_permission_blocks_when_momentum_authority_active(self) -> None:
+        current_time = datetime(2026, 4, 1, 10, 5, tzinfo=NY_TZ).astimezone(
+            timezone.utc
+        )
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "99", latest_at=current_time)}
+        )
+
+        with patched_bot_time(current_time):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    enabled_bots=(CHOP_BOT,),
+                    chop_permission_mode="LOOSE",
+                    v9_observer_context={
+                        "observer_preset": "Chop_Ungated",
+                        "early_transition_count": 0,
+                        "early_transitions_per_hour": 0,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 70,
+                        "source_open_to_current_percent": 4.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("Chop permission suppresses entry", output)
+        self.assertIn("reason=chop_momentum_authority_active", output)
+        self.assertEqual(status.active_bot, CHOP_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_chop_strict_permission_blocks_noisy_early_transition(self) -> None:
+        current_time = datetime(2026, 4, 1, 10, 5, tzinfo=NY_TZ).astimezone(
+            timezone.utc
+        )
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "99", latest_at=current_time)}
+        )
+
+        with patched_bot_time(current_time):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    enabled_bots=(CHOP_BOT,),
+                    chop_permission_mode="STRICT",
+                    v9_observer_context={
+                        "observer_preset": "Chop_Ungated",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 40,
+                        "source_open_to_current_percent": 0.5,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("Chop permission suppresses entry", output)
+        self.assertIn("reason=chop_early_transition_count_not_zero", output)
+        self.assertEqual(status.active_bot, CHOP_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_chop_firewall_permission_blocks_negative_noisy_tape(self) -> None:
+        current_time = datetime(2026, 6, 8, 10, 5, tzinfo=NY_TZ).astimezone(
+            timezone.utc
+        )
+        client = FakeClient(
+            {"SOXL": bars("100", "100", "99", latest_at=current_time)}
+        )
+
+        with patched_bot_time(current_time):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    enabled_bots=(CHOP_BOT,),
+                    chop_permission_mode="FIREWALL",
+                    v9_observer_context={
+                        "observer_preset": "Generalist_BalancedPure_Observer",
+                        "early_transition_count": 3,
+                        "early_transitions_per_hour": 6,
+                        "early_non_warmup_transition_count": 2,
+                        "early_non_warmup_transitions_per_hour": 4,
+                        "trend_trust_score": 57,
+                        "source_open_to_current_percent": -0.36,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("Chop permission suppresses entry", output)
+        self.assertIn("reason=chop_negative_noisy_tape", output)
+        self.assertEqual(status.active_bot, CHOP_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_chop_firewall_permission_blocks_deep_source_drawdown(self) -> None:
+        current_time = datetime(2026, 6, 4, 10, 5, tzinfo=NY_TZ).astimezone(
+            timezone.utc
+        )
+        soxl_bars = bars("100", "100", "99", latest_at=current_time)
+        soxl_bars[1]["l"] = "94"
+        client = FakeClient({"SOXL": soxl_bars})
+
+        with patched_bot_time(current_time):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    enabled_bots=(CHOP_BOT,),
+                    chop_permission_mode="FIREWALL",
+                    v9_observer_context={
+                        "observer_preset": "Generalist_BalancedPure_Observer",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 40,
+                        "source_open_to_current_percent": -1.24,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("Chop permission suppresses entry", output)
+        self.assertIn("reason=chop_source_drawdown_firewall", output)
+        self.assertEqual(status.active_bot, CHOP_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
 
     def test_fixed_position_sizing_clamps_to_buying_power_buffer(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "99")})

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import mimetypes
@@ -26,6 +27,7 @@ from bot import (
     BotError,
     BotStateStore,
     CHOP_BOT,
+    CHOP_PERMISSION_MODES,
     DATA_BASE_URL_DEFAULT,
     EdgeWalkerBot,
     INVERSE_BOT,
@@ -53,6 +55,7 @@ from bot import (
     format_decimal,
     load_dotenv,
     normalize_alpaca_base_url,
+    normalize_enabled_bots,
     parse_clock_time,
 )
 from market_data import StreamingMarketDataService
@@ -154,7 +157,24 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "directional_strong_chase_max_extension_percent",
     "directional_min_strength",
     "directional_cooldown_minutes",
+    "chop_permission_mode",
+    "chop_permission_max_abs_source_percent",
     "adaptive_shadow_enabled",
+    "enabled_bots",
+    "momentum_authority_required",
+    "momentum_authority_revoke_exits",
+    "momentum_authority_latch_once_active",
+    "momentum_authority_min_trust_score",
+    "momentum_authority_min_source_percent",
+    "momentum_authority_max_transitions_per_hour",
+    "momentum_authority_reclaim_enabled",
+    "momentum_authority_reclaim_min_trust_score",
+    "momentum_authority_reclaim_min_source_percent",
+    "momentum_authority_reclaim_max_raw_transition_count",
+    "momentum_authority_reclaim_max_non_warmup_transition_count",
+    "momentum_authority_reclaim_start_minutes",
+    "momentum_authority_reclaim_end_minutes",
+    "v10_force_no_authority",
     "dry_run",
     "active_environment",
     "data_feed",
@@ -181,6 +201,23 @@ RESEARCH_SPREADSHEET_COLUMNS = [
     "v9_momentum_context_activations",
     "v9_inverse_suppression_blocks",
     "v9_momentum_context_invalidations",
+    "v10_no_authority_directional_suppression_blocks",
+    "v10_no_authority_momentum_suppression_blocks",
+    "v10_no_authority_inverse_suppression_blocks",
+    "v10_suppressed_directional_shadow_pl",
+    "v10_suppressed_directional_shadow_status",
+    "v10_no_authority_context_activation_reason",
+    "v10_no_authority_context_observer_preset",
+    "v10_no_authority_context_authority_gate",
+    "v10_no_authority_context_trust_score",
+    "v10_no_authority_context_soxl_percent",
+    "v10_no_authority_context_soxl_runup_percent",
+    "v10_no_authority_context_soxl_drawdown_percent",
+    "v10_no_authority_context_early_transition_count",
+    "v10_no_authority_context_early_transitions_per_hour",
+    "v10_no_authority_context_early_non_warmup_transition_count",
+    "v10_no_authority_context_early_non_warmup_transitions_per_hour",
+    "v10_no_authority_context_early_window_minutes",
     "v9_momentum_context_activation_reason",
     "v9_momentum_context_observer_preset",
     "v9_momentum_context_trust_score",
@@ -234,7 +271,23 @@ class RunnerSnapshot:
     directional_strong_chase_max_extension_percent: str
     directional_min_strength: str
     directional_cooldown_minutes: int
+    chop_permission_mode: str
+    chop_permission_max_abs_source_percent: str
     adaptive_shadow_enabled: bool
+    enabled_bots: list[str]
+    momentum_authority_required: bool
+    momentum_authority_revoke_exits: bool
+    momentum_authority_latch_once_active: bool
+    momentum_authority_min_trust_score: int
+    momentum_authority_min_source_percent: str
+    momentum_authority_max_transitions_per_hour: str
+    momentum_authority_reclaim_enabled: bool
+    momentum_authority_reclaim_min_trust_score: int
+    momentum_authority_reclaim_min_source_percent: str
+    momentum_authority_reclaim_max_raw_transition_count: int
+    momentum_authority_reclaim_max_non_warmup_transition_count: int
+    momentum_authority_reclaim_start_minutes: int
+    momentum_authority_reclaim_end_minutes: int
     position_notional: str
     position_sizing_mode: str
     position_allocation_percent: str
@@ -1016,7 +1069,47 @@ class BotRunner:
             ),
             directional_min_strength=self._config.directional_min_strength,
             directional_cooldown_minutes=self._config.directional_cooldown_minutes,
+            chop_permission_mode=self._config.chop_permission_mode,
+            chop_permission_max_abs_source_percent=str(
+                self._config.chop_permission_max_abs_source_percent
+            ),
             adaptive_shadow_enabled=self._config.adaptive_shadow_enabled,
+            enabled_bots=list(self._config.enabled_bots),
+            momentum_authority_required=self._config.momentum_authority_required,
+            momentum_authority_revoke_exits=self._config.momentum_authority_revoke_exits,
+            momentum_authority_latch_once_active=(
+                self._config.momentum_authority_latch_once_active
+            ),
+            momentum_authority_min_trust_score=(
+                self._config.momentum_authority_min_trust_score
+            ),
+            momentum_authority_min_source_percent=str(
+                self._config.momentum_authority_min_source_percent
+            ),
+            momentum_authority_max_transitions_per_hour=str(
+                self._config.momentum_authority_max_transitions_per_hour
+            ),
+            momentum_authority_reclaim_enabled=(
+                self._config.momentum_authority_reclaim_enabled
+            ),
+            momentum_authority_reclaim_min_trust_score=(
+                self._config.momentum_authority_reclaim_min_trust_score
+            ),
+            momentum_authority_reclaim_min_source_percent=str(
+                self._config.momentum_authority_reclaim_min_source_percent
+            ),
+            momentum_authority_reclaim_max_raw_transition_count=(
+                self._config.momentum_authority_reclaim_max_raw_transition_count
+            ),
+            momentum_authority_reclaim_max_non_warmup_transition_count=(
+                self._config.momentum_authority_reclaim_max_non_warmup_transition_count
+            ),
+            momentum_authority_reclaim_start_minutes=(
+                self._config.momentum_authority_reclaim_start_minutes
+            ),
+            momentum_authority_reclaim_end_minutes=(
+                self._config.momentum_authority_reclaim_end_minutes
+            ),
             position_notional=str(self._config.position_notional),
             position_sizing_mode=self._config.position_sizing_mode,
             position_allocation_percent=str(self._config.position_allocation_percent),
@@ -1789,7 +1882,43 @@ def _config_log_payload(config: BotConfig) -> dict[str, Any]:
         ),
         "directional_min_strength": config.directional_min_strength,
         "directional_cooldown_minutes": config.directional_cooldown_minutes,
+        "chop_permission_mode": config.chop_permission_mode,
+        "chop_permission_max_abs_source_percent": str(
+            config.chop_permission_max_abs_source_percent
+        ),
         "adaptive_shadow_enabled": config.adaptive_shadow_enabled,
+        "enabled_bots": list(config.enabled_bots),
+        "momentum_authority_required": config.momentum_authority_required,
+        "momentum_authority_revoke_exits": config.momentum_authority_revoke_exits,
+        "momentum_authority_latch_once_active": (
+            config.momentum_authority_latch_once_active
+        ),
+        "momentum_authority_min_trust_score": config.momentum_authority_min_trust_score,
+        "momentum_authority_min_source_percent": str(
+            config.momentum_authority_min_source_percent
+        ),
+        "momentum_authority_max_transitions_per_hour": str(
+            config.momentum_authority_max_transitions_per_hour
+        ),
+        "momentum_authority_reclaim_enabled": config.momentum_authority_reclaim_enabled,
+        "momentum_authority_reclaim_min_trust_score": (
+            config.momentum_authority_reclaim_min_trust_score
+        ),
+        "momentum_authority_reclaim_min_source_percent": str(
+            config.momentum_authority_reclaim_min_source_percent
+        ),
+        "momentum_authority_reclaim_max_raw_transition_count": (
+            config.momentum_authority_reclaim_max_raw_transition_count
+        ),
+        "momentum_authority_reclaim_max_non_warmup_transition_count": (
+            config.momentum_authority_reclaim_max_non_warmup_transition_count
+        ),
+        "momentum_authority_reclaim_start_minutes": (
+            config.momentum_authority_reclaim_start_minutes
+        ),
+        "momentum_authority_reclaim_end_minutes": (
+            config.momentum_authority_reclaim_end_minutes
+        ),
         "data_feed": config.data_feed,
     }
 
@@ -1995,6 +2124,20 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         0,
         aliases=("momentumCooldownMinutes",),
     )
+    chop_permission_mode = choice_from_payload(
+        payload,
+        "chopPermissionMode",
+        base.chop_permission_mode,
+        CHOP_PERMISSION_MODES,
+        aliases=("chop_permission_mode",),
+    )
+    chop_permission_max_abs_source_percent = decimal_from_payload(
+        payload,
+        "chopPermissionMaxAbsSourcePercent",
+        base.chop_permission_max_abs_source_percent,
+        allow_zero=True,
+        aliases=("chop_permission_max_abs_source_percent",),
+    )
     adaptive_shadow_enabled = bool(
         payload.get("adaptiveShadowEnabled", base.adaptive_shadow_enabled)
     )
@@ -2022,6 +2165,99 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         v9_observer_context = payload.get("v9_observer_context")
     if not isinstance(v9_observer_context, dict):
         v9_observer_context = base.v9_observer_context
+    enabled_bots = normalize_enabled_bots(
+        payload.get("enabledBots", payload.get("enabled_bots", base.enabled_bots))
+    )
+    momentum_authority_required = _payload_bool(
+        payload.get(
+            "momentumAuthorityRequired",
+            payload.get("momentum_authority_required"),
+        ),
+        default=base.momentum_authority_required,
+    )
+    momentum_authority_revoke_exits = _payload_bool(
+        payload.get(
+            "momentumAuthorityRevokeExits",
+            payload.get("momentum_authority_revoke_exits"),
+        ),
+        default=base.momentum_authority_revoke_exits,
+    )
+    momentum_authority_latch_once_active = _payload_bool(
+        payload.get(
+            "momentumAuthorityLatchOnceActive",
+            payload.get("momentum_authority_latch_once_active"),
+        ),
+        default=base.momentum_authority_latch_once_active,
+    )
+    momentum_authority_min_trust_score = int_from_payload(
+        payload,
+        "momentumAuthorityMinTrustScore",
+        base.momentum_authority_min_trust_score,
+        0,
+        aliases=("momentum_authority_min_trust_score",),
+    )
+    momentum_authority_min_source_percent = decimal_from_payload(
+        payload,
+        "momentumAuthorityMinSourcePercent",
+        base.momentum_authority_min_source_percent,
+        allow_zero=True,
+        aliases=("momentum_authority_min_source_percent",),
+    )
+    momentum_authority_max_transitions_per_hour = decimal_from_payload(
+        payload,
+        "momentumAuthorityMaxTransitionsPerHour",
+        base.momentum_authority_max_transitions_per_hour,
+        aliases=("momentum_authority_max_transitions_per_hour",),
+    )
+    momentum_authority_reclaim_enabled = _payload_bool(
+        payload.get(
+            "momentumAuthorityReclaimEnabled",
+            payload.get("momentum_authority_reclaim_enabled"),
+        ),
+        default=base.momentum_authority_reclaim_enabled,
+    )
+    momentum_authority_reclaim_min_trust_score = int_from_payload(
+        payload,
+        "momentumAuthorityReclaimMinTrustScore",
+        base.momentum_authority_reclaim_min_trust_score,
+        0,
+        aliases=("momentum_authority_reclaim_min_trust_score",),
+    )
+    momentum_authority_reclaim_min_source_percent = decimal_from_payload(
+        payload,
+        "momentumAuthorityReclaimMinSourcePercent",
+        base.momentum_authority_reclaim_min_source_percent,
+        allow_zero=True,
+        aliases=("momentum_authority_reclaim_min_source_percent",),
+    )
+    momentum_authority_reclaim_max_raw_transition_count = int_from_payload(
+        payload,
+        "momentumAuthorityReclaimMaxRawTransitionCount",
+        base.momentum_authority_reclaim_max_raw_transition_count,
+        0,
+        aliases=("momentum_authority_reclaim_max_raw_transition_count",),
+    )
+    momentum_authority_reclaim_max_non_warmup_transition_count = int_from_payload(
+        payload,
+        "momentumAuthorityReclaimMaxNonWarmupTransitionCount",
+        base.momentum_authority_reclaim_max_non_warmup_transition_count,
+        0,
+        aliases=("momentum_authority_reclaim_max_non_warmup_transition_count",),
+    )
+    momentum_authority_reclaim_start_minutes = int_from_payload(
+        payload,
+        "momentumAuthorityReclaimStartMinutes",
+        base.momentum_authority_reclaim_start_minutes,
+        0,
+        aliases=("momentum_authority_reclaim_start_minutes",),
+    )
+    momentum_authority_reclaim_end_minutes = int_from_payload(
+        payload,
+        "momentumAuthorityReclaimEndMinutes",
+        base.momentum_authority_reclaim_end_minutes,
+        momentum_authority_reclaim_start_minutes,
+        aliases=("momentum_authority_reclaim_end_minutes",),
+    )
 
     return replace(
         base,
@@ -2039,7 +2275,37 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         ),
         directional_min_strength=directional_min_strength,
         directional_cooldown_minutes=directional_cooldown_minutes,
+        chop_permission_mode=chop_permission_mode,
+        chop_permission_max_abs_source_percent=(
+            chop_permission_max_abs_source_percent
+        ),
         adaptive_shadow_enabled=adaptive_shadow_enabled,
+        enabled_bots=enabled_bots,
+        momentum_authority_required=momentum_authority_required,
+        momentum_authority_revoke_exits=momentum_authority_revoke_exits,
+        momentum_authority_latch_once_active=momentum_authority_latch_once_active,
+        momentum_authority_min_trust_score=momentum_authority_min_trust_score,
+        momentum_authority_min_source_percent=momentum_authority_min_source_percent,
+        momentum_authority_max_transitions_per_hour=(
+            momentum_authority_max_transitions_per_hour
+        ),
+        momentum_authority_reclaim_enabled=momentum_authority_reclaim_enabled,
+        momentum_authority_reclaim_min_trust_score=(
+            momentum_authority_reclaim_min_trust_score
+        ),
+        momentum_authority_reclaim_min_source_percent=(
+            momentum_authority_reclaim_min_source_percent
+        ),
+        momentum_authority_reclaim_max_raw_transition_count=(
+            momentum_authority_reclaim_max_raw_transition_count
+        ),
+        momentum_authority_reclaim_max_non_warmup_transition_count=(
+            momentum_authority_reclaim_max_non_warmup_transition_count
+        ),
+        momentum_authority_reclaim_start_minutes=(
+            momentum_authority_reclaim_start_minutes
+        ),
+        momentum_authority_reclaim_end_minutes=momentum_authority_reclaim_end_minutes,
         position_sizing_mode=position_sizing_mode,
         position_allocation_percent=position_allocation_percent,
         position_notional=decimal_from_payload(
@@ -2057,6 +2323,10 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
             dict(v9_observer_context)
             if isinstance(v9_observer_context, dict)
             else None
+        ),
+        v10_force_no_authority=_payload_bool(
+            payload.get("v10ForceNoAuthority", payload.get("v10_force_no_authority")),
+            default=base.v10_force_no_authority,
         ),
     )
 
@@ -3467,6 +3737,17 @@ def _parse_research_compare_presets(payload: dict[str, Any]) -> list[dict[str, A
     return presets
 
 
+def _research_has_lead_router_suite(presets: list[dict[str, Any]]) -> bool:
+    roles = {presetRole for presetRole in ("general", "momentum", "inverse")}
+    found: set[str] = set()
+    for preset in presets:
+        name = str(preset.get("name") or "").lower()
+        for role in roles:
+            if role in name:
+                found.add(role)
+    return roles.issubset(found)
+
+
 def _record_datetime(record: dict[str, Any]) -> datetime | None:
     raw = _optional_text(record.get("timestamp"))
     if not raw:
@@ -3950,10 +4231,241 @@ def _v9_observer_context_from_result(
     }
 
 
+ROUTER_V1_PRESET_ID = "Router_v1::v10"
+ROUTER_V1_PRESET_NAME = "Router_v1"
+ROUTER_V1_PRESET_VERSION = "v10"
+ROUTER_V1_FALLBACK_PRESET_ID = "Router_v1_NoAuthority::v10"
+ROUTER_V1_FALLBACK_PRESET_NAME = "Router_v1_NoAuthority"
+CHOP_SPECIALIST_PRESET_ID = "Lead_Chop_Specialist::v10"
+CHOP_SPECIALIST_PRESET_NAME = "Lead_Chop_Specialist"
+FLAT_CONTROL_PRESET_ID = "Flat_NoTrade::v10"
+FLAT_CONTROL_PRESET_NAME = "Flat_NoTrade"
+RESEARCH_COMPARISON_MAX_REPLAY_RUNS = 120
+
+
+def _research_row_decimal(result: dict[str, Any], key: str) -> Decimal:
+    row = result.get("row") if isinstance(result.get("row"), dict) else {}
+    return _decimal_from_value(row.get(key)) or Decimal("0")
+
+
+def _research_has_momentum_authority(result: dict[str, Any] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return _research_row_decimal(result, "v9_momentum_context_activations") > 0
+
+
+def _research_router_v1_summary(
+    *,
+    date_text: str,
+    momentum_summary: dict[str, Any] | None,
+    fallback_summary: dict[str, Any],
+) -> dict[str, Any]:
+    momentum_authority = _research_has_momentum_authority(momentum_summary)
+    source = momentum_summary if momentum_authority and momentum_summary else fallback_summary
+    router_summary = copy.deepcopy(source)
+    source_name = source.get("preset_name") or "--"
+    router_decision = (
+        "MOMENTUM_AUTHORITY"
+        if momentum_authority
+        else "NO_AUTHORITY_CHOP_FALLBACK"
+    )
+
+    router_summary.update(
+        {
+            "date": date_text,
+            "preset_id": ROUTER_V1_PRESET_ID,
+            "preset_name": ROUTER_V1_PRESET_NAME,
+            "preset_version": ROUTER_V1_PRESET_VERSION,
+            "router_decision": router_decision,
+            "router_source_preset": source_name,
+        }
+    )
+    row = router_summary.get("row")
+    if not isinstance(row, dict):
+        row = {}
+        router_summary["row"] = row
+    row.update(
+        {
+            "preset_name": ROUTER_V1_PRESET_NAME,
+            "preset_version": ROUTER_V1_PRESET_VERSION,
+            "router_decision": router_decision,
+            "router_source_preset": source_name,
+            "router_authority_state": "momentum" if momentum_authority else "none",
+            "router_fallback_preset": ROUTER_V1_FALLBACK_PRESET_NAME,
+            "router_momentum_authority_preset": (
+                momentum_summary.get("preset_name")
+                if isinstance(momentum_summary, dict)
+                else None
+            ),
+        }
+    )
+    return router_summary
+
+
+def _research_chop_specialist_summary(
+    *,
+    date_text: str,
+    fallback_summary: dict[str, Any],
+) -> dict[str, Any]:
+    chop_summary = copy.deepcopy(fallback_summary)
+    chop_summary.update(
+        {
+            "date": date_text,
+            "preset_id": CHOP_SPECIALIST_PRESET_ID,
+            "preset_name": CHOP_SPECIALIST_PRESET_NAME,
+            "preset_version": ROUTER_V1_PRESET_VERSION,
+            "specialist_source_preset": fallback_summary.get("preset_name") or "--",
+        }
+    )
+    row = chop_summary.get("row")
+    if not isinstance(row, dict):
+        row = {}
+        chop_summary["row"] = row
+    row.update(
+        {
+            "preset_name": CHOP_SPECIALIST_PRESET_NAME,
+            "preset_version": ROUTER_V1_PRESET_VERSION,
+            "specialist_target_bot": CHOP_BOT,
+            "specialist_source_preset": fallback_summary.get("preset_name") or "--",
+        }
+    )
+    return chop_summary
+
+
+def _research_flat_bot_performance() -> list[dict[str, Any]]:
+    return [
+        {
+            "bot": bot,
+            "realized_pl": "0",
+            "trade_count": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate_percent": None,
+            "last_trade_realized_pl": None,
+            "last_trade_symbol": None,
+            "last_trade_closed_at": None,
+            "avg_mfe_percent": None,
+            "avg_mae_percent": None,
+            "avg_capture_ratio_percent": None,
+            "avg_hold_seconds": None,
+        }
+        for bot in BOT_PERFORMANCE_ORDER
+    ]
+
+
+def _research_flat_no_trade_summary(
+    *,
+    date_text: str,
+    reference_summary: dict[str, Any],
+) -> dict[str, Any]:
+    flat_summary = copy.deepcopy(reference_summary)
+    flat_summary.update(
+        {
+            "date": date_text,
+            "preset_id": FLAT_CONTROL_PRESET_ID,
+            "preset_name": FLAT_CONTROL_PRESET_NAME,
+            "preset_version": ROUTER_V1_PRESET_VERSION,
+            "bot_performance": _research_flat_bot_performance(),
+            "inversebot_archaeology": {},
+            "checkpoint_trade_windows": {},
+            "trade_count": 0,
+        }
+    )
+    row = flat_summary.get("row")
+    if not isinstance(row, dict):
+        row = {}
+        flat_summary["row"] = row
+    ending_account = row.get("starting_account_value") or row.get(
+        "ending_account_value"
+    )
+    zero_keys = (
+        "realized_pl_dollars",
+        "account_change_percent",
+        "closed_trades",
+        "wins",
+        "losses",
+        "win_rate",
+        "momentum_pl",
+        "chop_pl",
+        "inverse_pl",
+        "route_invalidation_exits",
+        "route_invalidation_pl",
+        "trailing_stop_exits",
+        "trailing_stop_pl",
+        "market_close_exits",
+        "market_close_pl",
+        "mfe_percent",
+        "avg_mfe_percent",
+        "avg_mae_percent",
+        "avg_capture_ratio_percent",
+        "avg_hold_seconds",
+        "v8_entry_blocks",
+        "v8_entry_block_target_hits",
+        "v8_entry_block_non_hits",
+        "v9_momentum_context_activations",
+        "v9_directional_suppressions",
+        "v9_momentum_context_intrusions",
+        "v10_directional_suppressions",
+        "v10_momentum_authority_activations",
+        "v10_momentum_authority_intrusions",
+        "v10_no_authority_directional_suppression_blocks",
+        "v10_no_authority_momentum_suppression_blocks",
+        "v10_no_authority_inverse_suppression_blocks",
+        "v9_inverse_suppression_blocks",
+        "v9_momentum_context_invalidations",
+    )
+    for key in zero_keys:
+        row[key] = 0
+    clear_keys = (
+        "v10_suppressed_directional_shadow_pl",
+        "v10_suppressed_directional_shadow_status",
+        "v10_no_authority_context_activation_reason",
+        "v10_no_authority_context_observer_preset",
+        "v10_no_authority_context_authority_gate",
+        "v10_no_authority_context_trust_score",
+        "v10_no_authority_context_soxl_percent",
+        "v10_no_authority_context_soxl_runup_percent",
+        "v10_no_authority_context_soxl_drawdown_percent",
+        "v10_no_authority_context_early_transition_count",
+        "v10_no_authority_context_early_transitions_per_hour",
+        "v10_no_authority_context_early_non_warmup_transition_count",
+        "v10_no_authority_context_early_non_warmup_transitions_per_hour",
+        "v10_no_authority_context_early_window_minutes",
+        "enabled_bots",
+    )
+    for key in clear_keys:
+        row[key] = ""
+    row.update(
+        {
+            "date": date_text,
+            "ending_account_value": ending_account,
+            "account_result_status": "FLAT",
+            "preset_name": FLAT_CONTROL_PRESET_NAME,
+            "preset_version": ROUTER_V1_PRESET_VERSION,
+            "top_pl_bot": "",
+            "bottom_pl_bot": "",
+            "reconciliation_confidence": "",
+            "operator_notes": "flat_no_trade_control",
+            "daily_narrative": "",
+            "v9_context": "--",
+            "v10_context": "--",
+            "momentum_authority_required": False,
+            "momentum_authority_revoke_exits": False,
+            "momentum_authority_latch_once_active": False,
+            "v10_force_no_authority": False,
+        }
+    )
+    return flat_summary
+
+
 def _research_target_bot_for_preset(preset_name: str) -> str | None:
     normalized = preset_name.lower()
+    if "router" in normalized or "flat" in normalized or "no_trade" in normalized:
+        return None
     if "momentum" in normalized:
         return MOMENTUM_BOT
+    if "chop" in normalized:
+        return CHOP_BOT
     if "inverse" in normalized:
         return INVERSE_BOT
     return None
@@ -4004,6 +4516,22 @@ def _research_target_move_percent(result: dict[str, Any], target_bot: str) -> De
             or Decimal("0"),
             Decimal("0"),
         )
+    if target_bot == CHOP_BOT:
+        source_runup = max(
+            _decimal_from_value(
+                fingerprint.get("source_max_runup_from_open_percent")
+            )
+            or Decimal("0"),
+            Decimal("0"),
+        )
+        source_drawdown = min(
+            _decimal_from_value(
+                fingerprint.get("source_max_drawdown_from_open_percent")
+            )
+            or Decimal("0"),
+            Decimal("0"),
+        )
+        return source_runup + abs(source_drawdown)
     return Decimal("0")
 
 
@@ -4343,10 +4871,14 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
     dates = _parse_research_compare_dates(payload)
     presets = _parse_research_compare_presets(payload)
     run_count = len(dates) * len(presets)
-    if run_count > 60:
-        raise BotError("Limit one comparison batch to 60 replay runs.")
+    if run_count > RESEARCH_COMPARISON_MAX_REPLAY_RUNS:
+        raise BotError(
+            "Limit one comparison batch to "
+            f"{RESEARCH_COMPARISON_MAX_REPLAY_RUNS} replay runs."
+        )
 
     results: list[dict[str, Any]] = []
+    include_router_suite = _research_has_lead_router_suite(presets)
     role_presets = _shadow_router_role_presets(presets)
     observer_preset = role_presets["generalist"]
     observer_preset_id = observer_preset["id"]
@@ -4357,23 +4889,29 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
     for date_text in dates:
         observer_summary: dict[str, Any] | None = None
         date_results: dict[str, dict[str, Any]] = {}
+        shared_run_fields = {
+            "backtest_date": date_text,
+            "data_feed": payload.get("data_feed")
+            or payload.get("dataFeed")
+            or observer_preset["config"].get("dataFeed")
+            or "iex",
+            "starting_account_value": payload.get("starting_account_value")
+            or payload.get("startingAccountValue")
+            or "100000",
+            "fill_model": payload.get("fill_model")
+            or payload.get("fillModel")
+            or RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
+            "slippage_bps": payload.get("slippage_bps")
+            if payload.get("slippage_bps") is not None
+            else payload.get("slippageBps", "0"),
+        }
         for preset in ordered_presets:
             run_payload = {
                 **preset["config"],
-                "backtest_date": date_text,
-                "data_feed": payload.get("data_feed")
-                or payload.get("dataFeed")
+                **shared_run_fields,
+                "data_feed": shared_run_fields["data_feed"]
                 or preset["config"].get("dataFeed")
                 or "iex",
-                "starting_account_value": payload.get("starting_account_value")
-                or payload.get("startingAccountValue")
-                or "100000",
-                "fill_model": payload.get("fill_model")
-                or payload.get("fillModel")
-                or RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
-                "slippage_bps": payload.get("slippage_bps")
-                if payload.get("slippage_bps") is not None
-                else payload.get("slippageBps", "0"),
                 "preset_name": preset["name"],
                 "preset_version": preset["version"],
             }
@@ -4388,10 +4926,60 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
             date_results[preset["id"]] = summary
             if preset["id"] == observer_preset_id:
                 observer_summary = summary
+        fallback_summary: dict[str, Any] | None = None
+        observer_context = _v9_observer_context_from_result(observer_summary)
+        if include_router_suite and observer_context is not None:
+            fallback_payload = {
+                **observer_preset["config"],
+                **shared_run_fields,
+                "preset_name": ROUTER_V1_FALLBACK_PRESET_NAME,
+                "preset_version": ROUTER_V1_PRESET_VERSION,
+                "v9ObserverContext": observer_context,
+                "v10ForceNoAuthority": True,
+            }
+            fallback_config = config_from_research_payload(fallback_payload)
+            fallback_request = research_request_from_payload(
+                fallback_payload,
+                fallback_config,
+            )
+            fallback_result = run_research_backtest(
+                fallback_config,
+                fallback_request,
+            )
+            fallback_summary = _research_result_summary(
+                fallback_result,
+                {
+                    "id": ROUTER_V1_FALLBACK_PRESET_ID,
+                    "name": ROUTER_V1_FALLBACK_PRESET_NAME,
+                    "version": ROUTER_V1_PRESET_VERSION,
+                },
+            )
         for preset in presets:
             summary = date_results.get(preset["id"])
             if summary is not None:
                 results.append(summary)
+        if include_router_suite and fallback_summary is not None:
+            results.append(
+                _research_chop_specialist_summary(
+                    date_text=date_text,
+                    fallback_summary=fallback_summary,
+                )
+            )
+        if observer_summary is not None:
+            results.append(
+                _research_flat_no_trade_summary(
+                    date_text=date_text,
+                    reference_summary=observer_summary,
+                )
+            )
+        if include_router_suite and fallback_summary is not None:
+            results.append(
+                _research_router_v1_summary(
+                    date_text=date_text,
+                    momentum_summary=date_results.get(role_presets["momentum"]["id"]),
+                    fallback_summary=fallback_summary,
+                )
+            )
 
     date_summaries = [
         _research_compare_date_summary(
@@ -4406,8 +4994,14 @@ def run_research_comparison_from_payload(payload: dict[str, Any]) -> dict[str, A
         "status": "completed",
         "kind": "comparison",
         "dates": dates,
-        "preset_count": len(presets),
-        "run_count": run_count,
+        "preset_count": len(presets) + (3 if include_router_suite else 1),
+        "run_count": len(results),
+        "selected_run_count": run_count,
+        "router_preset": ROUTER_V1_PRESET_NAME if include_router_suite else None,
+        "chop_specialist_preset": (
+            CHOP_SPECIALIST_PRESET_NAME if include_router_suite else None
+        ),
+        "flat_control_preset": FLAT_CONTROL_PRESET_NAME,
         "fill_model": payload.get("fill_model")
         or payload.get("fillModel")
         or RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
@@ -4438,7 +5032,7 @@ def _shadow_router_role_presets(
                 return preset
         return None
 
-    generalist = find_role("general") or presets[0]
+    generalist = find_role("general") or find_role("ungated") or presets[0]
     momentum = find_role("momentum") or generalist
     inverse = find_role("inverse") or generalist
     return {

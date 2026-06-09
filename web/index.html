@@ -639,7 +639,7 @@
                   <select
                     id="researchComparePresetsInput"
                     multiple
-                    size="4"
+                    size="6"
                     aria-label="Research comparison presets"
                   ></select>
                 </label>
@@ -652,6 +652,30 @@
                   data-tooltip="Select every saved preset for the comparison batch."
                 >
                   Select All
+                </button>
+                <button
+                  id="seedChopResearchPresetsButton"
+                  type="button"
+                  class="secondary has-tooltip"
+                  data-tooltip="Save and select three Round 4 Chop permission candidates for a 20-date comparison sweep."
+                >
+                  Seed Chop
+                </button>
+                <button
+                  id="seedMomentumResearchPresetsButton"
+                  type="button"
+                  class="secondary has-tooltip"
+                  data-tooltip="Save and select five Round 7 Momentum authority candidates for a 20-date comparison sweep."
+                >
+                  Seed Momentum
+                </button>
+                <button
+                  id="seedCombinedResearchPresetsButton"
+                  type="button"
+                  class="secondary has-tooltip"
+                  data-tooltip="Save and select the combined Router validation candidate plus StrictAuthority-only control."
+                >
+                  Seed Combined
                 </button>
                 <button
                   id="runResearchCompareButton"
@@ -690,6 +714,21 @@
           </div>
 
           <div id="controlsActionRow" class="button-row controls-action-row">
+            <div
+              id="liveStrategyBadge"
+              class="live-strategy-badge has-tooltip"
+              data-tooltip="Current execution build posted when Edgewalker starts."
+            >
+              Manual controls
+            </div>
+            <button
+              id="applyGoLiveRouterButton"
+              type="button"
+              class="secondary has-tooltip"
+              data-tooltip="Apply the validated Router_StrictAuthority_ChopFirewall live configuration to Strategy Controls."
+            >
+              Apply Go-Live
+            </button>
             <button
               id="runOnceButton"
               type="button"

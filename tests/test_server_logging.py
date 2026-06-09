@@ -21,11 +21,13 @@ from bot import (
     LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
     LIFECYCLE_POSITION_MANAGED,
+    LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
     MOMENTUM_BOT,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_CLOSING,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
+    V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
     broker_constraint_ok,
     broker_constraint_payload,
 )
@@ -45,9 +47,12 @@ from server import (
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
+    _research_chop_specialist_summary,
     _research_compare_date_summary,
     _research_compare_preset_summaries,
     _research_fingerprint,
+    _research_flat_no_trade_summary,
+    _research_router_v1_summary,
     _research_specialist_audit,
     _runtime_source_price_path,
     _shadow_router_allows_persistence_override,
@@ -65,6 +70,7 @@ from server import (
     lifecycle_performance_summary,
     OPERATOR_SPREADSHEET_COLUMNS,
     order_visibility_summary,
+    run_research_comparison_from_payload,
     save_alpaca_environment_settings,
     set_live_trading_armed,
     set_live_trading_disarmed,
@@ -454,6 +460,546 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(preset_summaries[0]["preset_name"], "Lead_Inverse_Specialist")
         self.assertEqual(preset_summaries[0]["date_wins"], 1)
 
+    def test_research_router_v1_summary_selects_authority_or_fallback(self) -> None:
+        def result(
+            name: str,
+            realized_pl: str,
+            v9_activations: int,
+        ) -> dict[str, object]:
+            return {
+                "date": "2026-06-05",
+                "preset_id": f"{name}::v1",
+                "preset_name": name,
+                "preset_version": "v1",
+                "row": {
+                    "realized_pl_dollars": realized_pl,
+                    "account_change_percent": realized_pl,
+                    "v9_momentum_context_activations": v9_activations,
+                },
+                "fingerprint": {},
+                "early_windows": {"30": {}, "60": {}},
+            }
+
+        momentum = result("Lead_Momentum_Specialist", "1.25", 1)
+        inactive_momentum = result("Lead_Momentum_Specialist", "-0.50", 0)
+        fallback = result("Router_v1_NoAuthority", "0.20", 0)
+
+        authority_row = _research_router_v1_summary(
+            date_text="2026-06-05",
+            momentum_summary=momentum,
+            fallback_summary=fallback,
+        )
+        fallback_row = _research_router_v1_summary(
+            date_text="2026-06-05",
+            momentum_summary=inactive_momentum,
+            fallback_summary=fallback,
+        )
+
+        self.assertEqual(authority_row["preset_name"], "Router_v1")
+        self.assertEqual(authority_row["row"]["realized_pl_dollars"], "1.25")
+        self.assertEqual(authority_row["row"]["router_decision"], "MOMENTUM_AUTHORITY")
+        self.assertEqual(
+            authority_row["row"]["router_source_preset"],
+            "Lead_Momentum_Specialist",
+        )
+        self.assertEqual(fallback_row["row"]["realized_pl_dollars"], "0.20")
+        self.assertEqual(
+            fallback_row["row"]["router_decision"],
+            "NO_AUTHORITY_CHOP_FALLBACK",
+        )
+        self.assertEqual(
+            fallback_row["row"]["router_source_preset"],
+            "Router_v1_NoAuthority",
+        )
+
+    def test_research_chop_specialist_and_flat_control_rows(self) -> None:
+        fallback = {
+            "date": "2026-06-05",
+            "preset_id": "Router_v1_NoAuthority::v10",
+            "preset_name": "Router_v1_NoAuthority",
+            "preset_version": "v10",
+            "row": {
+                "date": "2026-06-05",
+                "preset_name": "Router_v1_NoAuthority",
+                "preset_version": "v10",
+                "starting_account_value": "100",
+                "ending_account_value": "100.25",
+                "realized_pl_dollars": "0.25",
+                "account_change_percent": "0.25",
+                "account_result_status": "GREEN",
+                "closed_trades": 2,
+                "wins": 1,
+                "losses": 1,
+                "win_rate": "50",
+                "momentum_pl": "0",
+                "chop_pl": "0.25",
+                "inverse_pl": "0",
+                "v10_directional_suppressions": 3,
+                "v10_momentum_authority_activations": 0,
+                "v10_momentum_authority_intrusions": 0,
+            },
+            "bot_performance": [
+                {"bot": MOMENTUM_BOT, "trade_count": 0},
+                {"bot": CHOP_BOT, "trade_count": 2},
+                {"bot": INVERSE_BOT, "trade_count": 0},
+            ],
+            "fingerprint": {"transitions_per_hour": 4.5},
+            "early_windows": {"30": {"transitions_per_hour": 4.0}},
+            "checkpoint_trade_windows": {"10:00": {"trades": 1}},
+            "trade_count": 2,
+            "cycles": 50,
+        }
+
+        chop = _research_chop_specialist_summary(
+            date_text="2026-06-05",
+            fallback_summary=fallback,
+        )
+        flat = _research_flat_no_trade_summary(
+            date_text="2026-06-05",
+            reference_summary=fallback,
+        )
+
+        self.assertEqual(chop["preset_name"], "Lead_Chop_Specialist")
+        self.assertEqual(chop["preset_id"], "Lead_Chop_Specialist::v10")
+        self.assertEqual(chop["row"]["chop_pl"], "0.25")
+        self.assertEqual(chop["row"]["specialist_target_bot"], CHOP_BOT)
+
+        self.assertEqual(flat["preset_name"], "Flat_NoTrade")
+        self.assertEqual(flat["row"]["realized_pl_dollars"], 0)
+        self.assertEqual(flat["row"]["account_change_percent"], 0)
+        self.assertEqual(flat["row"]["closed_trades"], 0)
+        self.assertEqual(flat["row"]["chop_pl"], 0)
+        self.assertEqual(flat["row"]["account_result_status"], "FLAT")
+        self.assertEqual(flat["row"]["ending_account_value"], "100")
+        self.assertEqual(flat["fingerprint"], fallback["fingerprint"])
+        self.assertEqual(flat["bot_performance"][1]["bot"], CHOP_BOT)
+        self.assertEqual(flat["bot_performance"][1]["trade_count"], 0)
+
+    def test_research_comparison_reports_chop_flat_and_router_rows(self) -> None:
+        payload = {
+            "dates": ["2026-06-05"],
+            "presets": [
+                {"name": "Lead_Generalist", "version": "v1", "config": {}},
+                {"name": "Lead_Momentum_Specialist", "version": "v1", "config": {}},
+                {"name": "Lead_Inverse_Specialist", "version": "v1", "config": {}},
+            ],
+        }
+        run_names: list[str] = []
+
+        def fake_backtest(config: dict[str, object], request: dict[str, object]) -> dict[str, object]:
+            name = str(request["preset_name"])
+            run_names.append(name)
+            is_momentum = "Momentum" in name
+            is_fallback = name == "Router_v1_NoAuthority"
+            return {
+                "date": request["backtest_date"],
+                "row": {
+                    "date": request["backtest_date"],
+                    "preset_name": name,
+                    "preset_version": request["preset_version"],
+                    "starting_account_value": "100",
+                    "ending_account_value": "100",
+                    "realized_pl_dollars": "0.40" if is_fallback else "0.10",
+                    "account_change_percent": "0.40" if is_fallback else "0.10",
+                    "account_result_status": "GREEN",
+                    "closed_trades": 1,
+                    "wins": 1,
+                    "losses": 0,
+                    "win_rate": 100,
+                    "momentum_pl": "0.10" if is_momentum else "0",
+                    "chop_pl": "0.40" if is_fallback else "0.10",
+                    "inverse_pl": "0",
+                    "position_sizing_mode": "DYNAMIC",
+                    "position_allocation_percent": "25",
+                    "position_notional": "25",
+                    "v9_momentum_context_activations": 1 if is_momentum else 0,
+                },
+                "performance": {
+                    "bot_performance": [
+                        {"bot": MOMENTUM_BOT, "trade_count": 1 if is_momentum else 0},
+                        {"bot": CHOP_BOT, "trade_count": 1 if not is_momentum else 0},
+                        {"bot": INVERSE_BOT, "trade_count": 0},
+                    ]
+                },
+                "trades": [],
+                "records": [],
+            }
+
+        with patch("server.config_from_research_payload", side_effect=lambda data: data), patch(
+            "server.research_request_from_payload",
+            side_effect=lambda data, config: data,
+        ), patch("server.run_research_backtest", side_effect=fake_backtest):
+            comparison = run_research_comparison_from_payload(payload)
+
+        names = [result["preset_name"] for result in comparison["results"]]
+
+        self.assertEqual(run_names.count("Router_v1_NoAuthority"), 1)
+        self.assertEqual(comparison["preset_count"], 6)
+        self.assertEqual(comparison["selected_run_count"], 3)
+        self.assertEqual(comparison["run_count"], 6)
+        self.assertEqual(
+            names,
+            [
+                "Lead_Generalist",
+                "Lead_Momentum_Specialist",
+                "Lead_Inverse_Specialist",
+                "Lead_Chop_Specialist",
+                "Flat_NoTrade",
+                "Router_v1",
+            ],
+        )
+        flat = next(result for result in comparison["results"] if result["preset_name"] == "Flat_NoTrade")
+        self.assertEqual(flat["row"]["realized_pl_dollars"], 0)
+        self.assertEqual(flat["row"]["closed_trades"], 0)
+        self.assertIn(
+            "Lead_Chop_Specialist",
+            {row["preset_name"] for row in comparison["specialist_audit"]},
+        )
+
+    def test_research_comparison_keeps_chop_candidate_sweeps_clean(self) -> None:
+        payload = {
+            "dates": ["2026-06-05"],
+            "presets": [
+                {
+                    "name": "Chop_EarlyProbe",
+                    "version": "v1",
+                    "config": {"v10ForceNoAuthority": True},
+                },
+                {
+                    "name": "Chop_BaselineClean",
+                    "version": "v1",
+                    "config": {"v10ForceNoAuthority": True},
+                },
+                {
+                    "name": "Chop_SelectiveFade",
+                    "version": "v1",
+                    "config": {"v10ForceNoAuthority": True},
+                },
+            ],
+        }
+        run_names: list[str] = []
+
+        def fake_backtest(config: dict[str, object], request: dict[str, object]) -> dict[str, object]:
+            name = str(request["preset_name"])
+            run_names.append(name)
+            return {
+                "date": request["backtest_date"],
+                "row": {
+                    "date": request["backtest_date"],
+                    "preset_name": name,
+                    "preset_version": request["preset_version"],
+                    "starting_account_value": "100",
+                    "ending_account_value": "100",
+                    "realized_pl_dollars": "0.10",
+                    "account_change_percent": "0.10",
+                    "account_result_status": "GREEN",
+                    "closed_trades": 1,
+                    "wins": 1,
+                    "losses": 0,
+                    "win_rate": 100,
+                    "momentum_pl": "0",
+                    "chop_pl": "0.10",
+                    "inverse_pl": "0",
+                    "position_sizing_mode": "DYNAMIC",
+                    "position_allocation_percent": "25",
+                    "position_notional": "25",
+                    "v9_momentum_context_activations": 0,
+                },
+                "performance": {
+                    "bot_performance": [
+                        {"bot": MOMENTUM_BOT, "trade_count": 0},
+                        {"bot": CHOP_BOT, "trade_count": 1},
+                        {"bot": INVERSE_BOT, "trade_count": 0},
+                    ]
+                },
+                "trades": [],
+                "records": [],
+            }
+
+        with patch("server.config_from_research_payload", side_effect=lambda data: data), patch(
+            "server.research_request_from_payload",
+            side_effect=lambda data, config: data,
+        ), patch("server.run_research_backtest", side_effect=fake_backtest):
+            comparison = run_research_comparison_from_payload(payload)
+
+        names = [result["preset_name"] for result in comparison["results"]]
+
+        self.assertNotIn("Router_v1_NoAuthority", run_names)
+        self.assertEqual(comparison["preset_count"], 4)
+        self.assertEqual(comparison["selected_run_count"], 3)
+        self.assertEqual(comparison["run_count"], 4)
+        self.assertEqual(
+            names,
+            [
+                "Chop_EarlyProbe",
+                "Chop_BaselineClean",
+                "Chop_SelectiveFade",
+                "Flat_NoTrade",
+            ],
+        )
+        self.assertIsNone(comparison["router_preset"])
+        self.assertIsNone(comparison["chop_specialist_preset"])
+
+    def test_research_comparison_preserves_momentum_authority_flags(self) -> None:
+        payload = {
+            "dates": ["2026-04-10"],
+            "presets": [
+                {
+                    "name": "Momentum_BalancedPure_Shadow",
+                    "version": "v3",
+                    "config": {
+                        "enabledBots": ["MomentumBot"],
+                        "momentumAuthorityRequired": True,
+                        "v10ForceNoAuthority": True,
+                    },
+                },
+                {
+                    "name": "Momentum_BalancedTight_Permission",
+                    "version": "v3",
+                    "config": {
+                        "enabledBots": ["MomentumBot"],
+                        "chopPermissionMode": "STRICT",
+                        "chopPermissionMaxAbsSourcePercent": "2.00",
+                        "momentumAuthorityRequired": True,
+                        "momentumAuthorityRevokeExits": True,
+                        "momentumAuthorityLatchOnceActive": True,
+                        "momentumAuthorityMinTrustScore": 66,
+                        "momentumAuthorityMinSourcePercent": "4.00",
+                        "momentumAuthorityMaxTransitionsPerHour": "6",
+                        "momentumAuthorityReclaimEnabled": True,
+                        "momentumAuthorityReclaimMinTrustScore": 58,
+                        "momentumAuthorityReclaimMinSourcePercent": "4.00",
+                        "momentumAuthorityReclaimMaxRawTransitionCount": 1,
+                        "momentumAuthorityReclaimMaxNonWarmupTransitionCount": 0,
+                        "momentumAuthorityReclaimStartMinutes": 45,
+                        "momentumAuthorityReclaimEndMinutes": 60,
+                    },
+                },
+            ],
+        }
+
+        def fake_backtest(config: BotConfig, request: object) -> dict[str, object]:
+            name = str(getattr(request, "preset_name"))
+            return {
+                "date": getattr(request, "date"),
+                "row": {
+                    "date": getattr(request, "date"),
+                    "preset_name": name,
+                    "preset_version": getattr(request, "preset_version"),
+                    "starting_account_value": "100",
+                    "ending_account_value": "100",
+                    "realized_pl_dollars": "0",
+                    "account_change_percent": "0",
+                    "account_result_status": "FLAT",
+                    "closed_trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "win_rate": 0,
+                    "momentum_pl": "0",
+                    "chop_pl": "0",
+                    "inverse_pl": "0",
+                    "position_sizing_mode": config.position_sizing_mode,
+                    "position_allocation_percent": str(config.position_allocation_percent),
+                    "position_notional": str(config.position_notional),
+                    "v9_momentum_context_activations": 0,
+                    "enabled_bots": ",".join(config.enabled_bots),
+                    "momentum_authority_required": config.momentum_authority_required,
+                    "chop_permission_mode": config.chop_permission_mode,
+                    "chop_permission_max_abs_source_percent": str(
+                        config.chop_permission_max_abs_source_percent
+                    ),
+                    "momentum_authority_revoke_exits": config.momentum_authority_revoke_exits,
+                    "momentum_authority_latch_once_active": (
+                        config.momentum_authority_latch_once_active
+                    ),
+                    "momentum_authority_min_trust_score": (
+                        config.momentum_authority_min_trust_score
+                    ),
+                    "momentum_authority_min_source_percent": str(
+                        config.momentum_authority_min_source_percent
+                    ),
+                    "momentum_authority_max_transitions_per_hour": str(
+                        config.momentum_authority_max_transitions_per_hour
+                    ),
+                    "momentum_authority_reclaim_enabled": (
+                        config.momentum_authority_reclaim_enabled
+                    ),
+                    "momentum_authority_reclaim_min_trust_score": (
+                        config.momentum_authority_reclaim_min_trust_score
+                    ),
+                    "momentum_authority_reclaim_min_source_percent": str(
+                        config.momentum_authority_reclaim_min_source_percent
+                    ),
+                    "momentum_authority_reclaim_max_raw_transition_count": (
+                        config.momentum_authority_reclaim_max_raw_transition_count
+                    ),
+                    "momentum_authority_reclaim_max_non_warmup_transition_count": (
+                        config.momentum_authority_reclaim_max_non_warmup_transition_count
+                    ),
+                    "momentum_authority_reclaim_start_minutes": (
+                        config.momentum_authority_reclaim_start_minutes
+                    ),
+                    "momentum_authority_reclaim_end_minutes": (
+                        config.momentum_authority_reclaim_end_minutes
+                    ),
+                    "v10_force_no_authority": config.v10_force_no_authority,
+                },
+                "performance": {
+                    "bot_performance": [
+                        {"bot": MOMENTUM_BOT, "trade_count": 0},
+                        {"bot": CHOP_BOT, "trade_count": 0},
+                        {"bot": INVERSE_BOT, "trade_count": 0},
+                    ]
+                },
+                "trades": [],
+                "records": [],
+            }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ), patch("server.run_research_backtest", side_effect=fake_backtest):
+            comparison = run_research_comparison_from_payload(payload)
+
+        permission = next(
+            result
+            for result in comparison["results"]
+            if result["preset_name"] == "Momentum_BalancedTight_Permission"
+        )
+        shadow = next(
+            result
+            for result in comparison["results"]
+            if result["preset_name"] == "Momentum_BalancedPure_Shadow"
+        )
+
+        self.assertEqual(permission["row"]["enabled_bots"], MOMENTUM_BOT)
+        self.assertEqual(permission["row"]["chop_permission_mode"], "STRICT")
+        self.assertEqual(
+            permission["row"]["chop_permission_max_abs_source_percent"],
+            "2.00",
+        )
+        self.assertTrue(permission["row"]["momentum_authority_required"])
+        self.assertTrue(permission["row"]["momentum_authority_revoke_exits"])
+        self.assertTrue(permission["row"]["momentum_authority_latch_once_active"])
+        self.assertEqual(permission["row"]["momentum_authority_min_trust_score"], 66)
+        self.assertEqual(
+            permission["row"]["momentum_authority_min_source_percent"],
+            "4.00",
+        )
+        self.assertEqual(
+            permission["row"]["momentum_authority_max_transitions_per_hour"],
+            "6",
+        )
+        self.assertTrue(permission["row"]["momentum_authority_reclaim_enabled"])
+        self.assertEqual(
+            permission["row"]["momentum_authority_reclaim_min_trust_score"],
+            58,
+        )
+        self.assertEqual(
+            permission["row"]["momentum_authority_reclaim_min_source_percent"],
+            "4.00",
+        )
+        self.assertEqual(
+            permission["row"]["momentum_authority_reclaim_max_raw_transition_count"],
+            1,
+        )
+        self.assertEqual(
+            permission["row"][
+                "momentum_authority_reclaim_max_non_warmup_transition_count"
+            ],
+            0,
+        )
+        self.assertEqual(permission["row"]["momentum_authority_reclaim_start_minutes"], 45)
+        self.assertEqual(permission["row"]["momentum_authority_reclaim_end_minutes"], 60)
+        self.assertFalse(permission["row"]["v10_force_no_authority"])
+        self.assertTrue(shadow["row"]["momentum_authority_required"])
+        self.assertTrue(shadow["row"]["v10_force_no_authority"])
+
+    def test_research_comparison_allows_five_presets_across_twenty_dates(self) -> None:
+        dates = [f"2026-03-{day:02d}" for day in range(1, 21)]
+        presets = [
+            {
+                "name": f"Chop_Candidate_{index}",
+                "version": "v1",
+                "config": {"v10ForceNoAuthority": True},
+            }
+            for index in range(5)
+        ]
+        payload = {"dates": dates, "presets": presets}
+        run_names: list[str] = []
+
+        def fake_backtest(config: dict[str, object], request: dict[str, object]) -> dict[str, object]:
+            name = str(request["preset_name"])
+            run_names.append(name)
+            return {
+                "date": request["backtest_date"],
+                "row": {
+                    "date": request["backtest_date"],
+                    "preset_name": name,
+                    "preset_version": request["preset_version"],
+                    "starting_account_value": "100",
+                    "ending_account_value": "100",
+                    "realized_pl_dollars": "0.01",
+                    "account_change_percent": "0.01",
+                    "account_result_status": "GREEN",
+                    "closed_trades": 1,
+                    "wins": 1,
+                    "losses": 0,
+                    "win_rate": 100,
+                    "momentum_pl": "0",
+                    "chop_pl": "0.01",
+                    "inverse_pl": "0",
+                    "position_sizing_mode": "FIXED",
+                    "position_allocation_percent": "25",
+                    "position_notional": "25",
+                    "v9_momentum_context_activations": 0,
+                },
+                "performance": {
+                    "bot_performance": [
+                        {"bot": MOMENTUM_BOT, "trade_count": 0},
+                        {"bot": CHOP_BOT, "trade_count": 1},
+                        {"bot": INVERSE_BOT, "trade_count": 0},
+                    ]
+                },
+                "trades": [],
+                "records": [],
+            }
+
+        with patch("server.config_from_research_payload", side_effect=lambda data: data), patch(
+            "server.research_request_from_payload",
+            side_effect=lambda data, config: data,
+        ), patch("server.run_research_backtest", side_effect=fake_backtest):
+            comparison = run_research_comparison_from_payload(payload)
+
+        self.assertEqual(len(run_names), 100)
+        self.assertEqual(comparison["selected_run_count"], 100)
+        self.assertEqual(comparison["preset_count"], 6)
+        self.assertEqual(comparison["run_count"], 120)
+        self.assertIn(
+            "Flat_NoTrade",
+            {result["preset_name"] for result in comparison["results"]},
+        )
+
+    def test_research_comparison_still_rejects_oversized_batches(self) -> None:
+        payload = {
+            "dates": [f"2026-03-{day:02d}" for day in range(1, 12)],
+            "presets": [
+                {
+                    "name": f"Chop_Candidate_{index}",
+                    "version": "v1",
+                    "config": {"v10ForceNoAuthority": True},
+                }
+                for index in range(11)
+            ],
+        }
+
+        with self.assertRaisesRegex(BotError, "120 replay runs"):
+            run_research_comparison_from_payload(payload)
+
     def test_research_specialist_audit_scores_target_purity_and_home_turf_capture(self) -> None:
         def result(
             date: str,
@@ -566,6 +1112,79 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertLess(row["target_bot_pl"], 0)
         self.assertLess(row["home_turf_capture_efficiency_percent"], 10)
         self.assertEqual(row["diagnosis"], "WEAK_TARGET_ENGINE")
+
+    def test_research_specialist_audit_scores_chop_home_turf_by_two_sided_range(self) -> None:
+        def result(
+            date: str,
+            total_pl: str,
+            momentum_pl: str,
+            chop_pl: str,
+            inverse_pl: str,
+            runup: str,
+            drawdown: str,
+            chop_trades: int,
+            closed_trades: int,
+        ) -> dict[str, object]:
+            return {
+                "date": date,
+                "preset_id": "Lead_Chop_Specialist::v10",
+                "preset_name": "Lead_Chop_Specialist",
+                "preset_version": "v10",
+                "row": {
+                    "realized_pl_dollars": total_pl,
+                    "starting_account_value": "100",
+                    "position_sizing_mode": "DYNAMIC",
+                    "position_allocation_percent": "25",
+                    "position_notional": "25",
+                    "closed_trades": closed_trades,
+                    "momentum_pl": momentum_pl,
+                    "chop_pl": chop_pl,
+                    "inverse_pl": inverse_pl,
+                },
+                "bot_performance": [
+                    {"bot": MOMENTUM_BOT, "trade_count": 0},
+                    {"bot": CHOP_BOT, "trade_count": chop_trades},
+                    {"bot": INVERSE_BOT, "trade_count": 0},
+                ],
+                "fingerprint": {
+                    "source_max_runup_from_open_percent": runup,
+                    "source_max_drawdown_from_open_percent": drawdown,
+                    "inverse_max_runup_from_open_percent": "0",
+                },
+            }
+
+        audit = _research_specialist_audit(
+            [
+                result("2026-06-01", "1.0", "0", "1.0", "0", "2", "-2", 1, 2),
+                result("2026-06-02", "0.5", "0.1", "0.4", "0", "1", "-1", 1, 2),
+                result(
+                    "2026-06-03",
+                    "-0.2",
+                    "0",
+                    "-0.1",
+                    "-0.1",
+                    "0.1",
+                    "-0.1",
+                    1,
+                    1,
+                ),
+            ]
+        )
+
+        row = audit[0]
+
+        self.assertEqual(row["preset_name"], "Lead_Chop_Specialist")
+        self.assertEqual(row["target_bot"], CHOP_BOT)
+        self.assertEqual(
+            row["home_turf_dates"],
+            ["2026-06-01", "2026-06-02", "2026-06-03"],
+        )
+        self.assertEqual(row["target_bot_pl"], 1.3)
+        self.assertEqual(row["target_trade_share_percent"], 60.0)
+        self.assertEqual(row["target_purity_percent"], 76.47)
+        self.assertEqual(row["home_turf_capture_efficiency_percent"], 83.87)
+        self.assertEqual(row["home_turf_missed_opportunity"], 0.25)
+        self.assertEqual(row["diagnosis"], "SPECIALIST_CONFIRMED")
 
     def test_shadow_router_pick_uses_transparent_fingerprint_rules(self) -> None:
         momentum = _shadow_router_pick(
@@ -1562,6 +2181,90 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(metrics["inverse_early_entry_count"], 1)
         self.assertEqual(metrics["entry_regime_age_median"], Decimal("3"))
 
+    def test_research_session_metrics_include_v10_no_authority_lifecycle_context(self) -> None:
+        lifecycle_records = [
+            {
+                "event_type": LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+                "reason": V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+                "bot": MOMENTUM_BOT,
+                "shadow_pl_status": "natural_exit_shadow_not_computed",
+                "v10_no_authority_context": {
+                    "activation_reason": "soxl_below_v9_momentum_floor",
+                    "observer_preset": "Lead_Generalist",
+                    "trend_trust_score": 63,
+                    "source_open_to_current_percent": 2.31,
+                    "source_runup_percent": 2.5,
+                    "source_drawdown_percent": -0.2,
+                    "early_transition_count": 1,
+                    "early_transitions_per_hour": 2,
+                    "early_non_warmup_transition_count": 0,
+                    "early_non_warmup_transitions_per_hour": 0,
+                    "early_transition_window_minutes": 30,
+                },
+            },
+            {
+                "event_type": LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+                "reason": V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+                "bot": INVERSE_BOT,
+                "shadow_pl_status": "natural_exit_shadow_not_computed",
+                "v10_no_authority_context": {},
+            },
+        ]
+
+        metrics = _session_metrics([], [], lifecycle_records)
+
+        self.assertEqual(metrics["v10_no_authority_directional_suppression_blocks"], 2)
+        self.assertEqual(metrics["v10_no_authority_momentum_suppression_blocks"], 1)
+        self.assertEqual(metrics["v10_no_authority_inverse_suppression_blocks"], 1)
+        self.assertEqual(
+            metrics["v10_suppressed_directional_shadow_status"],
+            "natural_exit_shadow_not_computed",
+        )
+        self.assertIsNone(metrics["v10_suppressed_directional_shadow_pl"])
+        self.assertEqual(
+            metrics["v10_no_authority_context_observer_preset"],
+            "Lead_Generalist",
+        )
+        self.assertEqual(metrics["v10_no_authority_context_trust_score"], 63)
+        self.assertEqual(metrics["v10_no_authority_context_early_transition_count"], 1)
+        self.assertEqual(
+            metrics["v10_no_authority_context_early_non_warmup_transition_count"],
+            0,
+        )
+
+    def test_research_session_metrics_preserve_v10_context_without_suppressions(self) -> None:
+        records = [
+            {
+                "v9_momentum_context": {
+                    "evaluated": True,
+                    "active": False,
+                    "activation_reason": "soxl_below_v9_momentum_floor",
+                    "observer_preset": "Lead_Generalist",
+                    "trend_trust_score": 63,
+                    "source_open_to_current_percent": 1.92,
+                    "early_transition_count": 1,
+                    "early_transitions_per_hour": 2,
+                    "early_non_warmup_transition_count": 0,
+                    "early_non_warmup_transitions_per_hour": 0,
+                    "early_transition_window_minutes": 30,
+                }
+            }
+        ]
+
+        metrics = _session_metrics(records, [])
+
+        self.assertEqual(metrics["v10_no_authority_directional_suppression_blocks"], 0)
+        self.assertEqual(
+            metrics["v10_no_authority_context_activation_reason"],
+            "soxl_below_v9_momentum_floor",
+        )
+        self.assertEqual(
+            metrics["v10_no_authority_context_observer_preset"],
+            "Lead_Generalist",
+        )
+        self.assertEqual(metrics["v10_no_authority_context_trust_score"], 63)
+        self.assertEqual(metrics["v10_no_authority_context_soxl_percent"], 1.92)
+
     def test_order_visibility_summary_prefers_closing_state_for_pending_sell(self) -> None:
         now = datetime(2026, 5, 22, 15, 0, 0, tzinfo=NY_TZ)
         pending_orders = {
@@ -2305,6 +3008,153 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(parsed.position_sizing_mode, "DYNAMIC")
         self.assertEqual(parsed.position_allocation_percent, Decimal("95"))
         self.assertEqual(parsed.regime_exit_gap_threshold, Decimal("0.10"))
+
+    def test_config_payload_accepts_enabled_bot_mask(self) -> None:
+        payload = {
+            "enabledBots": ["MomentumBot", "chop", "momentum"],
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.enabled_bots, (MOMENTUM_BOT, CHOP_BOT))
+
+    def test_config_payload_accepts_momentum_authority_gate(self) -> None:
+        payload = {
+            "chopPermissionMode": "STRICT",
+            "chopPermissionMaxAbsSourcePercent": "2.00",
+            "momentumAuthorityRequired": True,
+            "momentumAuthorityRevokeExits": True,
+            "momentumAuthorityLatchOnceActive": True,
+            "momentumAuthorityMinTrustScore": 66,
+            "momentumAuthorityMinSourcePercent": "4.00",
+            "momentumAuthorityMaxTransitionsPerHour": "6",
+            "momentumAuthorityReclaimEnabled": True,
+            "momentumAuthorityReclaimMinTrustScore": 58,
+            "momentumAuthorityReclaimMinSourcePercent": "4.00",
+            "momentumAuthorityReclaimMaxRawTransitionCount": 1,
+            "momentumAuthorityReclaimMaxNonWarmupTransitionCount": 0,
+            "momentumAuthorityReclaimStartMinutes": 45,
+            "momentumAuthorityReclaimEndMinutes": 60,
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertTrue(parsed.momentum_authority_required)
+        self.assertEqual(parsed.chop_permission_mode, "STRICT")
+        self.assertEqual(parsed.chop_permission_max_abs_source_percent, Decimal("2.00"))
+        self.assertTrue(parsed.momentum_authority_revoke_exits)
+        self.assertTrue(parsed.momentum_authority_latch_once_active)
+        self.assertEqual(parsed.momentum_authority_min_trust_score, 66)
+        self.assertEqual(parsed.momentum_authority_min_source_percent, Decimal("4.00"))
+        self.assertEqual(
+            parsed.momentum_authority_max_transitions_per_hour,
+            Decimal("6"),
+        )
+        self.assertTrue(parsed.momentum_authority_reclaim_enabled)
+        self.assertEqual(parsed.momentum_authority_reclaim_min_trust_score, 58)
+        self.assertEqual(
+            parsed.momentum_authority_reclaim_min_source_percent,
+            Decimal("4.00"),
+        )
+        self.assertEqual(parsed.momentum_authority_reclaim_max_raw_transition_count, 1)
+        self.assertEqual(
+            parsed.momentum_authority_reclaim_max_non_warmup_transition_count,
+            0,
+        )
+        self.assertEqual(parsed.momentum_authority_reclaim_start_minutes, 45)
+        self.assertEqual(parsed.momentum_authority_reclaim_end_minutes, 60)
+
+    def test_config_payload_accepts_chop_firewall_permission_mode(self) -> None:
+        payload = {"chopPermissionMode": "FIREWALL"}
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.chop_permission_mode, "FIREWALL")
+
+    def test_config_payload_accepts_go_live_firewall_router(self) -> None:
+        payload = {
+            "presetName": "Router_StrictAuthority_ChopFirewall",
+            "enabledBots": ["MomentumBot", "ChopBot"],
+            "directionalMode": "BALANCED",
+            "directionalMaxExtensionPercent": "0.40",
+            "directionalStrongChaseMaxExtensionPercent": "1.00",
+            "directionalMinStrength": "MODERATE",
+            "directionalCooldownMinutes": "4",
+            "regimeGapThreshold": "0.20",
+            "regimeExitGapThreshold": "0.10",
+            "chopEntryDiscountPercent": "0.35",
+            "chopPermissionMode": "FIREWALL",
+            "chopPermissionMaxAbsSourcePercent": "2.00",
+            "momentumAuthorityRequired": True,
+            "momentumAuthorityRevokeExits": True,
+            "momentumAuthorityLatchOnceActive": False,
+            "momentumAuthorityMinTrustScore": "66",
+            "momentumAuthorityMinSourcePercent": "4.00",
+            "momentumAuthorityMaxTransitionsPerHour": "8",
+            "momentumAuthorityReclaimEnabled": False,
+            "v9ObserverContext": {
+                "observer_preset": "BalancedPure_LiveObserver",
+                "runtime_observer": True,
+                "execution_rights": "none",
+            },
+            "v10ForceNoAuthority": False,
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.preset_name, "Router_StrictAuthority_ChopFirewall")
+        self.assertEqual(parsed.enabled_bots, (MOMENTUM_BOT, CHOP_BOT))
+        self.assertTrue(parsed.momentum_authority_required)
+        self.assertTrue(parsed.momentum_authority_revoke_exits)
+        self.assertFalse(parsed.momentum_authority_latch_once_active)
+        self.assertEqual(parsed.momentum_authority_min_trust_score, 66)
+        self.assertEqual(parsed.momentum_authority_min_source_percent, Decimal("4.00"))
+        self.assertEqual(
+            parsed.momentum_authority_max_transitions_per_hour,
+            Decimal("8"),
+        )
+        self.assertFalse(parsed.momentum_authority_reclaim_enabled)
+        self.assertEqual(parsed.chop_permission_mode, "FIREWALL")
+        self.assertEqual(parsed.chop_entry_discount_percent, Decimal("0.35"))
+        self.assertFalse(parsed.v10_force_no_authority)
+        self.assertEqual(
+            parsed.v9_observer_context["observer_preset"],
+            "BalancedPure_LiveObserver",
+        )
+        self.assertTrue(parsed.v9_observer_context["runtime_observer"])
+        self.assertEqual(parsed.v9_observer_context["execution_rights"], "none")
 
     def test_config_payload_keeps_legacy_momentum_aliases(self) -> None:
         payload = {

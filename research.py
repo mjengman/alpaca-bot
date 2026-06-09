@@ -21,10 +21,12 @@ from bot import (
     BotError,
     BotStateStore,
     EdgeWalkerBot,
+    LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
     LifecycleLedger,
     MONEY_STEP,
     SOXL,
     SOXS,
+    V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
     format_decimal,
     parse_market_timestamp,
 )
@@ -542,7 +544,11 @@ def _bot_pl_map(performance: dict[str, Any]) -> dict[str, Decimal]:
     return result
 
 
-def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]) -> dict[str, Any]:
+def _session_metrics(
+    records: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    lifecycle_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     transitions = sum(1 for record in records if record.get("regime_transition"))
     trend_scores = [
         int(record.get("trend_trust", {}).get("score"))
@@ -567,9 +573,61 @@ def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]
         "inverse_suppressions": 0,
         "context_invalidations": 0,
     }
+    v10_counts = {
+        "directional_suppressions": 0,
+        "momentum_suppressions": 0,
+        "inverse_suppressions": 0,
+    }
     v9_context_summary: dict[str, Any] = {}
+    v10_context_summary: dict[str, Any] = {}
+    v10_shadow_status: str | None = None
     v9_activation_keys: set[str] = set()
     v9_invalidation_keys: set[str] = set()
+    lifecycle_records = lifecycle_records or []
+    for lifecycle_record in lifecycle_records:
+        if (
+            lifecycle_record.get("event_type") != LIFECYCLE_SHADOW_ENTRY_SUPPRESSED
+            or lifecycle_record.get("reason")
+            != V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON
+        ):
+            continue
+        v10_counts["directional_suppressions"] += 1
+        bot_name = str(lifecycle_record.get("bot") or "")
+        if bot_name == "MomentumBot":
+            v10_counts["momentum_suppressions"] += 1
+        elif bot_name == "InverseBot":
+            v10_counts["inverse_suppressions"] += 1
+        if v10_shadow_status is None:
+            v10_shadow_status = str(
+                lifecycle_record.get("shadow_pl_status") or "not_computed"
+            )
+        if not v10_context_summary and isinstance(
+            lifecycle_record.get("v10_no_authority_context"),
+            dict,
+        ):
+            context = lifecycle_record["v10_no_authority_context"]
+            v10_context_summary = {
+                "activation_reason": context.get("activation_reason"),
+                "authority_gate": context.get("authority_gate"),
+                "observer_preset": context.get("observer_preset"),
+                "trust_score": context.get("trend_trust_score"),
+                "soxl_percent": context.get("source_open_to_current_percent"),
+                "soxl_runup_percent": context.get("source_runup_percent"),
+                "soxl_drawdown_percent": context.get("source_drawdown_percent"),
+                "early_transition_count": context.get("early_transition_count"),
+                "early_transitions_per_hour": context.get(
+                    "early_transitions_per_hour"
+                ),
+                "early_non_warmup_transition_count": context.get(
+                    "early_non_warmup_transition_count"
+                ),
+                "early_non_warmup_transitions_per_hour": context.get(
+                    "early_non_warmup_transitions_per_hour"
+                ),
+                "early_transition_window_minutes": context.get(
+                    "early_transition_window_minutes"
+                ),
+            }
     for record in records:
         console_lines = record.get("console_lines") or []
         if isinstance(console_lines, list):
@@ -579,9 +637,49 @@ def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]
                     v8_block_counts[reason] += 1
             if "reason=v9_momentum_context_suppresses_inverse" in console_text:
                 v9_counts["inverse_suppressions"] += 1
+            if not lifecycle_records and (
+                f"reason={V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON}"
+                in console_text
+            ):
+                v10_counts["directional_suppressions"] += 1
+                if "bot=MomentumBot" in console_text:
+                    v10_counts["momentum_suppressions"] += 1
+                if "bot=InverseBot" in console_text:
+                    v10_counts["inverse_suppressions"] += 1
         v9_context = record.get("v9_momentum_context")
         if isinstance(v9_context, dict):
             activation_reason = v9_context.get("activation_reason")
+            if (
+                v9_context.get("evaluated")
+                and not v9_context.get("active")
+                and not v10_context_summary
+                and "not_momentum_context" not in str(activation_reason or "")
+            ):
+                v10_context_summary = {
+                    "activation_reason": activation_reason,
+                    "observer_preset": v9_context.get("observer_preset"),
+                    "trust_score": v9_context.get("trend_trust_score"),
+                    "soxl_percent": v9_context.get(
+                        "source_open_to_current_percent"
+                    ),
+                    "soxl_runup_percent": None,
+                    "soxl_drawdown_percent": None,
+                    "early_transition_count": v9_context.get(
+                        "early_transition_count"
+                    ),
+                    "early_transitions_per_hour": v9_context.get(
+                        "early_transitions_per_hour"
+                    ),
+                    "early_non_warmup_transition_count": v9_context.get(
+                        "early_non_warmup_transition_count"
+                    ),
+                    "early_non_warmup_transitions_per_hour": v9_context.get(
+                        "early_non_warmup_transitions_per_hour"
+                    ),
+                    "early_transition_window_minutes": v9_context.get(
+                        "early_transition_window_minutes"
+                    ),
+                }
             if (
                 v9_context.get("evaluated")
                 and not v9_context_summary
@@ -687,6 +785,53 @@ def _session_metrics(records: list[dict[str, Any]], trades: list[dict[str, Any]]
         "v9_momentum_context_activations": v9_counts["context_activations"],
         "v9_inverse_suppression_blocks": v9_counts["inverse_suppressions"],
         "v9_momentum_context_invalidations": v9_counts["context_invalidations"],
+        "v10_no_authority_directional_suppression_blocks": v10_counts[
+            "directional_suppressions"
+        ],
+        "v10_no_authority_momentum_suppression_blocks": v10_counts[
+            "momentum_suppressions"
+        ],
+        "v10_no_authority_inverse_suppression_blocks": v10_counts[
+            "inverse_suppressions"
+        ],
+        "v10_suppressed_directional_shadow_pl": None,
+        "v10_suppressed_directional_shadow_status": v10_shadow_status,
+        "v10_no_authority_context_activation_reason": v10_context_summary.get(
+            "activation_reason"
+        ),
+        "v10_no_authority_context_observer_preset": v10_context_summary.get(
+            "observer_preset"
+        ),
+        "v10_no_authority_context_authority_gate": v10_context_summary.get(
+            "authority_gate"
+        ),
+        "v10_no_authority_context_trust_score": v10_context_summary.get(
+            "trust_score"
+        ),
+        "v10_no_authority_context_soxl_percent": v10_context_summary.get(
+            "soxl_percent"
+        ),
+        "v10_no_authority_context_soxl_runup_percent": v10_context_summary.get(
+            "soxl_runup_percent"
+        ),
+        "v10_no_authority_context_soxl_drawdown_percent": v10_context_summary.get(
+            "soxl_drawdown_percent"
+        ),
+        "v10_no_authority_context_early_transition_count": v10_context_summary.get(
+            "early_transition_count"
+        ),
+        "v10_no_authority_context_early_transitions_per_hour": (
+            v10_context_summary.get("early_transitions_per_hour")
+        ),
+        "v10_no_authority_context_early_non_warmup_transition_count": (
+            v10_context_summary.get("early_non_warmup_transition_count")
+        ),
+        "v10_no_authority_context_early_non_warmup_transitions_per_hour": (
+            v10_context_summary.get("early_non_warmup_transitions_per_hour")
+        ),
+        "v10_no_authority_context_early_window_minutes": v10_context_summary.get(
+            "early_transition_window_minutes"
+        ),
         "v9_momentum_context_activation_reason": v9_context_summary.get(
             "activation_reason"
         ),
@@ -809,7 +954,48 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
                         "directional_strong_chase_max_extension_percent": str(config.directional_strong_chase_max_extension_percent),
                         "directional_min_strength": config.directional_min_strength,
                         "directional_cooldown_minutes": config.directional_cooldown_minutes,
+                        "chop_permission_mode": config.chop_permission_mode,
+                        "chop_permission_max_abs_source_percent": str(
+                            config.chop_permission_max_abs_source_percent
+                        ),
                         "adaptive_shadow_enabled": config.adaptive_shadow_enabled,
+                        "enabled_bots": list(config.enabled_bots),
+                        "momentum_authority_required": config.momentum_authority_required,
+                        "momentum_authority_revoke_exits": config.momentum_authority_revoke_exits,
+                        "momentum_authority_latch_once_active": (
+                            config.momentum_authority_latch_once_active
+                        ),
+                        "momentum_authority_min_trust_score": (
+                            config.momentum_authority_min_trust_score
+                        ),
+                        "momentum_authority_min_source_percent": str(
+                            config.momentum_authority_min_source_percent
+                        ),
+                        "momentum_authority_max_transitions_per_hour": str(
+                            config.momentum_authority_max_transitions_per_hour
+                        ),
+                        "momentum_authority_reclaim_enabled": (
+                            config.momentum_authority_reclaim_enabled
+                        ),
+                        "momentum_authority_reclaim_min_trust_score": (
+                            config.momentum_authority_reclaim_min_trust_score
+                        ),
+                        "momentum_authority_reclaim_min_source_percent": str(
+                            config.momentum_authority_reclaim_min_source_percent
+                        ),
+                        "momentum_authority_reclaim_max_raw_transition_count": (
+                            config.momentum_authority_reclaim_max_raw_transition_count
+                        ),
+                        "momentum_authority_reclaim_max_non_warmup_transition_count": (
+                            config.momentum_authority_reclaim_max_non_warmup_transition_count
+                        ),
+                        "momentum_authority_reclaim_start_minutes": (
+                            config.momentum_authority_reclaim_start_minutes
+                        ),
+                        "momentum_authority_reclaim_end_minutes": (
+                            config.momentum_authority_reclaim_end_minutes
+                        ),
+                        "v10_force_no_authority": config.v10_force_no_authority,
                         "data_feed": config.data_feed,
                     },
                     "console_lines": output.getvalue().splitlines()[-12:],
@@ -841,7 +1027,7 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         date_text,
         bars_by_symbol,
     )
-    metrics = _session_metrics(records, trades)
+    metrics = _session_metrics(records, trades, lifecycle_records)
     bot_pl = _bot_pl_map(performance)
     realized_pl = Decimal(str(performance.get("session_realized_pl") or 0))
     starting = request.starting_account_value
@@ -887,6 +1073,57 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "v9_momentum_context_invalidations": int(
             metrics["v9_momentum_context_invalidations"]
         ),
+        "v10_no_authority_directional_suppression_blocks": int(
+            metrics["v10_no_authority_directional_suppression_blocks"]
+        ),
+        "v10_no_authority_momentum_suppression_blocks": int(
+            metrics["v10_no_authority_momentum_suppression_blocks"]
+        ),
+        "v10_no_authority_inverse_suppression_blocks": int(
+            metrics["v10_no_authority_inverse_suppression_blocks"]
+        ),
+        "v10_suppressed_directional_shadow_pl": metrics[
+            "v10_suppressed_directional_shadow_pl"
+        ],
+        "v10_suppressed_directional_shadow_status": metrics[
+            "v10_suppressed_directional_shadow_status"
+        ],
+        "v10_no_authority_context_activation_reason": metrics[
+            "v10_no_authority_context_activation_reason"
+        ],
+        "v10_no_authority_context_observer_preset": metrics[
+            "v10_no_authority_context_observer_preset"
+        ],
+        "v10_no_authority_context_authority_gate": metrics[
+            "v10_no_authority_context_authority_gate"
+        ],
+        "v10_no_authority_context_trust_score": metrics[
+            "v10_no_authority_context_trust_score"
+        ],
+        "v10_no_authority_context_soxl_percent": metrics[
+            "v10_no_authority_context_soxl_percent"
+        ],
+        "v10_no_authority_context_soxl_runup_percent": metrics[
+            "v10_no_authority_context_soxl_runup_percent"
+        ],
+        "v10_no_authority_context_soxl_drawdown_percent": metrics[
+            "v10_no_authority_context_soxl_drawdown_percent"
+        ],
+        "v10_no_authority_context_early_transition_count": metrics[
+            "v10_no_authority_context_early_transition_count"
+        ],
+        "v10_no_authority_context_early_transitions_per_hour": metrics[
+            "v10_no_authority_context_early_transitions_per_hour"
+        ],
+        "v10_no_authority_context_early_non_warmup_transition_count": metrics[
+            "v10_no_authority_context_early_non_warmup_transition_count"
+        ],
+        "v10_no_authority_context_early_non_warmup_transitions_per_hour": metrics[
+            "v10_no_authority_context_early_non_warmup_transitions_per_hour"
+        ],
+        "v10_no_authority_context_early_window_minutes": metrics[
+            "v10_no_authority_context_early_window_minutes"
+        ],
         "v9_momentum_context_activation_reason": metrics[
             "v9_momentum_context_activation_reason"
         ],
@@ -919,6 +1156,43 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         ],
         "date": date_text,
         "mode": config.directional_mode,
+        "enabled_bots": ",".join(config.enabled_bots),
+        "chop_permission_mode": config.chop_permission_mode,
+        "chop_permission_max_abs_source_percent": _rounded(
+            config.chop_permission_max_abs_source_percent
+        ),
+        "momentum_authority_required": config.momentum_authority_required,
+        "momentum_authority_revoke_exits": config.momentum_authority_revoke_exits,
+        "momentum_authority_latch_once_active": (
+            config.momentum_authority_latch_once_active
+        ),
+        "momentum_authority_min_trust_score": config.momentum_authority_min_trust_score,
+        "momentum_authority_min_source_percent": _rounded(
+            config.momentum_authority_min_source_percent
+        ),
+        "momentum_authority_max_transitions_per_hour": _rounded(
+            config.momentum_authority_max_transitions_per_hour
+        ),
+        "momentum_authority_reclaim_enabled": config.momentum_authority_reclaim_enabled,
+        "momentum_authority_reclaim_min_trust_score": (
+            config.momentum_authority_reclaim_min_trust_score
+        ),
+        "momentum_authority_reclaim_min_source_percent": _rounded(
+            config.momentum_authority_reclaim_min_source_percent
+        ),
+        "momentum_authority_reclaim_max_raw_transition_count": (
+            config.momentum_authority_reclaim_max_raw_transition_count
+        ),
+        "momentum_authority_reclaim_max_non_warmup_transition_count": (
+            config.momentum_authority_reclaim_max_non_warmup_transition_count
+        ),
+        "momentum_authority_reclaim_start_minutes": (
+            config.momentum_authority_reclaim_start_minutes
+        ),
+        "momentum_authority_reclaim_end_minutes": (
+            config.momentum_authority_reclaim_end_minutes
+        ),
+        "v10_force_no_authority": config.v10_force_no_authority,
         "starting_account_value": _rounded(starting),
         "ending_account_value": _rounded(ending),
         "realized_pl_dollars": _rounded(realized_pl),
@@ -965,7 +1239,44 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "directional_strong_chase_max_extension_percent": _rounded(config.directional_strong_chase_max_extension_percent),
         "directional_min_strength": config.directional_min_strength,
         "directional_cooldown_minutes": config.directional_cooldown_minutes,
+        "chop_permission_mode": config.chop_permission_mode,
+        "chop_permission_max_abs_source_percent": _rounded(
+            config.chop_permission_max_abs_source_percent
+        ),
         "adaptive_shadow_enabled": config.adaptive_shadow_enabled,
+        "enabled_bots": ",".join(config.enabled_bots),
+        "momentum_authority_required": config.momentum_authority_required,
+        "momentum_authority_revoke_exits": config.momentum_authority_revoke_exits,
+        "momentum_authority_latch_once_active": (
+            config.momentum_authority_latch_once_active
+        ),
+        "momentum_authority_min_trust_score": config.momentum_authority_min_trust_score,
+        "momentum_authority_min_source_percent": _rounded(
+            config.momentum_authority_min_source_percent
+        ),
+        "momentum_authority_max_transitions_per_hour": _rounded(
+            config.momentum_authority_max_transitions_per_hour
+        ),
+        "momentum_authority_reclaim_enabled": config.momentum_authority_reclaim_enabled,
+        "momentum_authority_reclaim_min_trust_score": (
+            config.momentum_authority_reclaim_min_trust_score
+        ),
+        "momentum_authority_reclaim_min_source_percent": _rounded(
+            config.momentum_authority_reclaim_min_source_percent
+        ),
+        "momentum_authority_reclaim_max_raw_transition_count": (
+            config.momentum_authority_reclaim_max_raw_transition_count
+        ),
+        "momentum_authority_reclaim_max_non_warmup_transition_count": (
+            config.momentum_authority_reclaim_max_non_warmup_transition_count
+        ),
+        "momentum_authority_reclaim_start_minutes": (
+            config.momentum_authority_reclaim_start_minutes
+        ),
+        "momentum_authority_reclaim_end_minutes": (
+            config.momentum_authority_reclaim_end_minutes
+        ),
+        "v10_force_no_authority": config.v10_force_no_authority,
         "dry_run": False,
         "active_environment": "research",
         "data_feed": config.data_feed,

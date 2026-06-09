@@ -42,6 +42,20 @@ DIRECTIONAL_MODES = {
     DIRECTIONAL_MODE_AGGRESSIVE,
     DIRECTIONAL_MODE_ADAPTIVE,
 }
+CHOP_PERMISSION_MODE_OFF = "OFF"
+CHOP_PERMISSION_MODE_LOOSE = "LOOSE"
+CHOP_PERMISSION_MODE_STRICT = "STRICT"
+CHOP_PERMISSION_MODE_FIREWALL = "FIREWALL"
+CHOP_PERMISSION_MODES = {
+    CHOP_PERMISSION_MODE_OFF,
+    CHOP_PERMISSION_MODE_LOOSE,
+    CHOP_PERMISSION_MODE_STRICT,
+    CHOP_PERMISSION_MODE_FIREWALL,
+}
+CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT = Decimal("2.00")
+CHOP_PERMISSION_FIREWALL_MAX_DRAWDOWN_PERCENT = Decimal("-5.00")
+CHOP_PERMISSION_FIREWALL_NEAR_MOMENTUM_MIN_TRUST_SCORE = 64
+CHOP_PERMISSION_FIREWALL_NEAR_MOMENTUM_MIN_SOURCE_PERCENT = Decimal("2.50")
 REGIME_STRENGTH_RANGE = "RANGE"
 REGIME_STRENGTH_WEAK = "WEAK"
 REGIME_STRENGTH_MODERATE = "MODERATE"
@@ -59,6 +73,7 @@ REGIME_STRENGTH_ORDER = {
 MOMENTUM_BOT = "MomentumBot"
 CHOP_BOT = "ChopBot"
 INVERSE_BOT = "InverseBot"
+EDGEWALKER_BOTS = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 POSITION_SIZING_FIXED = "FIXED"
 POSITION_SIZING_DYNAMIC = "DYNAMIC"
 POSITION_SIZING_MODES = {
@@ -116,15 +131,64 @@ V9_MOMENTUM_MIN_SOURCE_PERCENT = Decimal("2.00")
 V9_MOMENTUM_MAX_TRANSITIONS_PER_HOUR = Decimal("8")
 V9_MOMENTUM_EARLY_WINDOW_MINUTES = 30
 V9_MOMENTUM_ACTIVATION_GRACE_MINUTES = 15
+V9_MOMENTUM_RECLAIM_MIN_TREND_TRUST_SCORE = 58
+V9_MOMENTUM_RECLAIM_MIN_SOURCE_PERCENT = Decimal("4.00")
+V9_MOMENTUM_RECLAIM_MAX_RAW_TRANSITION_COUNT = 1
+V9_MOMENTUM_RECLAIM_MAX_NON_WARMUP_TRANSITION_COUNT = 0
+V9_MOMENTUM_RECLAIM_START_MINUTES = 45
+V9_MOMENTUM_RECLAIM_END_MINUTES = 60
 V9_MOMENTUM_INVALIDATION_DRAWDOWN_FROM_HIGH_PERCENT = Decimal("-5")
 V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON = "v9_momentum_context_suppresses_inverse"
 V9_MOMENTUM_CONTEXT_ACTIVATION_REASON = "v9_momentum_clean_tape_context"
+V9_MOMENTUM_CONTEXT_RECLAIM_REASON = "v9_momentum_strict_reclaim_context"
 V9_MOMENTUM_CONTEXT_INVALIDATION_REASON = "v9_momentum_context_invalidated"
+V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON = "no_authority_directional_suppressed"
+V10_AUTHORITY_STATE_MOMENTUM = "momentum"
+V10_AUTHORITY_STATE_NONE = "none"
+MOMENTUM_AUTHORITY_REQUIRED_REASON = "momentum_authority_required"
+MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON = "momentum_authority_revoked_exit"
+CHOP_PERMISSION_SUPPRESSION_REASON = "chop_permission_gate_blocked"
 NY_TZ = ZoneInfo("America/New_York")
 
 
 class BotError(Exception):
     pass
+
+
+def normalize_enabled_bots(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return EDGEWALKER_BOTS
+
+    if isinstance(value, str):
+        raw_items = value.replace(",", " ").split()
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(item) for item in value]
+    else:
+        raise BotError("enabledBots must be a list or comma-separated string")
+
+    aliases = {
+        "momentum": MOMENTUM_BOT,
+        "momentumbot": MOMENTUM_BOT,
+        "chop": CHOP_BOT,
+        "chopbot": CHOP_BOT,
+        "inverse": INVERSE_BOT,
+        "inversebot": INVERSE_BOT,
+    }
+    enabled: list[str] = []
+    for item in raw_items:
+        normalized = item.strip().replace("_", "").replace("-", "").lower()
+        if not normalized:
+            continue
+        bot_name = aliases.get(normalized)
+        if bot_name is None:
+            raise BotError(
+                "enabledBots may only contain MomentumBot, ChopBot, or InverseBot"
+            )
+        if bot_name not in enabled:
+            enabled.append(bot_name)
+    if not enabled:
+        raise BotError("enabledBots must contain at least one bot")
+    return tuple(enabled)
 
 
 def _last_completed_bar_end(now: datetime | None = None) -> datetime:
@@ -221,8 +285,37 @@ class BotConfig:
     adaptive_shadow_enabled: bool
     data_feed: str
     dry_run: bool
+    enabled_bots: tuple[str, ...] = EDGEWALKER_BOTS
+    chop_permission_mode: str = CHOP_PERMISSION_MODE_OFF
+    chop_permission_max_abs_source_percent: Decimal = (
+        CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT
+    )
+    momentum_authority_required: bool = False
+    momentum_authority_revoke_exits: bool = False
+    momentum_authority_latch_once_active: bool = False
+    momentum_authority_min_trust_score: int = V9_MOMENTUM_MIN_TREND_TRUST_SCORE
+    momentum_authority_min_source_percent: Decimal = V9_MOMENTUM_MIN_SOURCE_PERCENT
+    momentum_authority_max_transitions_per_hour: Decimal = (
+        V9_MOMENTUM_MAX_TRANSITIONS_PER_HOUR
+    )
+    momentum_authority_reclaim_enabled: bool = False
+    momentum_authority_reclaim_min_trust_score: int = (
+        V9_MOMENTUM_RECLAIM_MIN_TREND_TRUST_SCORE
+    )
+    momentum_authority_reclaim_min_source_percent: Decimal = (
+        V9_MOMENTUM_RECLAIM_MIN_SOURCE_PERCENT
+    )
+    momentum_authority_reclaim_max_raw_transition_count: int = (
+        V9_MOMENTUM_RECLAIM_MAX_RAW_TRANSITION_COUNT
+    )
+    momentum_authority_reclaim_max_non_warmup_transition_count: int = (
+        V9_MOMENTUM_RECLAIM_MAX_NON_WARMUP_TRANSITION_COUNT
+    )
+    momentum_authority_reclaim_start_minutes: int = V9_MOMENTUM_RECLAIM_START_MINUTES
+    momentum_authority_reclaim_end_minutes: int = V9_MOMENTUM_RECLAIM_END_MINUTES
     preset_name: str | None = None
     v9_observer_context: dict[str, Any] | None = None
+    v10_force_no_authority: bool = False
 
     @classmethod
     def from_env(cls, environment_override: str | None = None) -> "BotConfig":
@@ -345,6 +438,29 @@ class BotConfig:
         if directional_cooldown_minutes < 0:
             raise BotError("DIRECTIONAL_COOLDOWN_MINUTES must be at least 0")
 
+        chop_permission_mode = os.environ.get(
+            "CHOP_PERMISSION_MODE",
+            CHOP_PERMISSION_MODE_OFF,
+        ).strip().upper()
+        if chop_permission_mode not in CHOP_PERMISSION_MODES:
+            raise BotError(
+                "CHOP_PERMISSION_MODE must be OFF, LOOSE, STRICT, or FIREWALL"
+            )
+        chop_permission_max_abs_source_percent = env_decimal(
+            "CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT",
+            CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT,
+        )
+        if chop_permission_max_abs_source_percent < 0:
+            raise BotError("CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT must be at least 0")
+
+        runtime_observer_context = None
+        if env_bool("BALANCEDPURE_RUNTIME_OBSERVER_ENABLED", False):
+            runtime_observer_context = {
+                "observer_preset": "BalancedPure_LiveObserver",
+                "runtime_observer": True,
+                "execution_rights": "none",
+            }
+
         return cls(
             trading_base_url=normalize_alpaca_base_url(trading_base_url),
             data_base_url=normalize_alpaca_base_url(
@@ -374,8 +490,63 @@ class BotConfig:
             adaptive_shadow_enabled=env_bool("ADAPTIVE_SHADOW_ENABLED", True),
             data_feed=os.environ.get("DATA_FEED", "iex").strip(),
             dry_run=env_bool("DRY_RUN", False),
+            enabled_bots=normalize_enabled_bots(os.environ.get("ENABLED_BOTS")),
+            chop_permission_mode=chop_permission_mode,
+            chop_permission_max_abs_source_percent=(
+                chop_permission_max_abs_source_percent
+            ),
+            momentum_authority_required=env_bool("MOMENTUM_AUTHORITY_REQUIRED", False),
+            momentum_authority_revoke_exits=env_bool(
+                "MOMENTUM_AUTHORITY_REVOKE_EXITS",
+                False,
+            ),
+            momentum_authority_latch_once_active=env_bool(
+                "MOMENTUM_AUTHORITY_LATCH_ONCE_ACTIVE",
+                False,
+            ),
+            momentum_authority_min_trust_score=env_int(
+                "MOMENTUM_AUTHORITY_MIN_TRUST_SCORE",
+                V9_MOMENTUM_MIN_TREND_TRUST_SCORE,
+            ),
+            momentum_authority_min_source_percent=env_decimal(
+                "MOMENTUM_AUTHORITY_MIN_SOURCE_PERCENT",
+                V9_MOMENTUM_MIN_SOURCE_PERCENT,
+            ),
+            momentum_authority_max_transitions_per_hour=env_decimal(
+                "MOMENTUM_AUTHORITY_MAX_TRANSITIONS_PER_HOUR",
+                V9_MOMENTUM_MAX_TRANSITIONS_PER_HOUR,
+            ),
+            momentum_authority_reclaim_enabled=env_bool(
+                "MOMENTUM_AUTHORITY_RECLAIM_ENABLED",
+                False,
+            ),
+            momentum_authority_reclaim_min_trust_score=env_int(
+                "MOMENTUM_AUTHORITY_RECLAIM_MIN_TRUST_SCORE",
+                V9_MOMENTUM_RECLAIM_MIN_TREND_TRUST_SCORE,
+            ),
+            momentum_authority_reclaim_min_source_percent=env_decimal(
+                "MOMENTUM_AUTHORITY_RECLAIM_MIN_SOURCE_PERCENT",
+                V9_MOMENTUM_RECLAIM_MIN_SOURCE_PERCENT,
+            ),
+            momentum_authority_reclaim_max_raw_transition_count=env_int(
+                "MOMENTUM_AUTHORITY_RECLAIM_MAX_RAW_TRANSITION_COUNT",
+                V9_MOMENTUM_RECLAIM_MAX_RAW_TRANSITION_COUNT,
+            ),
+            momentum_authority_reclaim_max_non_warmup_transition_count=env_int(
+                "MOMENTUM_AUTHORITY_RECLAIM_MAX_NON_WARMUP_TRANSITION_COUNT",
+                V9_MOMENTUM_RECLAIM_MAX_NON_WARMUP_TRANSITION_COUNT,
+            ),
+            momentum_authority_reclaim_start_minutes=env_int(
+                "MOMENTUM_AUTHORITY_RECLAIM_START_MINUTES",
+                V9_MOMENTUM_RECLAIM_START_MINUTES,
+            ),
+            momentum_authority_reclaim_end_minutes=env_int(
+                "MOMENTUM_AUTHORITY_RECLAIM_END_MINUTES",
+                V9_MOMENTUM_RECLAIM_END_MINUTES,
+            ),
             preset_name=os.environ.get("PRESET_NAME") or None,
-            v9_observer_context=None,
+            v9_observer_context=runtime_observer_context,
+            v10_force_no_authority=False,
         )
 
 
@@ -2131,7 +2302,8 @@ class EdgeWalkerBot:
             current_regime_state,
         )
         route = RegimeRouter().route(signal.regime)
-        self._v9_update_momentum_context(route)
+        self._v9_update_momentum_context(self._v9_authority_evaluation_route(route))
+        route = self._apply_enabled_bot_mask(route)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
         print(
@@ -2295,6 +2467,26 @@ class EdgeWalkerBot:
                 action_taken,
             )
 
+        authority_exit = self._maybe_exit_momentum_authority_revoked_position(
+            route,
+            positions,
+            orders,
+            signal.regime,
+        )
+        if authority_exit:
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                authority_exit,
+            )
+
         if not route.allows_entry or route.routed_symbol is None:
             print("[ENTRY] BLOCKED reason=route_disallows_entry")
             print("entry_signal=False action_taken=chop_no_trade_placeholder")
@@ -2380,12 +2572,27 @@ class EdgeWalkerBot:
 
         entry_decision = self._entry_decision_for_route(route, soxl_snapshot)
         if entry_decision.signal:
-            policy_decision = self._v8_entry_policy_decision(route, soxl_snapshot)
+            policy_decision = self._momentum_authority_entry_policy_decision(
+                route,
+                soxl_snapshot,
+            )
+            if policy_decision is None:
+                policy_decision = self._chop_permission_entry_policy_decision(
+                    route,
+                    soxl_snapshot,
+                )
             if policy_decision is None:
                 policy_decision = self._v9_entry_policy_decision(
                     route,
                     soxl_snapshot,
                 )
+            if policy_decision is None:
+                policy_decision = self._v10_entry_policy_decision(
+                    route,
+                    soxl_snapshot,
+                )
+            if policy_decision is None:
+                policy_decision = self._v8_entry_policy_decision(route, soxl_snapshot)
             if policy_decision is not None:
                 entry_decision = policy_decision
         entry_signal = entry_decision.signal
@@ -3316,6 +3523,25 @@ class EdgeWalkerBot:
             return self._effective_directional_mode_for_bot(route.active_bot)
         return "NA"
 
+    def _apply_enabled_bot_mask(self, route: BotRoute) -> BotRoute:
+        if route.active_bot in self.config.enabled_bots:
+            return route
+
+        enabled_text = ",".join(self.config.enabled_bots)
+        print(
+            "[ROUTER] entries disabled for routed bot: "
+            f"bot={route.active_bot} enabled_bots={enabled_text}"
+        )
+        return BotRoute(route.active_bot, route.routed_symbol, False)
+
+    def _v9_authority_evaluation_route(self, route: BotRoute) -> BotRoute:
+        if (
+            route.active_bot == CHOP_BOT
+            and self.config.chop_permission_mode != CHOP_PERMISSION_MODE_OFF
+        ):
+            return BotRoute(MOMENTUM_BOT, SOXL, True)
+        return route
+
     def _effective_directional_mode_for_bot(self, bot_name: str) -> str:
         if (
             bot_name in {MOMENTUM_BOT, INVERSE_BOT}
@@ -3326,6 +3552,161 @@ class EdgeWalkerBot:
         if self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE:
             return DIRECTIONAL_MODE_BALANCED
         return self.config.directional_mode
+
+    def _chop_permission_entry_policy_decision(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision | None:
+        del soxl_snapshot
+        mode = self.config.chop_permission_mode
+        if route.active_bot != CHOP_BOT or mode == CHOP_PERMISSION_MODE_OFF:
+            return None
+
+        reasons: list[str] = []
+        if self._v10_authority_state() == V10_AUTHORITY_STATE_MOMENTUM:
+            reasons.append("chop_momentum_authority_active")
+
+        invalidation_reason = self._v9_momentum_context_invalidation_reason()
+        if invalidation_reason == "momentum_drawdown_with_dirty_tape":
+            reasons.append(invalidation_reason)
+        if (
+            mode == CHOP_PERMISSION_MODE_FIREWALL
+            and invalidation_reason == "soxl_below_open_after_1030"
+        ):
+            reasons.append(invalidation_reason)
+
+        observer_context = self._v9_observer_context()
+        if mode == CHOP_PERMISSION_MODE_STRICT:
+            transition_count = self._v9_observer_int(
+                observer_context,
+                "early_transition_count",
+            )
+            if transition_count is None or transition_count != 0:
+                reasons.append("chop_early_transition_count_not_zero")
+
+            path = self._v7_source_price_path()
+            source_percent = path.current_percent if path is not None else None
+            if (
+                source_percent is None
+                or abs(source_percent)
+                > self.config.chop_permission_max_abs_source_percent
+            ):
+                reasons.append("chop_source_directional_state_too_large")
+        elif mode == CHOP_PERMISSION_MODE_FIREWALL:
+            path = self._v7_source_price_path()
+            source_percent = path.current_percent if path is not None else None
+            drawdown_percent = path.drawdown_percent if path is not None else None
+            non_warmup_transition_count = self._v9_observer_int(
+                observer_context,
+                "early_non_warmup_transition_count",
+            )
+            trust_score = self._v9_observer_int(
+                observer_context,
+                "trend_trust_score",
+            )
+
+            if (
+                source_percent is None
+                or non_warmup_transition_count is None
+                or drawdown_percent is None
+            ):
+                reasons.append("chop_firewall_context_unavailable")
+            else:
+                if source_percent <= 0 and non_warmup_transition_count > 0:
+                    reasons.append("chop_negative_noisy_tape")
+                if (
+                    drawdown_percent
+                    <= CHOP_PERMISSION_FIREWALL_MAX_DRAWDOWN_PERCENT
+                ):
+                    reasons.append("chop_source_drawdown_firewall")
+                if (
+                    trust_score is not None
+                    and trust_score
+                    >= CHOP_PERMISSION_FIREWALL_NEAR_MOMENTUM_MIN_TRUST_SCORE
+                    and source_percent
+                    >= CHOP_PERMISSION_FIREWALL_NEAR_MOMENTUM_MIN_SOURCE_PERCENT
+                    and non_warmup_transition_count == 0
+                ):
+                    reasons.append("chop_near_momentum_authority")
+
+        if not reasons:
+            return None
+
+        reason = ",".join(reasons)
+        print(
+            "[V10] Chop permission suppresses entry: "
+            f"mode={mode} reason={reason}"
+        )
+        return EntryDecision(False, CHOP_PERMISSION_SUPPRESSION_REASON)
+
+    def _momentum_authority_entry_policy_decision(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision | None:
+        del soxl_snapshot
+        if route.active_bot != MOMENTUM_BOT:
+            return None
+        if not self.config.momentum_authority_required:
+            return None
+
+        block_reason = self._momentum_authority_block_reason()
+        if block_reason is None:
+            return None
+
+        context = self._v10_no_authority_context(
+            route,
+            activation_reason=block_reason,
+            authority_gate="momentum_permission",
+        )
+        routed_symbol = route.routed_symbol or SOXL
+        print(
+            "[V10] Momentum authority suppresses entry: "
+            f"bot={route.active_bot} symbol={routed_symbol} "
+            f"reason={V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON} "
+            f"gate_reason={block_reason}"
+        )
+        self._record_lifecycle(
+            LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+            bot=route.active_bot,
+            symbol=routed_symbol,
+            side="buy",
+            reason=V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+            authority_state=V10_AUTHORITY_STATE_NONE,
+            v10_no_authority_context=context,
+            shadow_pl_status="natural_exit_shadow_not_computed",
+        )
+        return EntryDecision(False, V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON)
+
+    def _momentum_authority_block_reason(self) -> str | None:
+        if self._momentum_authority_latched():
+            return None
+
+        if self.config.momentum_authority_latch_once_active:
+            context = self._v9_session_context()
+            if context.get("active") and not context.get("invalidated"):
+                self._latch_momentum_authority(context)
+                return None
+
+        hard_veto_reason = self._v9_momentum_context_hard_veto_reason()
+        if hard_veto_reason:
+            self._v9_invalidate_active_momentum_context(hard_veto_reason)
+            return hard_veto_reason
+        if self._v9_active_momentum_context() is None:
+            return MOMENTUM_AUTHORITY_REQUIRED_REASON
+        return None
+
+    def _v9_momentum_context_hard_veto_reason(self) -> str | None:
+        context = self._v9_session_context()
+        if context.get("invalidated") and context.get("invalidation_reason"):
+            return str(context.get("invalidation_reason"))
+        return self._v9_momentum_context_invalidation_reason()
+
+    def _v9_invalidate_active_momentum_context(self, reason: str) -> None:
+        context = self._v9_session_context()
+        if context.get("active") and not context.get("invalidated"):
+            self._v9_invalidate_momentum_context(context, reason)
 
     def _v9_entry_policy_decision(
         self,
@@ -3369,6 +3750,121 @@ class EdgeWalkerBot:
             source_open_to_current_percent=current_percent,
         )
         return EntryDecision(False, V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON)
+
+    def _v10_entry_policy_decision(
+        self,
+        route: BotRoute,
+        soxl_snapshot: SmaSnapshot,
+    ) -> EntryDecision | None:
+        del soxl_snapshot
+        if route.active_bot not in {MOMENTUM_BOT, INVERSE_BOT}:
+            return None
+        if self._v10_authority_state() != V10_AUTHORITY_STATE_NONE:
+            return None
+
+        context = self._v10_no_authority_context(route)
+        routed_symbol = route.routed_symbol or (
+            SOXL if route.active_bot == MOMENTUM_BOT else SOXS
+        )
+        print(
+            "[V10] No-authority suppresses directional entry: "
+            f"bot={route.active_bot} symbol={routed_symbol} "
+            f"reason={V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON} "
+            f"trust={context.get('trend_trust_score') or '--'} "
+            f"soxl={context.get('source_open_to_current_percent') or '--'}% "
+            f"raw30={context.get('early_transition_count')}/"
+            f"{context.get('early_transitions_per_hour')} "
+            f"nw30={context.get('early_non_warmup_transition_count')}/"
+            f"{context.get('early_non_warmup_transitions_per_hour')}"
+        )
+        self._record_lifecycle(
+            LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
+            bot=route.active_bot,
+            symbol=routed_symbol,
+            side="buy",
+            reason=V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+            authority_state=V10_AUTHORITY_STATE_NONE,
+            v10_no_authority_context=context,
+            shadow_pl_status="natural_exit_shadow_not_computed",
+        )
+        return EntryDecision(False, V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON)
+
+    def _v10_authority_state(self) -> str | None:
+        if self.config.v10_force_no_authority:
+            return V10_AUTHORITY_STATE_NONE
+
+        if self._momentum_authority_latched():
+            return V10_AUTHORITY_STATE_MOMENTUM
+
+        if self._v9_active_momentum_context() is not None:
+            return V10_AUTHORITY_STATE_MOMENTUM
+
+        if self._v9_observer_context() is None:
+            return None
+
+        context = self._v9_session_context()
+        if context.get("evaluated") or context.get("invalidated"):
+            return V10_AUTHORITY_STATE_NONE
+        return None
+
+    def _v10_no_authority_context(
+        self,
+        route: BotRoute,
+        *,
+        activation_reason: str | None = None,
+        authority_gate: str | None = None,
+    ) -> dict[str, Any]:
+        observer_context = self._v9_observer_context() or {}
+        v9_context = self._v9_session_context()
+        trend_trust = self._trend_trust or {}
+        regime_state = self.state_store.get_regime_state()
+        path = self._v7_source_price_path()
+        return {
+            "authority_state": V10_AUTHORITY_STATE_NONE,
+            "suppression_reason": V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
+            "authority_gate": authority_gate,
+            "observer_preset": observer_context.get("observer_preset"),
+            "activation_reason": (
+                activation_reason
+                or v9_context.get("invalidation_reason")
+                or v9_context.get("activation_reason")
+            ),
+            "route_bot": route.active_bot,
+            "route_symbol": route.routed_symbol,
+            "regime": regime_state.get("regime"),
+            "trend_trust_score": trend_trust.get("score"),
+            "trend_trust_label": trend_trust.get("label"),
+            "regime_age_minutes": trend_trust.get("regime_age_minutes"),
+            "recent_flip_count_60m": trend_trust.get("recent_flip_count_60m"),
+            "early_transition_count": observer_context.get("early_transition_count"),
+            "early_transitions_per_hour": observer_context.get(
+                "early_transitions_per_hour"
+            ),
+            "early_non_warmup_transition_count": observer_context.get(
+                "early_non_warmup_transition_count"
+            ),
+            "early_non_warmup_transitions_per_hour": observer_context.get(
+                "early_non_warmup_transitions_per_hour"
+            ),
+            "early_transition_window_minutes": observer_context.get(
+                "early_transition_window_minutes"
+            )
+            or V9_MOMENTUM_EARLY_WINDOW_MINUTES,
+            "source_open_to_current_percent": self._v10_path_percent(
+                path.current_percent if path is not None else None
+            ),
+            "source_runup_percent": self._v10_path_percent(
+                path.runup_percent if path is not None else None
+            ),
+            "source_drawdown_percent": self._v10_path_percent(
+                path.drawdown_percent if path is not None else None
+            ),
+        }
+
+    def _v10_path_percent(self, value: Decimal | None) -> float | None:
+        if value is None:
+            return None
+        return float(value.quantize(Decimal("0.01")))
 
     def _v8_entry_policy_decision(
         self,
@@ -3420,13 +3916,18 @@ class EdgeWalkerBot:
                 )
             return
 
-        if context.get("evaluated") or not self._v9_in_activation_window():
+        if context.get("evaluated"):
+            if not self._v9_can_retry_momentum_reclaim(context):
+                return
+        elif not self._v9_in_activation_window():
             return
 
         decision = self._v9_momentum_context_activation_decision(route)
         context.update(decision)
         context["evaluated"] = True
         context["evaluated_at"] = self._time_text(datetime.now(timezone.utc))
+        if context.get("active") and self.config.momentum_authority_latch_once_active:
+            self._latch_momentum_authority(context, persist=False)
         self.state_store.set_v9_momentum_context(context)
         if context.get("active"):
             print(
@@ -3445,6 +3946,36 @@ class EdgeWalkerBot:
                 f"reason={context.get('activation_reason')} "
                 f"preset={self.config.preset_name or '--'}"
             )
+
+    def _v9_can_retry_momentum_reclaim(self, context: dict[str, Any]) -> bool:
+        if not self.config.momentum_authority_reclaim_enabled:
+            return False
+        if context.get("active") or context.get("invalidated"):
+            return False
+        if not self._v9_in_reclaim_window():
+            return False
+
+        reason = str(context.get("activation_reason") or "")
+        retryable_reasons = {
+            "soxl_below_v9_momentum_floor",
+            "trend_trust_below_v9_minimum",
+            "soxl_below_reclaim_floor",
+        }
+        hard_blockers = {
+            "v10_forced_no_authority_fallback",
+            "not_momentum_context",
+            "observer_context_unavailable",
+            "first_30m_non_warmup_transition_count_not_zero",
+            "early_non_warmup_transition_pressure_too_high",
+            "early_transition_count_above_reclaim_limit",
+            "reclaim_session_non_warmup_transition_count_not_zero",
+            "trend_trust_below_reclaim_minimum",
+            "soxl_below_open_after_1030",
+            "momentum_drawdown_with_dirty_tape",
+        }
+        if any(blocker in reason for blocker in hard_blockers):
+            return False
+        return any(blocker in reason for blocker in retryable_reasons)
 
     def _v9_invalidate_momentum_context(
         self,
@@ -3473,9 +4004,91 @@ class EdgeWalkerBot:
             "evaluated": False,
         }
 
+    def _momentum_authority_latched(self) -> bool:
+        if not self.config.momentum_authority_latch_once_active:
+            return False
+        return bool(self._v9_session_context().get("momentum_authority_latched"))
+
+    def _latch_momentum_authority(
+        self,
+        context: dict[str, Any],
+        *,
+        persist: bool = True,
+    ) -> None:
+        if context.get("momentum_authority_latched"):
+            return
+        context.update(
+            {
+                "momentum_authority_latched": True,
+                "momentum_authority_latched_at": self._time_text(
+                    datetime.now(timezone.utc)
+                ),
+            }
+        )
+        if persist:
+            self.state_store.set_v9_momentum_context(context)
+
     def _v9_observer_context(self) -> dict[str, Any] | None:
         context = self.config.v9_observer_context
-        return context if isinstance(context, dict) else None
+        if not isinstance(context, dict):
+            return None
+        if context.get("runtime_observer"):
+            runtime_context = self._v9_runtime_observer_context()
+            return {
+                **context,
+                **runtime_context,
+                "observer_preset": (
+                    context.get("observer_preset")
+                    or runtime_context.get("observer_preset")
+                ),
+            }
+        return context
+
+    def _v9_runtime_observer_context(self) -> dict[str, Any]:
+        window_minutes = V9_MOMENTUM_EARLY_WINDOW_MINUTES
+        session_open = self._v9_session_open()
+        session_window_close = self._v9_session_window_close(window_minutes)
+        transition_count = self._v9_transition_count_between(
+            session_open,
+            session_window_close,
+            include_warmup=True,
+        )
+        non_warmup_transition_count = self._v9_transition_count_between(
+            session_open,
+            session_window_close,
+            include_warmup=False,
+        )
+        transitions_per_hour = (
+            Decimal(transition_count)
+            / Decimal(str(window_minutes))
+            * Decimal("60")
+        )
+        non_warmup_transitions_per_hour = (
+            Decimal(non_warmup_transition_count)
+            / Decimal(str(window_minutes))
+            * Decimal("60")
+        )
+        trend_score = self._trend_trust.get("score") if self._trend_trust else None
+        path = self._v7_source_price_path()
+        source_percent = path.current_percent if path is not None else None
+        return {
+            "observer_preset": "BalancedPure_LiveObserver",
+            "early_transition_count": transition_count,
+            "early_transitions_per_hour": float(
+                transitions_per_hour.quantize(Decimal("0.01"))
+            ),
+            "early_non_warmup_transition_count": non_warmup_transition_count,
+            "early_non_warmup_transitions_per_hour": float(
+                non_warmup_transitions_per_hour.quantize(Decimal("0.01"))
+            ),
+            "trend_trust_score": int(trend_score)
+            if isinstance(trend_score, (int, float))
+            else None,
+            "source_open_to_current_percent": self._v10_path_percent(
+                source_percent,
+            ),
+            "early_transition_window_minutes": window_minutes,
+        }
 
     def _v9_observer_decimal(
         self,
@@ -3552,30 +4165,56 @@ class EdgeWalkerBot:
             self._v9_momentum_context_invalidation_reason()
         )
 
+        if self.config.v10_force_no_authority:
+            reasons.append("v10_forced_no_authority_fallback")
         if not self._v9_is_momentum_context_candidate(route):
             reasons.append("not_momentum_context")
         if observer_context is None:
             reasons.append("observer_context_unavailable")
-        if source_percent is None or source_percent < V9_MOMENTUM_MIN_SOURCE_PERCENT:
+        if (
+            source_percent is None
+            or source_percent < self.config.momentum_authority_min_source_percent
+        ):
             reasons.append("soxl_below_v9_momentum_floor")
         if non_warmup_transition_count is None or non_warmup_transition_count != 0:
             reasons.append("first_30m_non_warmup_transition_count_not_zero")
         if (
             non_warmup_transitions_per_hour is None
-            or non_warmup_transitions_per_hour >= V9_MOMENTUM_MAX_TRANSITIONS_PER_HOUR
+            or non_warmup_transitions_per_hour
+            >= self.config.momentum_authority_max_transitions_per_hour
         ):
             reasons.append("early_non_warmup_transition_pressure_too_high")
-        if trust_score is None or trust_score < V9_MOMENTUM_MIN_TREND_TRUST_SCORE:
+        if (
+            trust_score is None
+            or trust_score < self.config.momentum_authority_min_trust_score
+        ):
             reasons.append("trend_trust_below_v9_minimum")
         if pre_activation_invalidation_reason:
             reasons.append(pre_activation_invalidation_reason)
 
-        active = not reasons
-        reason = (
-            V9_MOMENTUM_CONTEXT_ACTIVATION_REASON
-            if active
-            else ",".join(reasons) or "v9_momentum_context_not_qualified"
+        reclaim = self._v9_momentum_reclaim_activation_decision(
+            observer_context=observer_context,
+            route=route,
+            transition_count=transition_count,
+            non_warmup_transition_count=non_warmup_transition_count,
+            trust_score=trust_score,
+            pre_activation_invalidation_reason=pre_activation_invalidation_reason,
         )
+        active = not reasons
+        reclaim_active = bool(reclaim.get("active")) if reclaim is not None else False
+        if reasons and reclaim_active:
+            active = True
+            reason = V9_MOMENTUM_CONTEXT_RECLAIM_REASON
+            source_percent = reclaim.get("source_percent")
+        elif reasons and reclaim is not None and self._v9_in_reclaim_window():
+            reason = str(reclaim.get("reason") or "v9_momentum_reclaim_not_qualified")
+        else:
+            reason = (
+                V9_MOMENTUM_CONTEXT_ACTIVATION_REASON
+                if active
+                else ",".join(reasons) or "v9_momentum_context_not_qualified"
+            )
+
         return {
             "active": active,
             "invalidated": False,
@@ -3604,11 +4243,90 @@ class EdgeWalkerBot:
             "trend_trust_score": trust_score,
             "source_open_to_current_percent": (
                 float(source_percent.quantize(Decimal("0.01")))
-                if source_percent is not None
+                if isinstance(source_percent, Decimal)
+                else None
+            ),
+            "reclaim_enabled": self.config.momentum_authority_reclaim_enabled,
+            "reclaim_reason": reclaim.get("reason") if reclaim is not None else None,
+            "reclaim_session_non_warmup_transition_count": (
+                reclaim.get("session_non_warmup_transition_count")
+                if reclaim is not None
                 else None
             ),
             "activated_at": (
                 self._time_text(datetime.now(timezone.utc)) if active else None
+            ),
+        }
+
+    def _v9_momentum_reclaim_activation_decision(
+        self,
+        *,
+        observer_context: dict[str, Any] | None,
+        route: BotRoute,
+        transition_count: int | None,
+        non_warmup_transition_count: int | None,
+        trust_score: int | None,
+        pre_activation_invalidation_reason: str | None,
+    ) -> dict[str, Any] | None:
+        if not self.config.momentum_authority_reclaim_enabled:
+            return None
+
+        reasons: list[str] = []
+        path = self._v7_source_price_path()
+        source_percent = path.current_percent if path is not None else None
+        session_non_warmup_transition_count = self._v9_non_warmup_flip_count_since(
+            self._v9_session_open(),
+        )
+
+        if self.config.v10_force_no_authority:
+            reasons.append("v10_forced_no_authority_fallback")
+        if not self._v9_is_momentum_context_candidate(route):
+            reasons.append("not_momentum_context")
+        if observer_context is None:
+            reasons.append("observer_context_unavailable")
+        if not self._v9_in_reclaim_window():
+            reasons.append("outside_momentum_reclaim_window")
+        if (
+            source_percent is None
+            or source_percent
+            < self.config.momentum_authority_reclaim_min_source_percent
+        ):
+            reasons.append("soxl_below_reclaim_floor")
+        if (
+            transition_count is None
+            or transition_count
+            > self.config.momentum_authority_reclaim_max_raw_transition_count
+        ):
+            reasons.append("early_transition_count_above_reclaim_limit")
+        if (
+            non_warmup_transition_count is None
+            or non_warmup_transition_count
+            > self.config.momentum_authority_reclaim_max_non_warmup_transition_count
+        ):
+            reasons.append("first_30m_non_warmup_transition_count_not_zero")
+        if (
+            session_non_warmup_transition_count
+            > self.config.momentum_authority_reclaim_max_non_warmup_transition_count
+        ):
+            reasons.append("reclaim_session_non_warmup_transition_count_not_zero")
+        if (
+            trust_score is None
+            or trust_score < self.config.momentum_authority_reclaim_min_trust_score
+        ):
+            reasons.append("trend_trust_below_reclaim_minimum")
+        if pre_activation_invalidation_reason:
+            reasons.append(pre_activation_invalidation_reason)
+
+        return {
+            "active": not reasons,
+            "reason": (
+                V9_MOMENTUM_CONTEXT_RECLAIM_REASON
+                if not reasons
+                else ",".join(reasons)
+            ),
+            "source_percent": source_percent,
+            "session_non_warmup_transition_count": (
+                session_non_warmup_transition_count
             ),
         }
 
@@ -3660,6 +4378,15 @@ class EdgeWalkerBot:
         activation_close = first_30_close + V9_MOMENTUM_ACTIVATION_GRACE_MINUTES
         return first_30_close <= minutes <= activation_close
 
+    def _v9_in_reclaim_window(self) -> bool:
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        minutes = (now_ny.hour * 60 + now_ny.minute) - (9 * 60 + 30)
+        return (
+            self.config.momentum_authority_reclaim_start_minutes
+            <= minutes
+            <= self.config.momentum_authority_reclaim_end_minutes
+        )
+
     def _v9_session_date(self) -> str:
         return datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
 
@@ -3686,6 +4413,19 @@ class EdgeWalkerBot:
         start: datetime,
         end: datetime | None,
     ) -> int:
+        return self._v9_transition_count_between(
+            start,
+            end,
+            include_warmup=False,
+        )
+
+    def _v9_transition_count_between(
+        self,
+        start: datetime,
+        end: datetime | None,
+        *,
+        include_warmup: bool,
+    ) -> int:
         regime_state = self.state_store.get_regime_state()
         transitions = regime_state.get("transitions")
         if not isinstance(transitions, list):
@@ -3696,7 +4436,7 @@ class EdgeWalkerBot:
                 continue
             from_regime = str(transition.get("from") or "").upper()
             to_regime = str(transition.get("to") or "").upper()
-            if from_regime == WARMUP or to_regime == WARMUP:
+            if not include_warmup and (from_regime == WARMUP or to_regime == WARMUP):
                 continue
             transition_at = parse_market_timestamp(transition.get("at"))
             if transition_at is None or transition_at < start:
@@ -4119,6 +4859,146 @@ class EdgeWalkerBot:
         if not position:
             return Decimal("0")
         return decimal_from_api(position.get("qty"), "position qty")
+
+    def _maybe_exit_momentum_authority_revoked_position(
+        self,
+        route: BotRoute,
+        positions: dict[str, dict[str, Any] | None],
+        orders: list[dict[str, Any]],
+        regime: str,
+    ) -> str | None:
+        if not (
+            self.config.momentum_authority_required
+            and self.config.momentum_authority_revoke_exits
+        ):
+            return None
+
+        position = positions.get(SOXL)
+        if self._position_qty(position) <= 0:
+            return None
+
+        owner = self.state_store.get_position_owner(SOXL)
+        if owner != MOMENTUM_BOT:
+            return None
+
+        block_reason = self._momentum_authority_block_reason()
+        if block_reason is None:
+            return None
+
+        return self._close_momentum_authority_revoked_position(
+            SOXL,
+            position,
+            orders,
+            regime,
+            route.active_bot,
+            block_reason,
+        )
+
+    def _close_momentum_authority_revoked_position(
+        self,
+        symbol: str,
+        position: dict[str, Any] | None,
+        orders: list[dict[str, Any]],
+        regime: str,
+        active_bot: str,
+        revoke_reason: str,
+    ) -> str:
+        symbol_orders = [order for order in orders if order.get("symbol") == symbol]
+        if any(order.get("side") == "sell" for order in symbol_orders):
+            print(
+                f"[RISK] {symbol}: Momentum authority revoked, sell order already open; "
+                "entry_signal=False action_taken=wait_for_momentum_authority_revoked_close"
+            )
+            return "wait_for_momentum_authority_revoked_close"
+        if any(order.get("side") == "buy" for order in symbol_orders):
+            print(
+                f"[RISK] {symbol}: Momentum authority revoked, buy order still open; "
+                "entry_signal=False action_taken=wait_for_momentum_authority_revoked_close_order"
+            )
+            return "wait_for_momentum_authority_revoked_close_order"
+
+        qty = self._position_qty(position).quantize(
+            FRACTIONAL_QTY_STEP,
+            rounding=ROUND_DOWN,
+        )
+        if qty <= 0:
+            print(
+                f"[RISK] {symbol}: authority-revoked Momentum position not found; "
+                "entry_signal=False action_taken=noop"
+            )
+            return "noop"
+
+        lifecycle_context = self._route_invalidation_context(
+            symbol,
+            position,
+            qty,
+            regime,
+            active_bot,
+            MOMENTUM_BOT,
+        )
+        lifecycle_context["authority_revoke_reason"] = revoke_reason
+        print(
+            f"[RISK] {symbol}: Momentum authority revoked; "
+            f"reason={revoke_reason}; selling qty={format_decimal(qty)}."
+        )
+        self._record_lifecycle(
+            LIFECYCLE_INTENDED_EXIT,
+            bot=MOMENTUM_BOT,
+            symbol=symbol,
+            side="sell",
+            qty=qty,
+            reason=MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
+            regime=regime,
+            active_bot=active_bot,
+            owner=MOMENTUM_BOT,
+            authority_revoke_reason=revoke_reason,
+            lifecycle_context=lifecycle_context,
+        )
+        try:
+            order = self.client.submit_market_sell_qty(symbol, qty)
+        except BotError as exc:
+            self._record_lifecycle(
+                LIFECYCLE_ORDER_REJECTED,
+                bot=MOMENTUM_BOT,
+                symbol=symbol,
+                side="sell",
+                qty=qty,
+                reason=MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
+                regime=regime,
+                active_bot=active_bot,
+                owner=MOMENTUM_BOT,
+                authority_revoke_reason=revoke_reason,
+                error=str(exc),
+                broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
+                lifecycle_context=lifecycle_context,
+            )
+            raise
+        self._record_lifecycle(
+            LIFECYCLE_ORDER_SUBMITTED,
+            bot=MOMENTUM_BOT,
+            symbol=symbol,
+            side="sell",
+            qty=qty,
+            reason=MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
+            regime=regime,
+            active_bot=active_bot,
+            owner=MOMENTUM_BOT,
+            authority_revoke_reason=revoke_reason,
+            order=order,
+            lifecycle_context=lifecycle_context,
+        )
+        self.order_tracker.track_submitted_order(
+            order,
+            MOMENTUM_BOT,
+            MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
+            lifecycle_context,
+        )
+        self.state_store.clear_symbol(symbol)
+        print(
+            "entry_signal=False "
+            "action_taken=close_momentum_authority_revoked_position_no_same_cycle_reversal"
+        )
+        return "close_momentum_authority_revoked_position_no_same_cycle_reversal"
 
     def _close_stale_position(
         self,

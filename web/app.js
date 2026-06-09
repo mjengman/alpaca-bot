@@ -40,6 +40,7 @@ const state = {
   researchProgressStartedAt: null,
   researchProgressLabel: "",
   lastResearchResult: null,
+  activeStrategyConfig: null,
   tooltipsSetup: false,
 };
 
@@ -51,7 +52,10 @@ const SECTION_COLLAPSED_PREFIX = "edgewalker-section-collapsed:";
 const NARRATIVE_CACHE_KEY = "edgewalker-narrative-cache-v2";
 const RESEARCH_PRESETS_KEY = "edgewalker-research-presets-v1";
 const PRESET_AUTHORITY_MODE_KEY = "edgewalker-preset-authority-mode-v1";
+const ACTIVE_STRATEGY_CONFIG_KEY = "edgewalker-active-strategy-config-v1";
 const PRESET_AUTHORITY_MODE_V6 = "V6_0945";
+const GO_LIVE_ROUTER_NAME = "Router_StrictAuthority_ChopFirewall";
+const GO_LIVE_ROUTER_VERSION = "v3";
 const REFRESH_INTERVAL_MS = 2000;
 const API_BASE =
   window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
@@ -169,6 +173,13 @@ const els = {
   selectAllResearchComparePresets: document.querySelector(
     "#selectAllResearchComparePresetsButton",
   ),
+  seedChopResearchPresets: document.querySelector("#seedChopResearchPresetsButton"),
+  seedMomentumResearchPresets: document.querySelector(
+    "#seedMomentumResearchPresetsButton",
+  ),
+  seedCombinedResearchPresets: document.querySelector(
+    "#seedCombinedResearchPresetsButton",
+  ),
   saveResearchPreset: document.querySelector("#saveResearchPresetButton"),
   loadResearchPreset: document.querySelector("#loadResearchPresetButton"),
   deleteResearchPreset: document.querySelector("#deleteResearchPresetButton"),
@@ -176,6 +187,8 @@ const els = {
   runResearchCompare: document.querySelector("#runResearchCompareButton"),
   runShadowRouter: document.querySelector("#runShadowRouterButton"),
   researchResults: document.querySelector("#researchResults"),
+  applyGoLiveRouter: document.querySelector("#applyGoLiveRouterButton"),
+  liveStrategyBadge: document.querySelector("#liveStrategyBadge"),
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
   mode: document.querySelector("#modeValue"),
@@ -254,7 +267,7 @@ document.body.appendChild(tooltipBubble);
 
 const soundCache = new Map();
 
-function payloadFromForm() {
+function strategyControlsPayload() {
   const selectedDirectionalMode =
     [...els.directionalModes].find((input) => input.checked)?.value || "BALANCED";
   const sizingValue = els.positionSizing ? els.positionSizing.value : "FIXED";
@@ -287,6 +300,13 @@ function payloadFromForm() {
     fastSmaMinutes: els.fast.value,
     slowSmaMinutes: els.slow.value,
     dryRun: state.dryRun,
+  };
+}
+
+function payloadFromForm() {
+  return {
+    ...(state.activeStrategyConfig || {}),
+    ...strategyControlsPayload(),
     ...presetAuthorityPayload(),
   };
 }
@@ -584,12 +604,564 @@ function setupPresetAuthorityMode() {
   });
 }
 
+function goLiveRouterFirewallConfig() {
+  const current = strategyControlsPayload();
+  return {
+    ...current,
+    presetName: GO_LIVE_ROUTER_NAME,
+    presetVersion: GO_LIVE_ROUTER_VERSION,
+    presetAuthorityMode: "OFF",
+    presetAuthorityPresets: [],
+    enabledBots: ["MomentumBot", "ChopBot"],
+    directionalMode: "BALANCED",
+    directionalMaxExtensionPercent: "0.40",
+    directionalStrongChaseMaxExtensionPercent: "1.00",
+    directionalMinStrength: "MODERATE",
+    directionalCooldownMinutes: "4",
+    regimeGapThreshold: "0.20",
+    regimeExitGapThreshold: "0.10",
+    fastSmaMinutes: "5",
+    slowSmaMinutes: "20",
+    trailPercent: "1.50",
+    momentumAuthorityRequired: true,
+    momentumAuthorityRevokeExits: true,
+    momentumAuthorityLatchOnceActive: false,
+    momentumAuthorityMinTrustScore: "66",
+    momentumAuthorityMinSourcePercent: "4.00",
+    momentumAuthorityMaxTransitionsPerHour: "8",
+    momentumAuthorityReclaimEnabled: false,
+    momentumAuthorityReclaimMinTrustScore: "58",
+    momentumAuthorityReclaimMinSourcePercent: "4.00",
+    momentumAuthorityReclaimMaxRawTransitionCount: "1",
+    momentumAuthorityReclaimMaxNonWarmupTransitionCount: "0",
+    momentumAuthorityReclaimStartMinutes: "60",
+    momentumAuthorityReclaimEndMinutes: "60",
+    chopEntryDiscountPercent: "0.35",
+    chopPermissionMode: "FIREWALL",
+    chopPermissionMaxAbsSourcePercent: "2.00",
+    v9ObserverContext: {
+      observer_preset: "BalancedPure_LiveObserver",
+      runtime_observer: true,
+      execution_rights: "none",
+    },
+    v10ForceNoAuthority: false,
+  };
+}
+
+function writeActiveStrategyConfig(config) {
+  state.activeStrategyConfig = config && typeof config === "object" ? config : null;
+  try {
+    if (state.activeStrategyConfig) {
+      localStorage.setItem(
+        ACTIVE_STRATEGY_CONFIG_KEY,
+        JSON.stringify(state.activeStrategyConfig),
+      );
+    } else {
+      localStorage.removeItem(ACTIVE_STRATEGY_CONFIG_KEY);
+    }
+  } catch {
+    setResearchMessage("Could not persist the active live build in this browser.", "warning");
+  }
+  syncActiveStrategyBadge();
+}
+
+function readActiveStrategyConfig() {
+  try {
+    const raw = localStorage.getItem(ACTIVE_STRATEGY_CONFIG_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function syncActiveStrategyBadge() {
+  if (!els.liveStrategyBadge) return;
+  const activeName = state.activeStrategyConfig?.presetName;
+  els.liveStrategyBadge.classList.toggle("is-active", Boolean(activeName));
+  els.liveStrategyBadge.textContent = activeName
+    ? `${activeName} · CP-FW`
+    : "Manual controls";
+  els.liveStrategyBadge.dataset.tooltip = activeName
+    ? "Turn On will post the validated StrictAuthority plus ChopFirewall router payload."
+    : "Turn On will post only the visible manual Strategy Controls plus any selected authority mode.";
+}
+
+function setupActiveStrategyConfig() {
+  const saved = readActiveStrategyConfig();
+  if (!saved) {
+    syncActiveStrategyBadge();
+    return;
+  }
+  state.activeStrategyConfig = saved;
+  applyStrategyConfig(saved);
+  syncActiveStrategyBadge();
+}
+
+function applyGoLiveRouterFirewall() {
+  const config = goLiveRouterFirewallConfig();
+  if (els.presetAuthorityMode) {
+    els.presetAuthorityMode.value = "OFF";
+    localStorage.setItem(PRESET_AUTHORITY_MODE_KEY, "OFF");
+  }
+  applyStrategyConfig(config);
+  writeActiveStrategyConfig(config);
+  setResearchMessage(
+    "Go-live build applied: StrictAuthority Momentum plus ChopFirewall Router. Turn On when ready.",
+    "success",
+  );
+}
+
 function writeResearchPresets(presets) {
   try {
     localStorage.setItem(RESEARCH_PRESETS_KEY, JSON.stringify(presets));
   } catch {
     setResearchMessage("Could not save preset library in this browser.", "danger");
   }
+}
+
+function chopResearchBaseConfig() {
+  const roles = authorityLeadPresets();
+  const sourceConfig = roles.generalist?.config || payloadFromForm();
+  const base = { ...sourceConfig };
+  delete base.dryRun;
+  return {
+    ...base,
+    positionSizingMode: "FIXED",
+    positionNotional: "25",
+    positionAllocationPercent: "25",
+    presetAuthorityMode: "OFF",
+    presetAuthorityPresets: [],
+    enabledBots: ["ChopBot"],
+    directionalMode: "CONSERVATIVE",
+    chopPermissionMode: "OFF",
+    chopPermissionMaxAbsSourcePercent: "2.00",
+    momentumAuthorityMinTrustScore: "66",
+    momentumAuthorityMinSourcePercent: "4.00",
+    momentumAuthorityMaxTransitionsPerHour: "8",
+    v10ForceNoAuthority: false,
+  };
+}
+
+function chopResearchCandidatePresets() {
+  const base = chopResearchBaseConfig();
+  const savedAt = new Date().toISOString();
+  const definitions = [
+    {
+      name: "Chop_Ungated",
+      notes:
+        "Round 4 Chop permission baseline: Chop_Gap020 with no permission gate, used to measure raw ChopBot damage.",
+      overrides: {
+        chopEntryDiscountPercent: "0.35",
+        trailPercent: "1.10",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.08",
+        directionalCooldownMinutes: "4",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        chopPermissionMode: "OFF",
+      },
+    },
+    {
+      name: "Chop_Gated_Loose",
+      notes:
+        "Round 4 Chop permission candidate: Chop_Gap020 trades only when strict Momentum authority is inactive and dirty-tape drawdown context is absent.",
+      overrides: {
+        chopEntryDiscountPercent: "0.35",
+        trailPercent: "1.10",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.08",
+        directionalCooldownMinutes: "4",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        chopPermissionMode: "LOOSE",
+      },
+    },
+    {
+      name: "Chop_Gated_Strict",
+      notes:
+        "Round 4 Chop permission candidate: Loose gate plus first-30m raw transitions must be zero and live SOXL must stay within a +/-2.00% non-directional band.",
+      overrides: {
+        chopEntryDiscountPercent: "0.35",
+        trailPercent: "1.10",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.08",
+        directionalCooldownMinutes: "4",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        chopPermissionMode: "STRICT",
+        chopPermissionMaxAbsSourcePercent: "2.00",
+      },
+    },
+  ];
+
+  return definitions.map((definition) => {
+    const version = "v4";
+    return {
+      id: researchPresetId(definition.name, version),
+      name: definition.name,
+      version,
+      notes: definition.notes,
+      saved_at: savedAt,
+      config: {
+        ...base,
+        ...definition.overrides,
+      },
+    };
+  });
+}
+
+function momentumResearchBaseConfig() {
+  const roles = authorityLeadPresets();
+  const sourceConfig =
+    roles.momentum?.config || roles.generalist?.config || payloadFromForm();
+  const base = { ...sourceConfig };
+  delete base.dryRun;
+  return {
+    ...base,
+    positionSizingMode: "FIXED",
+    positionNotional: "25",
+    positionAllocationPercent: "25",
+    presetAuthorityMode: "OFF",
+    presetAuthorityPresets: [],
+    enabledBots: ["MomentumBot"],
+    momentumAuthorityRequired: false,
+    momentumAuthorityRevokeExits: false,
+    momentumAuthorityLatchOnceActive: false,
+    momentumAuthorityMinTrustScore: "45",
+    momentumAuthorityMinSourcePercent: "2.00",
+    momentumAuthorityMaxTransitionsPerHour: "8",
+    momentumAuthorityReclaimEnabled: false,
+    momentumAuthorityReclaimMinTrustScore: "58",
+    momentumAuthorityReclaimMinSourcePercent: "4.00",
+    momentumAuthorityReclaimMaxRawTransitionCount: "1",
+    momentumAuthorityReclaimMaxNonWarmupTransitionCount: "0",
+    momentumAuthorityReclaimStartMinutes: "45",
+    momentumAuthorityReclaimEndMinutes: "60",
+    chopEntryDiscountPercent: "0.35",
+    v10ForceNoAuthority: false,
+  };
+}
+
+function momentumResearchCandidatePresets() {
+  const base = momentumResearchBaseConfig();
+  const savedAt = new Date().toISOString();
+  const definitions = [
+    {
+      name: "Momentum_BalancedTight_CurrentV10",
+      notes:
+        "Round 7 baseline: BalancedTight executable MomentumBot with the current v10 authority behavior.",
+      overrides: {
+        directionalMode: "BALANCED",
+        directionalMaxExtensionPercent: "0.40",
+        directionalStrongChaseMaxExtensionPercent: "1.00",
+        directionalMinStrength: "MODERATE",
+        directionalCooldownMinutes: "4",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.10",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        trailPercent: "1.50",
+        momentumAuthorityRequired: false,
+        momentumAuthorityRevokeExits: false,
+        momentumAuthorityLatchOnceActive: false,
+        momentumAuthorityMinTrustScore: "45",
+        momentumAuthorityMinSourcePercent: "2.00",
+        momentumAuthorityMaxTransitionsPerHour: "8",
+        momentumAuthorityReclaimEnabled: false,
+        v10ForceNoAuthority: false,
+      },
+    },
+    {
+      name: "Momentum_BalancedTight_Permission",
+      notes:
+        "Round 7 executable baseline: BalancedTight can trade only while Momentum authority is active, with dirty-tape revoke exits enabled.",
+      overrides: {
+        directionalMode: "BALANCED",
+        directionalMaxExtensionPercent: "0.40",
+        directionalStrongChaseMaxExtensionPercent: "1.00",
+        directionalMinStrength: "MODERATE",
+        directionalCooldownMinutes: "4",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.10",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        trailPercent: "1.50",
+        momentumAuthorityRequired: true,
+        momentumAuthorityRevokeExits: true,
+        momentumAuthorityLatchOnceActive: false,
+        momentumAuthorityMinTrustScore: "45",
+        momentumAuthorityMinSourcePercent: "2.00",
+        momentumAuthorityMaxTransitionsPerHour: "8",
+        momentumAuthorityReclaimEnabled: false,
+        v10ForceNoAuthority: false,
+      },
+    },
+    {
+      name: "Momentum_BalancedTight_StrictAuthority",
+      notes:
+        "Round 7 incumbent: BalancedTight requires active Momentum authority plus stronger observer trust and a larger SOXL reclaim before trading, with revoke exits enabled.",
+      overrides: {
+        directionalMode: "BALANCED",
+        directionalMaxExtensionPercent: "0.40",
+        directionalStrongChaseMaxExtensionPercent: "1.00",
+        directionalMinStrength: "MODERATE",
+        directionalCooldownMinutes: "4",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.10",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        trailPercent: "1.50",
+        momentumAuthorityRequired: true,
+        momentumAuthorityRevokeExits: true,
+        momentumAuthorityLatchOnceActive: false,
+        momentumAuthorityMinTrustScore: "66",
+        momentumAuthorityMinSourcePercent: "4.00",
+        momentumAuthorityMaxTransitionsPerHour: "8",
+        momentumAuthorityReclaimEnabled: false,
+        v10ForceNoAuthority: false,
+      },
+    },
+    {
+      name: "Momentum_BalancedTight_StrictReclaim",
+      notes:
+        "Round 7 reclaim probe: start from StrictAuthority, then allow a 10:30 retry only if live SOXL has reclaimed, first-30m noise stayed clean, and no non-warmup flip appeared by reclaim time.",
+      overrides: {
+        directionalMode: "BALANCED",
+        directionalMaxExtensionPercent: "0.40",
+        directionalStrongChaseMaxExtensionPercent: "1.00",
+        directionalMinStrength: "MODERATE",
+        directionalCooldownMinutes: "4",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.10",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        trailPercent: "1.50",
+        momentumAuthorityRequired: true,
+        momentumAuthorityRevokeExits: true,
+        momentumAuthorityLatchOnceActive: false,
+        momentumAuthorityMinTrustScore: "66",
+        momentumAuthorityMinSourcePercent: "4.00",
+        momentumAuthorityMaxTransitionsPerHour: "8",
+        momentumAuthorityReclaimEnabled: true,
+        momentumAuthorityReclaimMinTrustScore: "58",
+        momentumAuthorityReclaimMinSourcePercent: "4.00",
+        momentumAuthorityReclaimMaxRawTransitionCount: "1",
+        momentumAuthorityReclaimMaxNonWarmupTransitionCount: "0",
+        momentumAuthorityReclaimStartMinutes: "60",
+        momentumAuthorityReclaimEndMinutes: "60",
+        v10ForceNoAuthority: false,
+      },
+    },
+    {
+      name: "Momentum_BalancedPure_Shadow",
+      notes:
+        "Round 7 shadow probe: raw BalancedPure signal is preserved for diagnostics without execution authority.",
+      overrides: {
+        directionalMode: "BALANCED",
+        directionalMaxExtensionPercent: "0.50",
+        directionalStrongChaseMaxExtensionPercent: "1.00",
+        directionalMinStrength: "MODERATE",
+        directionalCooldownMinutes: "4",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.10",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        trailPercent: "1.50",
+        momentumAuthorityRequired: true,
+        momentumAuthorityRevokeExits: false,
+        momentumAuthorityLatchOnceActive: false,
+        momentumAuthorityMinTrustScore: "45",
+        momentumAuthorityMinSourcePercent: "2.00",
+        momentumAuthorityMaxTransitionsPerHour: "8",
+        momentumAuthorityReclaimEnabled: false,
+        v10ForceNoAuthority: true,
+      },
+    },
+  ];
+
+  return definitions.map((definition) => {
+    const version = "v7";
+    return {
+      id: researchPresetId(definition.name, version),
+      name: definition.name,
+      version,
+      notes: definition.notes,
+      saved_at: savedAt,
+      config: {
+        ...base,
+        ...definition.overrides,
+      },
+    };
+  });
+}
+
+function combinedRouterValidationBaseConfig() {
+  const roles = authorityLeadPresets();
+  const sourceConfig =
+    roles.momentum?.config || roles.generalist?.config || payloadFromForm();
+  const base = { ...sourceConfig };
+  delete base.dryRun;
+  return {
+    ...base,
+    positionSizingMode: "FIXED",
+    positionNotional: "25",
+    positionAllocationPercent: "25",
+    presetAuthorityMode: "OFF",
+    presetAuthorityPresets: [],
+    directionalMode: "BALANCED",
+    directionalMaxExtensionPercent: "0.40",
+    directionalStrongChaseMaxExtensionPercent: "1.00",
+    directionalMinStrength: "MODERATE",
+    directionalCooldownMinutes: "4",
+    regimeGapThreshold: "0.20",
+    regimeExitGapThreshold: "0.10",
+    fastSmaMinutes: "5",
+    slowSmaMinutes: "20",
+    trailPercent: "1.50",
+    momentumAuthorityRequired: true,
+    momentumAuthorityRevokeExits: true,
+    momentumAuthorityLatchOnceActive: false,
+    momentumAuthorityMinTrustScore: "66",
+    momentumAuthorityMinSourcePercent: "4.00",
+    momentumAuthorityMaxTransitionsPerHour: "8",
+    momentumAuthorityReclaimEnabled: false,
+    chopEntryDiscountPercent: "0.35",
+    chopPermissionMode: "FIREWALL",
+    chopPermissionMaxAbsSourcePercent: "2.00",
+    v10ForceNoAuthority: false,
+  };
+}
+
+function combinedRouterValidationPresets() {
+  const base = combinedRouterValidationBaseConfig();
+  const savedAt = new Date().toISOString();
+  const definitions = [
+    {
+      name: "Generalist_BalancedPure_Observer",
+      notes:
+        "Combined Router validation observer: BalancedPure telemetry source only, with execution suppressed.",
+      overrides: {
+        enabledBots: ["MomentumBot"],
+        directionalMode: "BALANCED",
+        directionalMaxExtensionPercent: "0.50",
+        directionalStrongChaseMaxExtensionPercent: "1.00",
+        directionalMinStrength: "MODERATE",
+        directionalCooldownMinutes: "4",
+        regimeGapThreshold: "0.20",
+        regimeExitGapThreshold: "0.10",
+        fastSmaMinutes: "5",
+        slowSmaMinutes: "20",
+        trailPercent: "1.50",
+        momentumAuthorityRequired: true,
+        momentumAuthorityRevokeExits: false,
+        momentumAuthorityLatchOnceActive: false,
+        momentumAuthorityMinTrustScore: "45",
+        momentumAuthorityMinSourcePercent: "2.00",
+        momentumAuthorityMaxTransitionsPerHour: "8",
+        momentumAuthorityReclaimEnabled: false,
+        chopPermissionMode: "OFF",
+        v10ForceNoAuthority: true,
+      },
+    },
+    {
+      name: "Router_StrictAuthority_ChopFirewall",
+      notes:
+        "Combined Router validation: MomentumBot uses BalancedTight StrictAuthority; ChopBot uses Chop_Gap020 with the dirty-tape firewall gate; BalancedPure remains observer-only.",
+      overrides: {
+        enabledBots: ["MomentumBot", "ChopBot"],
+        chopPermissionMode: "FIREWALL",
+      },
+    },
+    {
+      name: "Momentum_StrictAuthority_Only",
+      notes:
+        "Combined Router validation control: MomentumBot BalancedTight StrictAuthority only, with ChopBot disabled.",
+      overrides: {
+        enabledBots: ["MomentumBot"],
+        chopPermissionMode: "OFF",
+      },
+    },
+  ];
+
+  return definitions.map((definition) => {
+    const version = "v3";
+    return {
+      id: researchPresetId(definition.name, version),
+      name: definition.name,
+      version,
+      notes: definition.notes,
+      saved_at: savedAt,
+      config: {
+        ...base,
+        ...definition.overrides,
+      },
+    };
+  });
+}
+
+function seedResearchCandidatePresets(candidates, successMessage) {
+  const candidateIds = new Set(candidates.map((preset) => preset.id));
+  const candidateNames = new Set(candidates.map((preset) => preset.name));
+  const presets = readResearchPresets().filter(
+    (preset) => !candidateIds.has(preset.id) && !candidateNames.has(preset.name),
+  );
+  presets.push(...candidates);
+  presets.sort((a, b) => `${a.name} ${a.version}`.localeCompare(`${b.name} ${b.version}`));
+  writeResearchPresets(presets);
+  renderResearchPresetLibrary(candidates[0]?.id || "");
+  if (els.researchComparePresets) {
+    Array.from(els.researchComparePresets.options).forEach((option) => {
+      option.selected = candidateIds.has(option.value);
+    });
+  }
+  syncResearchPresetButtons();
+  setResearchMessage(successMessage, "success");
+}
+
+function seedChopResearchPresets() {
+  let candidates;
+  try {
+    candidates = chopResearchCandidatePresets();
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+    return;
+  }
+  seedResearchCandidatePresets(
+    candidates,
+    "Seeded and selected 3 Round 4 Chop permission candidates. Run them across 20 dates for 60 replays plus Flat control.",
+  );
+}
+
+function seedMomentumResearchPresets() {
+  let candidates;
+  try {
+    candidates = momentumResearchCandidatePresets();
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+    return;
+  }
+  seedResearchCandidatePresets(
+    candidates,
+    "Seeded and selected 5 Round 7 Momentum authority candidates. Run them across 20 dates for 100 replays plus Flat control.",
+  );
+}
+
+function seedCombinedResearchPresets() {
+  let candidates;
+  try {
+    candidates = combinedRouterValidationPresets();
+  } catch (error) {
+    setResearchMessage(error.message, "danger");
+    return;
+  }
+  seedResearchCandidatePresets(
+    candidates,
+    "Seeded and selected BalancedPure observer, ChopFirewall Router, and StrictAuthority-only control. Run each 20-date pack for 60 replays plus Flat control.",
+  );
 }
 
 function renderResearchPresetLibrary(selectedId = "") {
@@ -645,6 +1217,18 @@ function syncResearchPresetButtons() {
   }
   if (els.selectAllResearchComparePresets) {
     els.selectAllResearchComparePresets.disabled = locked || !hasCompareOptions;
+  }
+  if (els.seedChopResearchPresets) {
+    els.seedChopResearchPresets.disabled = locked;
+  }
+  if (els.seedMomentumResearchPresets) {
+    els.seedMomentumResearchPresets.disabled = locked;
+  }
+  if (els.seedCombinedResearchPresets) {
+    els.seedCombinedResearchPresets.disabled = locked;
+  }
+  if (els.applyGoLiveRouter) {
+    els.applyGoLiveRouter.disabled = locked;
   }
   if (els.runResearchCompare) {
     els.runResearchCompare.disabled = locked || compareSelectedCount < 2;
@@ -757,6 +1341,12 @@ function applyStrategyConfig(config) {
   }
   if (els.symbol && config.symbol) {
     els.symbol.value = String(config.symbol).toUpperCase();
+  }
+  if (els.presetAuthorityMode && config.presetAuthorityMode) {
+    const mode = String(config.presetAuthorityMode).toUpperCase();
+    els.presetAuthorityMode.value =
+      mode === PRESET_AUTHORITY_MODE_V6 ? PRESET_AUTHORITY_MODE_V6 : "OFF";
+    localStorage.setItem(PRESET_AUTHORITY_MODE_KEY, els.presetAuthorityMode.value);
   }
   const sizingMode = config.positionSizingMode || "FIXED";
   const allocation = String(config.positionAllocationPercent || "25");
@@ -877,6 +1467,9 @@ function hydrateForm(data) {
   state.dryRun = Boolean(data.dry_run);
   if (els.dryRun) {
     els.dryRun.checked = state.dryRun;
+  }
+  if (state.activeStrategyConfig) {
+    applyStrategyConfig(state.activeStrategyConfig);
   }
   syncSizingControls();
   state.hydrated = true;
@@ -1693,6 +2286,9 @@ const RESEARCH_TOOLTIP_TEXT = {
   "V8 Blocks Y/T/N": "v8 entry veto counts split by young regime, low trend trust, and noisy-water flip pressure.",
   "V9 C/S/I": "v9 Momentum-context counts split by context activations, InverseBot suppressions, and hard invalidations.",
   "V9 Context": "v9 activation fingerprint: observer preset, trust score, SOXL percent from open, raw first-window transitions, and non-warmup transition count/rate.",
+  Auth: "Momentum authority config flags: AR means authority required, RE means revoke exits enabled, LAT means authority latches after one clean activation, V10F means forced no-authority shadow mode.",
+  "V10 D/M/I": "v10 No-Authority suppression counts split by total directional, MomentumBot, and InverseBot suppressions.",
+  "V10 Context": "v10 No-Authority observer fingerprint. Shows the first suppressed-entry context, or the evaluated no-authority context when no post-checkpoint directional entries appeared.",
 };
 
 function researchTooltip(label) {
@@ -2394,6 +2990,123 @@ function formatV9Context(row) {
   return `${observer}T ${trust} · SOXL ${soxl} · ${windowMinutes}m raw ${earlyCount}/${earlyRate} · NW ${nonWarmupCount}/${nonWarmupRate}${blocker}${invalidation}`;
 }
 
+function formatAuthorityConfig(row) {
+  const flags = [];
+  const chopPermissionMode = String(row.chop_permission_mode || "OFF").toUpperCase();
+  if (chopPermissionMode === "LOOSE") flags.push("CP-L");
+  if (chopPermissionMode === "FIREWALL") flags.push("CP-FW");
+  if (chopPermissionMode === "STRICT") {
+    flags.push("CP-S");
+    const chopMaxSource = numberOrNull(row.chop_permission_max_abs_source_percent);
+    if (chopMaxSource !== null && chopMaxSource !== 2) {
+      flags.push(`CS${formatNumberMaybe(chopMaxSource)}`);
+    }
+  }
+  if (row.momentum_authority_required) flags.push("AR");
+  if (row.momentum_authority_revoke_exits) flags.push("RE");
+  if (row.momentum_authority_latch_once_active) flags.push("LAT");
+  const minTrust = numberOrNull(row.momentum_authority_min_trust_score);
+  if (minTrust !== null && minTrust !== 45) {
+    flags.push(`T${formatNumberMaybe(minTrust)}`);
+  }
+  const minSource = numberOrNull(row.momentum_authority_min_source_percent);
+  if (minSource !== null && minSource !== 2) {
+    flags.push(`S${formatNumberMaybe(minSource)}`);
+  }
+  const maxTransitions = numberOrNull(
+    row.momentum_authority_max_transitions_per_hour,
+  );
+  if (maxTransitions !== null && maxTransitions !== 8) {
+    flags.push(`X${formatNumberMaybe(maxTransitions)}`);
+  }
+  if (row.momentum_authority_reclaim_enabled) {
+    flags.push("RC");
+    const reclaimTrust = numberOrNull(
+      row.momentum_authority_reclaim_min_trust_score,
+    );
+    if (reclaimTrust !== null && reclaimTrust !== 58) {
+      flags.push(`RT${formatNumberMaybe(reclaimTrust)}`);
+    }
+    const reclaimSource = numberOrNull(
+      row.momentum_authority_reclaim_min_source_percent,
+    );
+    if (reclaimSource !== null && reclaimSource !== 4) {
+      flags.push(`RS${formatNumberMaybe(reclaimSource)}`);
+    }
+    const reclaimRaw = numberOrNull(
+      row.momentum_authority_reclaim_max_raw_transition_count,
+    );
+    if (reclaimRaw !== null && reclaimRaw !== 1) {
+      flags.push(`RR${formatNumberMaybe(reclaimRaw)}`);
+    }
+    const reclaimNw = numberOrNull(
+      row.momentum_authority_reclaim_max_non_warmup_transition_count,
+    );
+    if (reclaimNw !== null && reclaimNw !== 0) {
+      flags.push(`RNW${formatNumberMaybe(reclaimNw)}`);
+    }
+  }
+  if (row.v10_force_no_authority) flags.push("V10F");
+  return flags.length ? flags.join("/") : "--";
+}
+
+function hasResearchValue(value) {
+  return value !== null && value !== undefined && value !== "";
+}
+
+function formatV10Context(row) {
+  const suppressions = Number(
+    row.v10_no_authority_directional_suppression_blocks || 0,
+  );
+  const hasContext = [
+    row.v10_no_authority_context_activation_reason,
+    row.v10_no_authority_context_observer_preset,
+    row.v10_no_authority_context_trust_score,
+    row.v10_no_authority_context_soxl_percent,
+    row.v10_no_authority_context_early_transition_count,
+    row.v10_no_authority_context_early_non_warmup_transition_count,
+  ].some(hasResearchValue);
+  if (!suppressions && !hasContext) {
+    return "--";
+  }
+  const trust = formatNumberMaybe(row.v10_no_authority_context_trust_score);
+  const soxl = formatPercentMaybe(row.v10_no_authority_context_soxl_percent);
+  const runup = formatPercentMaybe(row.v10_no_authority_context_soxl_runup_percent);
+  const drawdown = formatPercentMaybe(
+    row.v10_no_authority_context_soxl_drawdown_percent,
+  );
+  const windowMinutes =
+    !hasResearchValue(row.v10_no_authority_context_early_window_minutes)
+      ? "30"
+      : formatNumberMaybe(row.v10_no_authority_context_early_window_minutes);
+  const earlyCount = formatNumberMaybe(
+    row.v10_no_authority_context_early_transition_count,
+  );
+  const earlyRate = formatNumberMaybe(
+    row.v10_no_authority_context_early_transitions_per_hour,
+  );
+  const nonWarmupCount = formatNumberMaybe(
+    row.v10_no_authority_context_early_non_warmup_transition_count,
+  );
+  const nonWarmupRate = formatNumberMaybe(
+    row.v10_no_authority_context_early_non_warmup_transitions_per_hour,
+  );
+  const observer = row.v10_no_authority_context_observer_preset
+    ? `O ${row.v10_no_authority_context_observer_preset} · `
+    : "";
+  const activationReason = row.v10_no_authority_context_activation_reason
+    ? ` · ${row.v10_no_authority_context_activation_reason}`
+    : "";
+  const authorityGate = row.v10_no_authority_context_authority_gate
+    ? ` · gate ${row.v10_no_authority_context_authority_gate}`
+    : "";
+  const shadowStatus = row.v10_suppressed_directional_shadow_status
+    ? ` · shadow ${row.v10_suppressed_directional_shadow_status}`
+    : "";
+  const suppressionStatus = suppressions ? "" : " · no post-checkpoint directional suppressions";
+  return `${observer}T ${trust} · SOXL ${soxl} · RU ${runup} · DD ${drawdown} · ${windowMinutes}m raw ${earlyCount}/${earlyRate} · NW ${nonWarmupCount}/${nonWarmupRate}${activationReason}${authorityGate}${shadowStatus}${suppressionStatus}`;
+}
+
 function renderResearchComparisonRunTable(rows) {
   if (!rows.length) {
     return "";
@@ -2424,6 +3137,9 @@ function renderResearchComparisonRunTable(rows) {
               ${researchTh("V8 Blocks Y/T/N")}
               ${researchTh("V9 C/S/I")}
               ${researchTh("V9 Context")}
+              ${researchTh("Auth")}
+              ${researchTh("V10 D/M/I")}
+              ${researchTh("V10 Context")}
             </tr>
           </thead>
           <tbody>
@@ -2474,6 +3190,11 @@ function renderResearchComparisonRunRow(result) {
         `${row.v9_momentum_context_activations ?? 0}/${row.v9_inverse_suppression_blocks ?? 0}/${row.v9_momentum_context_invalidations ?? 0}`,
       )}</td>
       <td>${escapeHtml(formatV9Context(row))}</td>
+      <td>${escapeHtml(formatAuthorityConfig(row))}</td>
+      <td>${escapeHtml(
+        `${row.v10_no_authority_directional_suppression_blocks ?? 0}/${row.v10_no_authority_momentum_suppression_blocks ?? 0}/${row.v10_no_authority_inverse_suppression_blocks ?? 0}`,
+      )}</td>
+      <td>${escapeHtml(formatV10Context(row))}</td>
     </tr>
   `;
 }
@@ -2633,8 +3354,11 @@ function researchComparisonMarkdown(result) {
       "V8 Blocks Y/T/N",
       "V9 C/S/I",
       "V9 Context",
+      "Auth",
+      "V10 D/M/I",
+      "V10 Context",
     ]),
-    markdownDivider(16),
+    markdownDivider(19),
     ...runs.map((resultRow) => {
       const row = resultRow.row || {};
       const fingerprint = resultRow.fingerprint || {};
@@ -2655,6 +3379,9 @@ function researchComparisonMarkdown(result) {
         `${row.v8_young_regime_blocks ?? 0}/${row.v8_low_trust_blocks ?? 0}/${row.v8_noisy_water_blocks ?? 0}`,
         `${row.v9_momentum_context_activations ?? 0}/${row.v9_inverse_suppression_blocks ?? 0}/${row.v9_momentum_context_invalidations ?? 0}`,
         formatV9Context(row),
+        formatAuthorityConfig(row),
+        `${row.v10_no_authority_directional_suppression_blocks ?? 0}/${row.v10_no_authority_momentum_suppression_blocks ?? 0}/${row.v10_no_authority_inverse_suppression_blocks ?? 0}`,
+        formatV10Context(row),
       ]);
     }),
   ];
@@ -4842,6 +5569,9 @@ function render(data) {
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
   const settingsLocked = state.running || state.busy;
+  if (els.applyGoLiveRouter) {
+    els.applyGoLiveRouter.disabled = settingsLocked;
+  }
   settingInputs.forEach((input) => {
     input.disabled = settingsLocked;
     input.closest(".switch")?.classList.toggle("is-disabled", settingsLocked);
@@ -5029,6 +5759,25 @@ if (els.selectAllResearchComparePresets) {
     selectAllResearchComparePresets,
   );
 }
+if (els.seedChopResearchPresets) {
+  els.seedChopResearchPresets.addEventListener("click", seedChopResearchPresets);
+}
+if (els.seedMomentumResearchPresets) {
+  els.seedMomentumResearchPresets.addEventListener(
+    "click",
+    seedMomentumResearchPresets,
+  );
+}
+if (els.seedCombinedResearchPresets) {
+  els.seedCombinedResearchPresets.addEventListener(
+    "click",
+    seedCombinedResearchPresets,
+  );
+}
+
+if (els.applyGoLiveRouter) {
+  els.applyGoLiveRouter.addEventListener("click", applyGoLiveRouterFirewall);
+}
 
 if (els.backtestStartingAccount) {
   els.backtestStartingAccount.addEventListener("input", () => {
@@ -5100,6 +5849,7 @@ setupCollapsibleSections();
 setupActivityLog();
 setupTooltips();
 setupPresetAuthorityMode();
+setupActiveStrategyConfig();
 ensureBacktestDefaults();
 renderResearchPresetLibrary();
 syncPresetAuthorityBaseConfig();
