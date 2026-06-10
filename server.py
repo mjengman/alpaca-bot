@@ -29,8 +29,11 @@ from bot import (
     CHOP_BOT,
     CHOP_PERMISSION_MODES,
     DATA_BASE_URL_DEFAULT,
+    EDGEWALKER_BOTS,
     EdgeWalkerBot,
     INVERSE_BOT,
+    INVERSE_CASCADE_MODE_SUSTAINED,
+    INVERSE_CASCADE_MODES,
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_REJECTED,
@@ -62,6 +65,7 @@ from market_data import StreamingMarketDataService
 from research import (
     RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
     ResearchRunRequest,
+    build_roster_dress_rehearsal_scoreboard,
     run_research_backtest,
 )
 from trade_metrics import (
@@ -1994,6 +1998,7 @@ def decimal_from_payload(
     key: str,
     fallback: Decimal,
     allow_zero: bool = False,
+    allow_negative: bool = False,
     aliases: tuple[str, ...] = (),
 ) -> Decimal:
     raw = payload_value(payload, key, str(fallback), aliases)
@@ -2001,6 +2006,8 @@ def decimal_from_payload(
         value = Decimal(str(raw))
     except InvalidOperation as exc:
         raise BotError(f"{key} must be a valid number") from exc
+    if allow_negative:
+        return value
     if allow_zero:
         if value < 0:
             raise BotError(f"{key} must be at least 0")
@@ -2137,6 +2144,67 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         base.chop_permission_max_abs_source_percent,
         allow_zero=True,
         aliases=("chop_permission_max_abs_source_percent",),
+    )
+    inverse_cascade_mode = choice_from_payload(
+        payload,
+        "inverseCascadeMode",
+        base.inverse_cascade_mode,
+        INVERSE_CASCADE_MODES,
+        aliases=("inverse_cascade_mode",),
+    )
+    inverse_cascade_velocity_window_minutes = int_from_payload(
+        payload,
+        "inverseCascadeVelocityWindowMinutes",
+        base.inverse_cascade_velocity_window_minutes,
+        1,
+        aliases=("inverse_cascade_velocity_window_minutes",),
+    )
+    inverse_cascade_sustain_minutes = int_from_payload(
+        payload,
+        "inverseCascadeSustainMinutes",
+        base.inverse_cascade_sustain_minutes,
+        1,
+        aliases=("inverse_cascade_sustain_minutes",),
+    )
+    inverse_cascade_trail_percent = decimal_from_payload(
+        payload,
+        "inverseCascadeTrailPercent",
+        base.inverse_cascade_trail_percent,
+        aliases=("inverse_cascade_trail_percent",),
+    )
+    inverse_cascade_route_invalidation_grace_minutes = int_from_payload(
+        payload,
+        "inverseCascadeRouteInvalidationGraceMinutes",
+        base.inverse_cascade_route_invalidation_grace_minutes,
+        0,
+        aliases=("inverse_cascade_route_invalidation_grace_minutes",),
+    )
+    inverse_cascade_proven_mfe_percent = decimal_from_payload(
+        payload,
+        "inverseCascadeProvenMfePercent",
+        base.inverse_cascade_proven_mfe_percent,
+        allow_zero=True,
+        aliases=("inverse_cascade_proven_mfe_percent",),
+    )
+    inverse_cascade_proven_trail_percent = decimal_from_payload(
+        payload,
+        "inverseCascadeProvenTrailPercent",
+        base.inverse_cascade_proven_trail_percent,
+        aliases=("inverse_cascade_proven_trail_percent",),
+    )
+    inverse_cascade_proven_trail_tighten_mfe_percent = decimal_from_payload(
+        payload,
+        "inverseCascadeProvenTrailTightenMfePercent",
+        base.inverse_cascade_proven_trail_tighten_mfe_percent,
+        allow_zero=True,
+        aliases=("inverse_cascade_proven_trail_tighten_mfe_percent",),
+    )
+    inverse_cascade_proven_route_recovery_min_source_percent = decimal_from_payload(
+        payload,
+        "inverseCascadeProvenRouteRecoveryMinSourcePercent",
+        base.inverse_cascade_proven_route_recovery_min_source_percent,
+        allow_negative=True,
+        aliases=("inverse_cascade_proven_route_recovery_min_source_percent",),
     )
     adaptive_shadow_enabled = bool(
         payload.get("adaptiveShadowEnabled", base.adaptive_shadow_enabled)
@@ -2278,6 +2346,23 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         chop_permission_mode=chop_permission_mode,
         chop_permission_max_abs_source_percent=(
             chop_permission_max_abs_source_percent
+        ),
+        inverse_cascade_mode=inverse_cascade_mode,
+        inverse_cascade_velocity_window_minutes=(
+            inverse_cascade_velocity_window_minutes
+        ),
+        inverse_cascade_sustain_minutes=inverse_cascade_sustain_minutes,
+        inverse_cascade_trail_percent=inverse_cascade_trail_percent,
+        inverse_cascade_route_invalidation_grace_minutes=(
+            inverse_cascade_route_invalidation_grace_minutes
+        ),
+        inverse_cascade_proven_mfe_percent=inverse_cascade_proven_mfe_percent,
+        inverse_cascade_proven_trail_percent=inverse_cascade_proven_trail_percent,
+        inverse_cascade_proven_trail_tighten_mfe_percent=(
+            inverse_cascade_proven_trail_tighten_mfe_percent
+        ),
+        inverse_cascade_proven_route_recovery_min_source_percent=(
+            inverse_cascade_proven_route_recovery_min_source_percent
         ),
         adaptive_shadow_enabled=adaptive_shadow_enabled,
         enabled_bots=enabled_bots,
@@ -3665,6 +3750,39 @@ def run_research_backtest_from_payload(payload: dict[str, Any]) -> dict[str, Any
         "trade_count": len(result["trades"]),
         "cycles": len(result["records"]),
     }
+
+
+def run_roster_dress_rehearsal_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    config = config_from_research_payload(payload)
+    dates = _parse_research_compare_dates(payload)
+    starting_raw = payload.get("starting_account_value")
+    if starting_raw is None:
+        starting_raw = payload.get("startingAccountValue")
+    try:
+        starting_account_value = Decimal(
+            str(starting_raw if starting_raw not in (None, "") else 100)
+        )
+    except InvalidOperation as exc:
+        raise BotError("starting_account_value must be a number.") from exc
+    if starting_account_value <= 0:
+        raise BotError("starting_account_value must be greater than 0.")
+
+    full_roster_config = replace(
+        config,
+        enabled_bots=EDGEWALKER_BOTS,
+        inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+    )
+    return build_roster_dress_rehearsal_scoreboard(
+        full_roster_config,
+        dates,
+        starting_account_value=starting_account_value,
+        preset_name=_optional_text(payload.get("preset_name") or payload.get("presetName"))
+        or "Full_Roster_Dress_Rehearsal",
+        preset_version=_optional_text(
+            payload.get("preset_version") or payload.get("presetVersion")
+        )
+        or "v1",
+    )
 
 
 def _parse_research_compare_dates(payload: dict[str, Any]) -> list[str]:
@@ -6977,6 +7095,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 if self.runner.snapshot().running:
                     raise BotError("Stop the live/paper loop before running research.")
                 self.send_json(run_research_comparison_from_payload(payload))
+                return
+            if self.path == "/api/research/dress-rehearsal":
+                self.require_local_ui_request("research dress rehearsal requests")
+                if self.runner.snapshot().running:
+                    raise BotError("Stop the live/paper loop before running research.")
+                self.send_json(run_roster_dress_rehearsal_from_payload(payload))
                 return
             if self.path == "/api/research/shadow-router":
                 self.require_local_ui_request("research shadow router requests")

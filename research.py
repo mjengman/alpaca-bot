@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any
@@ -20,10 +20,13 @@ from bot import (
     BotConfig,
     BotError,
     BotStateStore,
+    CHOP_BOT,
     EdgeWalkerBot,
+    INVERSE_BOT,
     LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
     LifecycleLedger,
     MONEY_STEP,
+    MOMENTUM_BOT,
     SOXL,
     SOXS,
     V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
@@ -41,6 +44,7 @@ from trade_metrics import (
 NY_TZ = ZoneInfo("America/New_York")
 RESEARCH_FILL_MODEL_NEXT_BAR_OPEN = "next_bar_open"
 RESEARCH_FILL_MODELS = {RESEARCH_FILL_MODEL_NEXT_BAR_OPEN}
+_PREVIOUS_SESSION_CLOSE_CACHE: dict[tuple[str, str, str], dict[str, Decimal]] = {}
 
 
 @dataclass(frozen=True)
@@ -168,12 +172,86 @@ def fetch_historical_bars(config: BotConfig, symbols: tuple[str, ...], date_text
     return bars_by_symbol
 
 
+def fetch_previous_session_closes(
+    config: BotConfig,
+    symbols: tuple[str, ...],
+    date_text: str,
+) -> dict[str, Decimal]:
+    cache_key = (config.data_feed, ",".join(symbols), date_text)
+    if cache_key in _PREVIOUS_SESSION_CLOSE_CACHE:
+        return dict(_PREVIOUS_SESSION_CLOSE_CACHE[cache_key])
+
+    target_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+    start = datetime.combine(
+        target_date - timedelta(days=21),
+        time.min,
+        NY_TZ,
+    )
+    end = datetime.combine(target_date + timedelta(days=1), time.min, NY_TZ)
+    params = {
+        "symbols": ",".join(symbols),
+        "timeframe": "1Day",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "limit": "1000",
+        "adjustment": "raw",
+        "feed": config.data_feed,
+        "sort": "asc",
+    }
+    url = f"{config.data_base_url}/stocks/bars?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "APCA-API-KEY-ID": config.api_key_id,
+            "APCA-API-SECRET-KEY": config.api_secret_key,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    closes: dict[str, Decimal] = {}
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return closes
+
+    bars = payload.get("bars")
+    if not isinstance(bars, dict):
+        return closes
+    for symbol in symbols:
+        symbol_bars = bars.get(symbol) or []
+        if not isinstance(symbol_bars, list):
+            continue
+        prior_bars = []
+        for bar in symbol_bars:
+            if not isinstance(bar, dict):
+                continue
+            timestamp = parse_market_timestamp(bar.get("t"))
+            if timestamp is None or timestamp.astimezone(NY_TZ).date() >= target_date:
+                continue
+            close = bar.get("c")
+            if close is None:
+                continue
+            prior_bars.append((timestamp, Decimal(str(close))))
+        if prior_bars:
+            prior_bars.sort(key=lambda item: item[0])
+            closes[symbol] = prior_bars[-1][1]
+    _PREVIOUS_SESSION_CLOSE_CACHE[cache_key] = dict(closes)
+    return closes
+
+
 class ReplayMarketData:
     source_name = "research"
 
-    def __init__(self, bars_by_symbol: dict[str, list[dict[str, Any]]], data_feed: str) -> None:
+    def __init__(
+        self,
+        bars_by_symbol: dict[str, list[dict[str, Any]]],
+        data_feed: str,
+        previous_session_closes: dict[str, Decimal] | None = None,
+    ) -> None:
         self.bars_by_symbol = bars_by_symbol
         self.data_feed = data_feed
+        self.previous_session_closes = previous_session_closes or {}
         self.current_index = 0
 
     def set_index(self, index: int) -> None:
@@ -198,6 +276,9 @@ class ReplayMarketData:
         bars = self.bars_by_symbol.get(symbol) or []
         visible = bars[: self.current_index]
         return visible[-minutes:]
+
+    def get_previous_session_close(self, symbol: str) -> Decimal | None:
+        return self.previous_session_closes.get(symbol)
 
     def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
         price = self.current_price(symbol)
@@ -757,12 +838,23 @@ def _session_metrics(
                 early_entries_by_bot[bot_name] += 1
     exit_reason_counts: dict[str, int] = {}
     exit_reason_pl: dict[str, Decimal] = {}
+    inverse_entry_counts = {
+        "inverse_cascade": 0,
+        "inverse_legacy": 0,
+    }
+    inverse_entry_pl = {
+        "inverse_cascade": Decimal("0"),
+        "inverse_legacy": Decimal("0"),
+    }
     for trade in trades:
         reason = str(trade.get("exit_reason") or "UNKNOWN")
         exit_reason_counts[reason] = exit_reason_counts.get(reason, 0) + 1
-        exit_reason_pl[reason] = exit_reason_pl.get(reason, Decimal("0")) + Decimal(
-            str(trade.get("realized_pl") or 0)
-        )
+        realized_pl = Decimal(str(trade.get("realized_pl") or 0))
+        exit_reason_pl[reason] = exit_reason_pl.get(reason, Decimal("0")) + realized_pl
+        entry_family = str(trade.get("entry_family") or "")
+        if entry_family in inverse_entry_counts:
+            inverse_entry_counts[entry_family] += 1
+            inverse_entry_pl[entry_family] += realized_pl
     entry_median = Decimal("0")
     if entry_ages:
         sorted_ages = sorted(entry_ages)
@@ -858,6 +950,10 @@ def _session_metrics(
         "v9_momentum_context_invalidation_reason": v9_context_summary.get(
             "invalidation_reason"
         ),
+        "inverse_cascade_trade_count": inverse_entry_counts["inverse_cascade"],
+        "inverse_cascade_pl": inverse_entry_pl["inverse_cascade"],
+        "inverse_legacy_trade_count": inverse_entry_counts["inverse_legacy"],
+        "inverse_legacy_pl": inverse_entry_pl["inverse_legacy"],
         "exit_reason_counts": exit_reason_counts,
         "exit_reason_pl": exit_reason_pl,
     }
@@ -872,9 +968,15 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
     if request.fill_model not in RESEARCH_FILL_MODELS:
         raise BotError("Research fill model must be next_bar_open.")
 
-    bars_by_symbol = fetch_historical_bars(config, (SOXL, SOXS), date_text)
+    symbols = (SOXL, SOXS)
+    bars_by_symbol = fetch_historical_bars(config, symbols, date_text)
+    previous_session_closes = fetch_previous_session_closes(config, symbols, date_text)
     start, end = _regular_session_bounds(date_text)
-    market_data = ReplayMarketData(bars_by_symbol, config.data_feed)
+    market_data = ReplayMarketData(
+        bars_by_symbol,
+        config.data_feed,
+        previous_session_closes,
+    )
     client = SimulatedBroker(
         config,
         market_data,
@@ -1205,6 +1307,10 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "momentum_pl": _rounded(bot_pl["MomentumBot"]),
         "chop_pl": _rounded(bot_pl["ChopBot"]),
         "inverse_pl": _rounded(bot_pl["InverseBot"]),
+        "inverse_cascade_trades": int(metrics["inverse_cascade_trade_count"]),
+        "inverse_cascade_pl": _rounded(metrics["inverse_cascade_pl"]),
+        "inverse_legacy_trades": int(metrics["inverse_legacy_trade_count"]),
+        "inverse_legacy_pl": _rounded(metrics["inverse_legacy_pl"]),
         "top_pl_bot": top_bot,
         "bottom_pl_bot": bottom_bot,
         "regime_transitions": int(metrics["regime_transitions"]),
@@ -1290,4 +1396,191 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "performance": performance,
         "trades": trades,
         "row": row,
+    }
+
+
+def _decimal_value(value: Any) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if value in (None, ""):
+        return Decimal("0")
+    return Decimal(str(value))
+
+
+def _money_value(value: Decimal) -> str:
+    return format(value.quantize(MONEY_STEP, rounding=ROUND_DOWN), "f")
+
+
+def _result_status(value: Decimal) -> str:
+    if value > 0:
+        return "GREEN"
+    if value < 0:
+        return "RED"
+    return "FLAT"
+
+
+def _trade_bot(trade: dict[str, Any]) -> str:
+    bot = trade.get("bot")
+    return str(bot) if bot else "UNKNOWN"
+
+
+def _trade_pl(trade: dict[str, Any]) -> Decimal:
+    return _decimal_value(trade.get("realized_pl"))
+
+
+def _trade_exit_type(trade: dict[str, Any]) -> str:
+    for key in ("exit_reason", "close_reason", "reason"):
+        value = trade.get(key)
+        if value:
+            return str(value)
+    return "unknown"
+
+
+def _best_worst_day(day_pl: dict[str, Decimal], best: bool) -> dict[str, str] | None:
+    if not day_pl:
+        return None
+    item = (max if best else min)(day_pl.items(), key=lambda entry: entry[1])
+    return {"date": item[0], "pl": _money_value(item[1])}
+
+
+def build_roster_dress_rehearsal_scoreboard(
+    config: BotConfig,
+    dates: list[str] | tuple[str, ...],
+    *,
+    starting_account_value: Decimal = Decimal("100"),
+    preset_name: str = "Full_Roster_Dress_Rehearsal",
+    preset_version: str = "v1",
+) -> dict[str, Any]:
+    if not dates:
+        raise BotError("Add at least one dress rehearsal date.")
+
+    per_date: list[dict[str, Any]] = []
+    specialist_order = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
+    specialist_row_pl_keys = {
+        MOMENTUM_BOT: "momentum_pl",
+        CHOP_BOT: "chop_pl",
+        INVERSE_BOT: "inverse_pl",
+    }
+    specialist_day_pl: dict[str, dict[str, Decimal]] = {
+        bot: {} for bot in specialist_order
+    }
+    specialist_totals: dict[str, Decimal] = {bot: Decimal("0") for bot in specialist_order}
+    specialist_active_days: dict[str, int] = {bot: 0 for bot in specialist_order}
+    specialist_green: dict[str, int] = {bot: 0 for bot in specialist_order}
+    specialist_red: dict[str, int] = {bot: 0 for bot in specialist_order}
+    specialist_flat: dict[str, int] = {bot: 0 for bot in specialist_order}
+    router_green = 0
+    router_red = 0
+    router_flat = 0
+    multiple_specialist_days: list[str] = []
+    total_trades = 0
+    combined_pl = Decimal("0")
+
+    for date_text in dates:
+        request = ResearchRunRequest(
+            date=date_text,
+            data_feed=config.data_feed,
+            starting_account_value=starting_account_value,
+            preset_name=preset_name,
+            preset_version=preset_version,
+        )
+        result = run_research_backtest(config, request)
+        row = result.get("row") if isinstance(result.get("row"), dict) else {}
+        trades = result.get("trades") if isinstance(result.get("trades"), list) else []
+        total_pl = _decimal_value(row.get("realized_pl_dollars"))
+        combined_pl += total_pl
+        total_trades += len(trades)
+
+        trade_bots = sorted(
+            {_trade_bot(trade) for trade in trades if isinstance(trade, dict)}
+        )
+        exit_types = sorted(
+            {
+                _trade_exit_type(trade)
+                for trade in trades
+                if isinstance(trade, dict)
+            }
+        )
+        if len([bot for bot in trade_bots if bot in specialist_order]) > 1:
+            multiple_specialist_days.append(date_text)
+
+        status = _result_status(total_pl)
+        if status == "GREEN":
+            router_green += 1
+        elif status == "RED":
+            router_red += 1
+        else:
+            router_flat += 1
+
+        per_date.append(
+            {
+                "date": date_text,
+                "total_pl": _money_value(total_pl),
+                "result_status": status,
+                "specialists_fired": trade_bots,
+                "exit_types": exit_types,
+                "trade_count": len(trades),
+            }
+        )
+
+        for bot in specialist_order:
+            bot_trades = [
+                trade
+                for trade in trades
+                if isinstance(trade, dict) and _trade_bot(trade) == bot
+            ]
+            bot_pl = _decimal_value(
+                row.get(specialist_row_pl_keys[bot])
+                if specialist_row_pl_keys[bot] in row
+                else sum((_trade_pl(trade) for trade in bot_trades), Decimal("0"))
+            )
+            specialist_totals[bot] += bot_pl
+            specialist_day_pl[bot][date_text] = bot_pl
+            if bot_trades:
+                specialist_active_days[bot] += 1
+            if bot_pl != 0:
+                if bot_pl > 0:
+                    specialist_green[bot] += 1
+                else:
+                    specialist_red[bot] += 1
+            else:
+                specialist_flat[bot] += 1
+
+    date_count = len(dates)
+    per_specialist: list[dict[str, Any]] = []
+    for bot in specialist_order:
+        active_days = specialist_active_days[bot]
+        total = specialist_totals[bot]
+        activation_rate = Decimal(active_days) / Decimal(date_count) * Decimal("100")
+        average_active = total / Decimal(active_days) if active_days else Decimal("0")
+        per_specialist.append(
+            {
+                "specialist": bot,
+                "activation_rate_percent": format_decimal(
+                    activation_rate.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                ),
+                "green_days": specialist_green[bot],
+                "red_days": specialist_red[bot],
+                "flat_days": specialist_flat[bot],
+                "total_pl": _money_value(total),
+                "average_pl_on_active_days": _money_value(average_active),
+                "best_day": _best_worst_day(specialist_day_pl[bot], best=True),
+                "worst_day": _best_worst_day(specialist_day_pl[bot], best=False),
+            }
+        )
+
+    return {
+        "kind": "full_roster_dress_rehearsal_scoreboard",
+        "date_count": date_count,
+        "dates": list(dates),
+        "per_date": per_date,
+        "per_specialist": per_specialist,
+        "full_roster": {
+            "combined_pl": _money_value(combined_pl),
+            "green_days": router_green,
+            "red_days": router_red,
+            "flat_days": router_flat,
+            "multiple_specialist_days": multiple_specialist_days,
+            "total_trade_count": total_trades,
+        },
     }

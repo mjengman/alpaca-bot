@@ -53,11 +53,18 @@ def analyze_lifecycle_trades(
             continue
 
         if side == "buy":
+            lifecycle_context = record.get("lifecycle_context")
             lots_by_symbol.setdefault(symbol, []).append(
                 {
                     "qty": fill_qty,
                     "price": fill_price,
                     "bot": record.get("bot"),
+                    "entry_reason": record.get("reason"),
+                    "entry_lifecycle_context": (
+                        lifecycle_context
+                        if isinstance(lifecycle_context, dict)
+                        else None
+                    ),
                     "created_at": created_at,
                     "order_id": record.get("order_id"),
                 }
@@ -70,6 +77,8 @@ def analyze_lifecycle_trades(
         matched_lot_bots: list[tuple[str | None, Decimal]] = []
         matched_entry_times: list[datetime] = []
         matched_entry_order_ids: list[str] = []
+        matched_entry_reasons: list[str] = []
+        matched_entry_contexts: list[dict[str, Any]] = []
         lots = lots_by_symbol.setdefault(symbol, [])
         while remaining > 0 and lots:
             lot = lots[0]
@@ -84,6 +93,12 @@ def analyze_lifecycle_trades(
             order_id = optional_text(lot.get("order_id"))
             if order_id:
                 matched_entry_order_ids.append(order_id)
+            entry_reason = optional_text(lot.get("entry_reason"))
+            if entry_reason:
+                matched_entry_reasons.append(entry_reason)
+            entry_context = lot.get("entry_lifecycle_context")
+            if isinstance(entry_context, dict):
+                matched_entry_contexts.append(entry_context)
             remaining -= consumed_qty
             lot["qty"] = lot_qty - consumed_qty
             if lot["qty"] <= 0:
@@ -103,9 +118,28 @@ def analyze_lifecycle_trades(
             else None
         )
         entry_at = min(matched_entry_times) if matched_entry_times else created_at
+        trade_bot = optional_text(record.get("bot")) or dominant_bot(matched_lot_bots)
+        trade_entry_reason = (
+            matched_entry_reasons[0] if matched_entry_reasons else None
+        )
+        trade_entry_context = (
+            matched_entry_contexts[0] if matched_entry_contexts else None
+        )
+        entry_family = infer_entry_family(
+            trade_bot,
+            symbol,
+            trade_entry_reason,
+            trade_entry_context,
+        )
+        inverse_entry_family = infer_inverse_entry_family(
+            trade_bot,
+            symbol,
+            entry_family,
+            trade_entry_context,
+        )
         trade = {
             "symbol": symbol,
-            "bot": optional_text(record.get("bot")) or dominant_bot(matched_lot_bots),
+            "bot": trade_bot,
             "qty": format_decimal(matched_qty),
             "avg_entry_price": format_decimal(avg_entry_price),
             "exit_price": format_decimal(fill_price),
@@ -119,6 +153,10 @@ def analyze_lifecycle_trades(
             if matched_entry_order_ids
             else None,
             "entry_order_ids": matched_entry_order_ids,
+            "entry_reason": trade_entry_reason,
+            "entry_lifecycle_context": trade_entry_context,
+            "entry_family": entry_family,
+            "inverse_entry_family": inverse_entry_family,
             "exit_reason": record.get("reason"),
             "exit_order_id": record.get("order_id"),
             "opened_at": entry_at.isoformat(timespec="seconds"),
@@ -432,6 +470,40 @@ def decimal_from_value(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except Exception:
         return None
+
+
+def infer_entry_family(
+    bot_name: str | None,
+    symbol: str,
+    entry_reason: str | None,
+    entry_context: dict[str, Any] | None,
+) -> str | None:
+    if isinstance(entry_context, dict):
+        family = optional_text(entry_context.get("entry_family"))
+        if family:
+            return family
+    if bot_name == "InverseBot" and symbol == "SOXS":
+        if entry_reason and entry_reason.startswith("inverse_cascade_"):
+            return "inverse_cascade"
+        return "inverse_legacy"
+    return None
+
+
+def infer_inverse_entry_family(
+    bot_name: str | None,
+    symbol: str,
+    entry_family: str | None,
+    entry_context: dict[str, Any] | None,
+) -> str | None:
+    if isinstance(entry_context, dict):
+        inverse_family = optional_text(entry_context.get("inverse_entry_family"))
+        if inverse_family:
+            return inverse_family
+    if bot_name == "InverseBot" and symbol == "SOXS":
+        if entry_family == "inverse_cascade":
+            return "cascade"
+        return "legacy"
+    return None
 
 
 def record_created_at(record: dict[str, Any]) -> datetime | None:

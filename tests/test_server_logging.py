@@ -70,12 +70,13 @@ from server import (
     lifecycle_performance_summary,
     OPERATOR_SPREADSHEET_COLUMNS,
     order_visibility_summary,
+    run_roster_dress_rehearsal_from_payload,
     run_research_comparison_from_payload,
     save_alpaca_environment_settings,
     set_live_trading_armed,
     set_live_trading_disarmed,
 )
-from research import _session_metrics
+from research import _session_metrics, build_roster_dress_rehearsal_scoreboard
 from trade_metrics import enrich_trades_with_bar_extremes
 from trade_metrics import bot_archaeology_report
 
@@ -918,6 +919,121 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertFalse(permission["row"]["v10_force_no_authority"])
         self.assertTrue(shadow["row"]["momentum_authority_required"])
         self.assertTrue(shadow["row"]["v10_force_no_authority"])
+
+    def test_roster_dress_rehearsal_scoreboard_summarizes_specialists(self) -> None:
+        fake_results = {
+            "2026-06-05": {
+                "row": {"realized_pl_dollars": "1.50"},
+                "trades": [
+                    {
+                        "bot": INVERSE_BOT,
+                        "realized_pl": "1.50",
+                        "exit_reason": "trailing_stop_breached",
+                    }
+                ],
+            },
+            "2026-06-06": {
+                "row": {"realized_pl_dollars": "-0.25"},
+                "trades": [
+                    {
+                        "bot": MOMENTUM_BOT,
+                        "realized_pl": "0.40",
+                        "exit_reason": "market_close_liquidation",
+                    },
+                    {
+                        "bot": CHOP_BOT,
+                        "realized_pl": "-0.65",
+                        "exit_reason": "route_invalidated_exit",
+                    },
+                ],
+            },
+            "2026-06-07": {
+                "row": {"realized_pl_dollars": "0"},
+                "trades": [],
+            },
+        }
+
+        def fake_backtest(_config: BotConfig, request: object) -> dict[str, object]:
+            return fake_results[getattr(request, "date")]
+
+        with patch("research.run_research_backtest", side_effect=fake_backtest):
+            scoreboard = build_roster_dress_rehearsal_scoreboard(
+                config(),
+                ["2026-06-05", "2026-06-06", "2026-06-07"],
+            )
+
+        self.assertEqual(scoreboard["full_roster"]["combined_pl"], "1.25")
+        self.assertEqual(scoreboard["full_roster"]["green_days"], 1)
+        self.assertEqual(scoreboard["full_roster"]["red_days"], 1)
+        self.assertEqual(scoreboard["full_roster"]["flat_days"], 1)
+        self.assertEqual(scoreboard["full_roster"]["multiple_specialist_days"], ["2026-06-06"])
+        self.assertEqual(scoreboard["full_roster"]["total_trade_count"], 3)
+        self.assertEqual(
+            scoreboard["per_date"][1],
+            {
+                "date": "2026-06-06",
+                "total_pl": "-0.25",
+                "result_status": "RED",
+                "specialists_fired": [CHOP_BOT, MOMENTUM_BOT],
+                "exit_types": ["market_close_liquidation", "route_invalidated_exit"],
+                "trade_count": 2,
+            },
+        )
+
+        by_specialist = {
+            item["specialist"]: item for item in scoreboard["per_specialist"]
+        }
+        self.assertEqual(by_specialist[INVERSE_BOT]["activation_rate_percent"], "33.33")
+        self.assertEqual(by_specialist[INVERSE_BOT]["green_days"], 1)
+        self.assertEqual(by_specialist[INVERSE_BOT]["red_days"], 0)
+        self.assertEqual(by_specialist[INVERSE_BOT]["flat_days"], 2)
+        self.assertEqual(by_specialist[INVERSE_BOT]["total_pl"], "1.50")
+        self.assertEqual(
+            by_specialist[INVERSE_BOT]["average_pl_on_active_days"],
+            "1.50",
+        )
+        self.assertEqual(
+            by_specialist[CHOP_BOT]["worst_day"],
+            {"date": "2026-06-06", "pl": "-0.65"},
+        )
+
+    def test_roster_dress_rehearsal_payload_forces_full_roster(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_scoreboard(
+            cfg: BotConfig,
+            dates: list[str],
+            **kwargs: object,
+        ) -> dict[str, object]:
+            captured["enabled_bots"] = cfg.enabled_bots
+            captured["inverse_cascade_mode"] = cfg.inverse_cascade_mode
+            captured["dates"] = dates
+            captured["starting_account_value"] = kwargs["starting_account_value"]
+            return {"kind": "full_roster_dress_rehearsal_scoreboard"}
+
+        with patch(
+            "server.config_from_research_payload",
+            return_value=replace(
+                config(),
+                enabled_bots=(MOMENTUM_BOT,),
+                inverse_cascade_mode="OFF",
+            ),
+        ), patch(
+            "server.build_roster_dress_rehearsal_scoreboard",
+            side_effect=fake_scoreboard,
+        ):
+            result = run_roster_dress_rehearsal_from_payload(
+                {
+                    "dates": ["2026-06-05", "2026-06-06"],
+                    "startingAccountValue": "250",
+                }
+            )
+
+        self.assertEqual(result["kind"], "full_roster_dress_rehearsal_scoreboard")
+        self.assertEqual(captured["enabled_bots"], (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT))
+        self.assertEqual(captured["inverse_cascade_mode"], "SUSTAINED")
+        self.assertEqual(captured["dates"], ["2026-06-05", "2026-06-06"])
+        self.assertEqual(captured["starting_account_value"], Decimal("250"))
 
     def test_research_comparison_allows_five_presets_across_twenty_dates(self) -> None:
         dates = [f"2026-03-{day:02d}" for day in range(1, 21)]
@@ -3025,6 +3141,45 @@ class ServerLoggingTest(unittest.TestCase):
             parsed = config_from_payload(payload)
 
         self.assertEqual(parsed.enabled_bots, (MOMENTUM_BOT, CHOP_BOT))
+
+    def test_config_payload_accepts_inverse_cascade_controls(self) -> None:
+        payload = {
+            "inverseCascadeMode": "sustained",
+            "inverseCascadeVelocityWindowMinutes": "3",
+            "inverseCascadeSustainMinutes": "4",
+            "inverseCascadeTrailPercent": "3.75",
+            "inverseCascadeRouteInvalidationGraceMinutes": "6",
+            "inverseCascadeProvenMfePercent": "0.75",
+            "inverseCascadeProvenTrailPercent": "6.25",
+            "inverseCascadeProvenTrailTightenMfePercent": "4.00",
+            "inverseCascadeProvenRouteRecoveryMinSourcePercent": "-0.25",
+        }
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ALPACA_API_KEY_ID": "key",
+                "ALPACA_API_SECRET_KEY": "secret",
+            },
+            clear=True,
+        ):
+            parsed = config_from_payload(payload)
+
+        self.assertEqual(parsed.inverse_cascade_mode, "SUSTAINED")
+        self.assertEqual(parsed.inverse_cascade_velocity_window_minutes, 3)
+        self.assertEqual(parsed.inverse_cascade_sustain_minutes, 4)
+        self.assertEqual(parsed.inverse_cascade_trail_percent, Decimal("3.75"))
+        self.assertEqual(parsed.inverse_cascade_route_invalidation_grace_minutes, 6)
+        self.assertEqual(parsed.inverse_cascade_proven_mfe_percent, Decimal("0.75"))
+        self.assertEqual(parsed.inverse_cascade_proven_trail_percent, Decimal("6.25"))
+        self.assertEqual(
+            parsed.inverse_cascade_proven_trail_tighten_mfe_percent,
+            Decimal("4.00"),
+        )
+        self.assertEqual(
+            parsed.inverse_cascade_proven_route_recovery_min_source_percent,
+            Decimal("-0.25"),
+        )
 
     def test_config_payload_accepts_momentum_authority_gate(self) -> None:
         payload = {

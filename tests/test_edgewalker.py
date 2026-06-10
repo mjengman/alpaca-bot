@@ -38,6 +38,10 @@ from bot import (
     LIFECYCLE_ADAPTIVE_POSTURE_SELECTED,
     LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
     CHOP_BOT,
+    INVERSE_CASCADE_MODE_LOOSE,
+    INVERSE_CASCADE_MODE_STRICT,
+    INVERSE_CASCADE_MODE_SUSTAINED,
+    INVERSE_CASCADE_MODE_VELOCITY,
     INVERSE_BOT,
     MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
     MOMENTUM_BOT,
@@ -138,6 +142,26 @@ def bars(
     ]
 
 
+def ohlc_bars(
+    *rows: tuple[str, str, str, str],
+    latest_at: datetime | None = None,
+) -> list[dict[str, Any]]:
+    latest = latest_at or datetime.now(timezone.utc)
+    start = latest - timedelta(minutes=max(len(rows) - 1, 0))
+    return [
+        {
+            "o": open_price,
+            "h": high_price,
+            "l": low_price,
+            "c": close_price,
+            "t": (start + timedelta(minutes=index))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        for index, (open_price, high_price, low_price, close_price) in enumerate(rows)
+    ]
+
+
 class FakeClient:
     def __init__(
         self,
@@ -151,6 +175,7 @@ class FakeClient:
         sell_order_response: dict[str, Any] | None = None,
         open_orders: list[dict[str, Any]] | None = None,
         order_lookup: dict[str, dict[str, Any]] | None = None,
+        previous_session_closes: dict[str, Decimal] | None = None,
     ) -> None:
         self.bar_map = bar_map
         self.positions = positions or {}
@@ -162,6 +187,7 @@ class FakeClient:
         self.sell_order_response = sell_order_response
         self.open_orders = open_orders or []
         self.order_lookup = order_lookup or {}
+        self.previous_session_closes = previous_session_closes or {}
         self.buys: list[tuple[str, Decimal]] = []
         self.sells: list[tuple[str, Decimal]] = []
 
@@ -176,6 +202,9 @@ class FakeClient:
 
     def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
         return self.bar_map[symbol][-minutes:]
+
+    def get_previous_session_close(self, symbol: str) -> Decimal | None:
+        return self.previous_session_closes.get(symbol)
 
     def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
         return self.latest_trades.get(symbol)
@@ -378,6 +407,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
         output, status = self.run_bot(
             client,
             setup_state=self.survived_regime("DOWNTREND"),
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
         )
 
         self.assertEqual(client.sells, [])
@@ -440,7 +473,13 @@ class EdgeWalkerBotTest(unittest.TestCase):
     def test_exact_slow_sma_history_allows_chop_routing(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "99")})
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [("SOXL", Decimal("25"))])
@@ -636,7 +675,13 @@ class EdgeWalkerBotTest(unittest.TestCase):
         stale_latest_at = datetime.now(timezone.utc) - timedelta(minutes=15)
         client = FakeClient({"SOXL": bars("100", "101", "99", latest_at=stale_latest_at)})
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [])
@@ -690,6 +735,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
         output, status = self.run_bot(
             client,
             setup_state=self.survived_regime("DOWNTREND"),
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
         )
 
         self.assertEqual(client.sells, [])
@@ -872,7 +921,13 @@ class EdgeWalkerBotTest(unittest.TestCase):
             {"SOXL": {"qty": "0.25", "avg_entry_price": "100"}},
         )
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
+        )
 
         self.assertEqual(client.sells, [("SOXL", Decimal("0.250000000"))])
         self.assertEqual(client.buys, [])
@@ -948,6 +1003,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
         output, status = self.run_bot(
             client,
             setup_state=self.survived_regime("DOWNTREND"),
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
         )
 
         self.assertEqual(client.sells, [])
@@ -971,6 +1030,10 @@ class EdgeWalkerBotTest(unittest.TestCase):
         output, status = self.run_bot(
             client,
             setup_state=self.survived_regime("DOWNTREND"),
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
         )
 
         self.assertEqual(client.sells, [])
@@ -992,7 +1055,13 @@ class EdgeWalkerBotTest(unittest.TestCase):
             }
         )
 
-        output, status = self.run_bot(client)
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
+        )
 
         self.assertEqual(client.sells, [])
         self.assertEqual(client.buys, [])
@@ -1002,6 +1071,773 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "InverseBot")
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_off_preserves_sideways_chop_route(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "98", "97.4", "97.6", "97.5"),
+                "SOXS": bars("10.00", "10.15", "10.25", "10.30", "10.35"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertNotIn("Cascade candidate", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, CHOP_BOT)
+        self.assertEqual(status.routed_symbol, SOXL)
+
+    def test_inverse_cascade_loose_routes_sideways_cascade_to_soxs(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "98", "97.4", "97.6", "97.5"),
+                "SOXS": bars("10.00", "10.15", "10.25", "10.30", "10.35"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_LOOSE,
+            ),
+        )
+
+        self.assertEqual(client.buys, [(SOXS, Decimal("25"))])
+        self.assertIn("[INVERSE] Cascade candidate qualified: mode=LOOSE", output)
+        self.assertIn("[ROUTER] inverse cascade override", output)
+        self.assertIn("reason=inverse_cascade_loose_confirmed", output)
+        self.assertIn("[V8] Inverse cascade bypasses regime survivability", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, INVERSE_BOT)
+        self.assertEqual(status.routed_symbol, SOXS)
+        self.assertEqual(status.entry_signal, True)
+
+    def test_inverse_cascade_strict_rejects_recovered_drop(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "94", "96.8", "97.1", "97.0"),
+                "SOXS": bars("10.00", "10.15", "10.25", "10.30", "10.35"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_STRICT,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[INVERSE] Cascade candidate blocked: mode=STRICT", output)
+        self.assertIn("source_recovery_above_cascade_max", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, CHOP_BOT)
+
+    def test_inverse_cascade_velocity_requires_recent_source_drop(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96", "97.2", "97.4", "97.5"),
+                "SOXS": bars("10.00", "10.15", "10.20", "10.25", "10.30"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_VELOCITY,
+                inverse_cascade_velocity_window_minutes=2,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[INVERSE] Cascade candidate blocked: mode=VELOCITY", output)
+        self.assertIn("source_velocity_above_cascade_max", output)
+        self.assertEqual(status.regime, "SIDEWAYS")
+        self.assertEqual(status.active_bot, CHOP_BOT)
+
+    def test_inverse_cascade_sustained_requires_held_source_drop(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96", "95.8", "98.0", "95.6"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[INVERSE] Cascade candidate blocked: mode=SUSTAINED", output)
+        self.assertIn("source_not_sustained_below_cascade_max", output)
+
+    def test_inverse_cascade_sustained_routes_after_held_confirmation(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            },
+            previous_session_closes={SOXL: Decimal("100")},
+        )
+
+        output, status, records = self.run_bot_with_lifecycle(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [(SOXS, Decimal("25"))])
+        self.assertIn("[INVERSE] Cascade candidate qualified: mode=SUSTAINED", output)
+        self.assertIn("reason=inverse_cascade_sustained_confirmed", output)
+        self.assertEqual(status.active_bot, INVERSE_BOT)
+        self.assertEqual(status.routed_symbol, SOXS)
+        submitted = next(
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_ORDER_SUBMITTED
+            and record["side"] == "buy"
+        )
+        context = submitted["lifecycle_context"]
+        self.assertEqual(context["entry_family"], "inverse_cascade")
+        self.assertEqual(context["inverse_entry_family"], "cascade")
+        self.assertEqual(context["inverse_cascade_mode"], INVERSE_CASCADE_MODE_SUSTAINED)
+        self.assertEqual(context["base_route_bot"], CHOP_BOT)
+        self.assertEqual(context["base_route_symbol"], SOXL)
+        self.assertEqual(context["soxl_pct_from_open_at_cascade_window_start"], "-4")
+        self.assertEqual(
+            Decimal(context["soxl_pct_vs_prior_close_at_cascade_window_start"]),
+            Decimal("-4"),
+        )
+        self.assertEqual(context["sustain_source_direction_changes"], 0)
+        self.assertEqual(context["sustain_source_down_path_ratio"], "1")
+        self.assertEqual(context["sustain_source_path_length_percent"], "0.6")
+        self.assertEqual(context["sustain_source_down_distance_percent"], "0.6")
+        self.assertLess(Decimal(context["entry_bar_soxl_pct"]), Decimal("0"))
+        self.assertEqual(context["entry_bar_soxl_direction"], "DOWN")
+        self.assertGreater(
+            Decimal(context["entry_bar_soxl_prior_avg_abs_pct"]),
+            Decimal("0"),
+        )
+        self.assertGreater(
+            Decimal(context["entry_bar_soxl_velocity_ratio"]),
+            Decimal("0"),
+        )
+        self.assertGreater(Decimal(context["entry_bar_soxs_pct"]), Decimal("0"))
+        self.assertEqual(context["entry_bar_soxs_direction"], "UP")
+        self.assertGreater(
+            Decimal(context["entry_bar_soxs_prior_avg_abs_pct"]),
+            Decimal("0"),
+        )
+        self.assertGreater(
+            Decimal(context["entry_bar_soxs_velocity_ratio"]),
+            Decimal("0"),
+        )
+
+    def test_inverse_cascade_sustained_blocks_prior_close_support_floor(
+        self,
+    ) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            },
+            previous_session_closes={SOXL: Decimal("98")},
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("source_prior_close_above_cascade_max", output)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_sustained_blocks_missing_prior_close(
+        self,
+    ) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("source_prior_close_unavailable", output)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_sustained_blocks_extreme_window_extension(
+        self,
+    ) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "90.5", "90.0", "89.7", "89.4"),
+                "SOXS": bars("10.00", "10.80", "10.90", "11.00", "11.10"),
+            },
+            previous_session_closes={SOXL: Decimal("100")},
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("source_window_start_below_cascade_min", output)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_sustained_blocks_soxs_down_entry_bar(
+        self,
+    ) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.60", "10.50", "10.40", "10.30"),
+            },
+            previous_session_closes={SOXL: Decimal("100")},
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("inverse_entry_bar_down", output)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_sustained_blocks_uptrend_base_route(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            },
+            previous_session_closes={SOXL: Decimal("100")},
+        )
+
+        original = bot_module.INVERSE_CASCADE_DEFAULTS[
+            INVERSE_CASCADE_MODE_SUSTAINED
+        ]["block_source_uptrend"]
+        bot_module.INVERSE_CASCADE_DEFAULTS[INVERSE_CASCADE_MODE_SUSTAINED][
+            "block_source_uptrend"
+        ] = True
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                edgewalker = EdgeWalkerBot(
+                    replace(
+                        config(),
+                        inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                        inverse_cascade_sustain_minutes=3,
+                    ),
+                    client,
+                    BotStateStore(Path(tmpdir) / "state.json"),
+                    None,
+                    LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl"),
+                )
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    route = edgewalker._inverse_cascade_route_override(
+                        BotRoute(MOMENTUM_BOT, SOXL, True)
+                    )
+        finally:
+            bot_module.INVERSE_CASCADE_DEFAULTS[INVERSE_CASCADE_MODE_SUSTAINED][
+                "block_source_uptrend"
+            ] = original
+
+        self.assertEqual(route.active_bot, MOMENTUM_BOT)
+        self.assertEqual(route.routed_symbol, SOXL)
+        self.assertIn("source_uptrend_route_blocks_sustained_cascade", output.getvalue())
+        self.assertIn("base=MomentumBot/SOXL", output.getvalue())
+
+    def test_inverse_cascade_sustained_allows_sideways_base_route(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            },
+            previous_session_closes={SOXL: Decimal("100")},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            edgewalker = EdgeWalkerBot(
+                replace(
+                    config(),
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_sustain_minutes=3,
+                ),
+                client,
+                BotStateStore(Path(tmpdir) / "state.json"),
+                None,
+                LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl"),
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                route = edgewalker._inverse_cascade_route_override(
+                    BotRoute(CHOP_BOT, SOXL, True)
+                )
+
+        self.assertEqual(route.active_bot, INVERSE_BOT)
+        self.assertEqual(route.routed_symbol, SOXS)
+        self.assertIn("[INVERSE] Cascade candidate qualified", output.getvalue())
+        self.assertIn("base=ChopBot/SOXL", output.getvalue())
+
+    def test_inverse_cascade_sustained_rejects_stalling_drop(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.9", "95.8"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            }
+        )
+
+        output, status = self.run_bot(
+            client,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[INVERSE] Cascade candidate blocked: mode=SUSTAINED", output)
+        self.assertIn("source_not_deepening_during_sustain", output)
+        self.assertEqual(status.active_bot, CHOP_BOT)
+
+    def test_inverse_cascade_sustained_blocks_same_session_reentry(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96.5", "96.0", "95.7", "95.4"),
+                "SOXS": bars("10.00", "10.20", "10.30", "10.35", "10.40"),
+            },
+            previous_session_closes={SOXL: Decimal("100")},
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": datetime.now(timezone.utc).isoformat(),
+                    "lockout_active": True,
+                }
+            )
+
+        output, status = self.run_bot(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("reason=inverse_cascade_reentry_locked", output)
+        self.assertEqual(status.active_bot, INVERSE_BOT)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_stopout_blocks_same_session_legacy_inverse(
+        self,
+    ) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "99", "98", "97"),
+                "SOXS": bars("10.00", "10.20", "10.40", "10.60"),
+            }
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (
+                        datetime.now(timezone.utc) - timedelta(minutes=10)
+                    ).isoformat(),
+                    "lockout_active": True,
+                    "stopped_out_at": datetime.now(timezone.utc).isoformat(),
+                    "stopped_out_reason": "trailing_stop_breached",
+                }
+            )
+
+        output, status = self.run_bot(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+            ),
+        )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("reason=inverse_cascade_stopped_out_session_locked", output)
+        self.assertEqual(status.active_bot, INVERSE_BOT)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_inverse_cascade_sustained_uses_wider_trailing_stop(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "99", "98", "97", "96"),
+                "SOXS": bars("10.00", "10.05", "10.04", "10.05", "10.05"),
+            },
+            positions={
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "10.00",
+                }
+            },
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_position_owner(SOXS, INVERSE_BOT)
+            state_store.set_high_water_mark(SOXS, Decimal("10.20"))
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": datetime.now(timezone.utc).isoformat(),
+                    "lockout_active": True,
+                }
+            )
+
+        output, status = self.run_bot(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_sustain_minutes=3,
+                inverse_cascade_trail_percent=Decimal("3.50"),
+                inverse_cascade_proven_mfe_percent=Decimal("0.75"),
+            ),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertIn("trail=3.50%", output)
+        self.assertEqual(status.action_taken, "manage_open_position")
+
+    def test_inverse_cascade_intrabar_mfe_marks_proven_state(self) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "99", "98", latest_at=current_time),
+                "SOXS": ohlc_bars(
+                    ("10.00", "10.00", "9.95", "9.98"),
+                    ("9.98", "10.08", "9.97", "10.01"),
+                    latest_at=current_time,
+                ),
+            },
+            positions={
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "10.00",
+                }
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            state_store.set_position_owner(SOXS, INVERSE_BOT)
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "lockout_active": True,
+                    "invalidation_started_at": None,
+                }
+            )
+
+            output = io.StringIO()
+            with patched_bot_time(current_time), contextlib.redirect_stdout(output):
+                status = EdgeWalkerBot(
+                    replace(
+                        config(),
+                        inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                        inverse_cascade_proven_mfe_percent=Decimal("0.75"),
+                    ),
+                    client,
+                    state_store,
+                    None,
+                    lifecycle_ledger,
+                ).run_once()
+
+            state = state_store.get_inverse_cascade_state()
+            self.assertEqual(status.action_taken, "manage_open_position")
+            self.assertIsNotNone(state.get("proven_at"))
+            self.assertEqual(state.get("proven_threshold_percent"), "0.75")
+            self.assertEqual(state.get("max_favorable_excursion_percent"), "0.8")
+
+    def test_inverse_cascade_proven_suppresses_route_invalidation_and_widens_trail(
+        self,
+    ) -> None:
+        current_time = datetime.now(timezone.utc)
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96", "97", "98", latest_at=current_time),
+                "SOXS": ohlc_bars(
+                    ("10.00", "10.00", "9.95", "9.98"),
+                    ("9.98", "10.08", "9.97", "10.01"),
+                    ("10.01", "10.03", "9.94", "9.96"),
+                    latest_at=current_time,
+                ),
+            },
+            positions={
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "10.00",
+                }
+            },
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_position_owner(SOXS, INVERSE_BOT)
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=20)).isoformat(),
+                    "lockout_active": True,
+                    "invalidation_started_at": (
+                        current_time - timedelta(minutes=20)
+                    ).isoformat(),
+                }
+            )
+
+        output, status = self.run_bot(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_proven_mfe_percent=Decimal("0.75"),
+                inverse_cascade_proven_trail_percent=Decimal("6.00"),
+                inverse_cascade_proven_route_recovery_min_source_percent=Decimal("0.00"),
+            ),
+        )
+
+        self.assertEqual(client.sells, [])
+        self.assertIn("Proven cascade route invalidation suppressed", output)
+        self.assertIn("trail=6.00%", output)
+        self.assertEqual(
+            status.action_taken,
+            "hold_inverse_cascade_proven_route_suppressed",
+        )
+
+    def test_inverse_cascade_unproven_route_invalidates_normally(self) -> None:
+        current_time = datetime.now(timezone.utc)
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "96", "97", "98", latest_at=current_time),
+                "SOXS": ohlc_bars(
+                    ("10.00", "10.02", "9.95", "9.98"),
+                    ("9.98", "10.01", "9.90", "9.94"),
+                    ("9.94", "9.98", "9.88", "9.90"),
+                    latest_at=current_time,
+                ),
+            },
+            positions={
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "10.00",
+                }
+            },
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_position_owner(SOXS, INVERSE_BOT)
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=20)).isoformat(),
+                    "lockout_active": True,
+                    "invalidation_started_at": (
+                        current_time - timedelta(minutes=10)
+                    ).isoformat(),
+                }
+            )
+
+        output, status = self.run_bot(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                inverse_cascade_proven_mfe_percent=Decimal("0.75"),
+                inverse_cascade_route_invalidation_grace_minutes=5,
+            ),
+        )
+
+        self.assertEqual(len(client.sells), 1)
+        self.assertIn("route invalidated", output)
+        self.assertEqual(
+            status.action_taken,
+            "close_route_invalidated_position_no_same_cycle_reversal",
+        )
+
+    def test_inverse_cascade_reset_keeps_state_while_position_open(self) -> None:
+        current_time = datetime.now(timezone.utc)
+        client = FakeClient(
+            {"SOXL": bars("100", "99", "100", latest_at=current_time)},
+            positions={
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "10.00",
+                }
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=20)).isoformat(),
+                    "lockout_active": True,
+                }
+            )
+
+            edgewalker = EdgeWalkerBot(
+                replace(
+                    config(),
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                ),
+                client,
+                state_store,
+                None,
+                lifecycle_ledger,
+            )
+            edgewalker._inverse_cascade_maybe_reset_state(
+                {
+                    "thresholds": {"reset_source_current_min": Decimal("-0.50")},
+                    "source_current_percent": Decimal("0.00"),
+                }
+            )
+
+            self.assertTrue(
+                state_store.get_inverse_cascade_state().get("lockout_active")
+            )
+
+    def test_inverse_cascade_route_valid_clears_invalidation_timer(self) -> None:
+        client = FakeClient(
+            {
+                "SOXL": bars("100", "99", "98"),
+                "SOXS": bars("10.00", "10.10", "10.20"),
+            },
+            positions={
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "10.00",
+                }
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            state_store.set_position_owner(SOXS, INVERSE_BOT)
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": datetime.now(timezone.utc)
+                    .astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": datetime.now(timezone.utc).isoformat(),
+                    "lockout_active": True,
+                    "invalidation_started_at": (
+                        datetime.now(timezone.utc) - timedelta(minutes=3)
+                    ).isoformat(),
+                }
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = EdgeWalkerBot(
+                    replace(
+                        config(),
+                        inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    ),
+                    client,
+                    state_store,
+                    None,
+                    lifecycle_ledger,
+                ).run_once()
+
+            self.assertEqual(status.action_taken, "manage_open_position")
+            self.assertIsNone(
+                state_store.get_inverse_cascade_state().get(
+                    "invalidation_started_at"
+                )
+            )
 
     def test_v8_fresh_directional_regime_blocks_entry_until_survives(self) -> None:
         client = FakeClient({"SOXL": bars("100", "101", "102")})
@@ -1065,6 +1901,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
                 config(),
                 preset_name="Lead_Momentum_Specialist",
                 regime_gap_threshold=Decimal("0.05"),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
             ),
         )
 
@@ -1106,6 +1943,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
                 config(),
                 preset_name="Lead_Momentum_Specialist",
                 regime_gap_threshold=Decimal("0.05"),
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
             ),
         )
 
@@ -2137,7 +2975,11 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         output, status = self.run_bot(
             client,
-            bot_config=replace(config(), directional_mode="CONSERVATIVE"),
+            bot_config=replace(
+                config(),
+                directional_mode="CONSERVATIVE",
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
         )
 
         self.assertEqual(client.sells, [])
@@ -2161,7 +3003,11 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         output, status = self.run_bot(
             client,
-            bot_config=replace(config(), directional_mode="AGGRESSIVE"),
+            bot_config=replace(
+                config(),
+                directional_mode="AGGRESSIVE",
+                inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+            ),
         )
 
         self.assertEqual(client.sells, [])
@@ -2608,6 +3454,38 @@ class AlpacaClientTest(unittest.TestCase):
         }
 
         self.assertEqual(client.get_recent_bars("SOXL", 3), [])
+
+    def test_previous_session_close_uses_latest_bar_before_current_session(
+        self,
+    ) -> None:
+        client = AlpacaClient(config())
+        calls: list[tuple[str, str, dict[str, str] | None]] = []
+
+        def fake_data_request(
+            method: str,
+            path: str,
+            params: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
+            calls.append((method, path, params))
+            return {
+                "bars": [
+                    {"t": "2026-06-08T04:00:00Z", "c": "99.50"},
+                    {"t": "2026-06-09T04:00:00Z", "c": "101.25"},
+                    {"t": "2026-06-10T04:00:00Z", "c": "102.75"},
+                ],
+                "next_page_token": None,
+                "symbol": "SOXL",
+            }
+
+        client._data_request = fake_data_request
+
+        with patched_bot_time(datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc)):
+            previous_close = client.get_previous_session_close("SOXL")
+
+        self.assertEqual(previous_close, Decimal("101.25"))
+        self.assertEqual(calls[0][0], "GET")
+        self.assertEqual(calls[0][1], "/stocks/SOXL/bars")
+        self.assertEqual(calls[0][2]["timeframe"], "1Day")
 
 
 if __name__ == "__main__":

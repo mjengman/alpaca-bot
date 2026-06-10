@@ -56,6 +56,62 @@ CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT = Decimal("2.00")
 CHOP_PERMISSION_FIREWALL_MAX_DRAWDOWN_PERCENT = Decimal("-5.00")
 CHOP_PERMISSION_FIREWALL_NEAR_MOMENTUM_MIN_TRUST_SCORE = 64
 CHOP_PERMISSION_FIREWALL_NEAR_MOMENTUM_MIN_SOURCE_PERCENT = Decimal("2.50")
+INVERSE_CASCADE_MODE_OFF = "OFF"
+INVERSE_CASCADE_MODE_LOOSE = "LOOSE"
+INVERSE_CASCADE_MODE_STRICT = "STRICT"
+INVERSE_CASCADE_MODE_VELOCITY = "VELOCITY"
+INVERSE_CASCADE_MODE_SUSTAINED = "SUSTAINED"
+INVERSE_CASCADE_MODES = {
+    INVERSE_CASCADE_MODE_OFF,
+    INVERSE_CASCADE_MODE_LOOSE,
+    INVERSE_CASCADE_MODE_STRICT,
+    INVERSE_CASCADE_MODE_VELOCITY,
+    INVERSE_CASCADE_MODE_SUSTAINED,
+}
+INVERSE_CASCADE_DEFAULTS = {
+    INVERSE_CASCADE_MODE_LOOSE: {
+        "source_current_max": Decimal("-1.50"),
+        "source_drawdown_max": Decimal("-2.50"),
+        "inverse_current_min": Decimal("1.00"),
+        "source_recovery_max": Decimal("2.50"),
+    },
+    INVERSE_CASCADE_MODE_STRICT: {
+        "source_current_max": Decimal("-2.50"),
+        "source_drawdown_max": Decimal("-4.00"),
+        "inverse_current_min": Decimal("2.00"),
+        "source_recovery_max": Decimal("1.50"),
+    },
+    INVERSE_CASCADE_MODE_VELOCITY: {
+        "source_current_max": Decimal("-1.50"),
+        "source_drawdown_max": Decimal("-2.50"),
+        "inverse_current_min": Decimal("1.00"),
+        "source_recovery_max": Decimal("2.00"),
+        "source_velocity_max": Decimal("-1.00"),
+    },
+    INVERSE_CASCADE_MODE_SUSTAINED: {
+        "source_current_max": Decimal("-2.75"),
+        "source_drawdown_max": Decimal("-4.00"),
+        "inverse_current_min": Decimal("2.75"),
+        "source_recovery_max": Decimal("1.25"),
+        "source_velocity_max": Decimal("-1.25"),
+        "block_source_uptrend": False,
+        "sustain_source_current_max": Decimal("-2.50"),
+        "sustain_source_window_start_min": Decimal("-9.00"),
+        "sustain_source_prior_close_max": Decimal("-3.00"),
+        "sustain_inverse_current_min": Decimal("2.25"),
+        "sustain_source_deepening_min": Decimal("0.50"),
+        "sustain_source_new_low_count_min": 2,
+        "reset_source_current_min": Decimal("-0.50"),
+    },
+}
+INVERSE_CASCADE_VELOCITY_WINDOW_MINUTES = 10
+INVERSE_CASCADE_SUSTAIN_MINUTES = 5
+INVERSE_CASCADE_TRAIL_PERCENT = Decimal("3.50")
+INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES = 5
+INVERSE_CASCADE_PROVEN_MFE_PERCENT = Decimal("0.50")
+INVERSE_CASCADE_PROVEN_TRAIL_PERCENT = Decimal("6.00")
+INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT = Decimal("4.00")
+INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT = Decimal("0.00")
 REGIME_STRENGTH_RANGE = "RANGE"
 REGIME_STRENGTH_WEAK = "WEAK"
 REGIME_STRENGTH_MODERATE = "MODERATE"
@@ -290,6 +346,23 @@ class BotConfig:
     chop_permission_max_abs_source_percent: Decimal = (
         CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT
     )
+    inverse_cascade_mode: str = INVERSE_CASCADE_MODE_SUSTAINED
+    inverse_cascade_velocity_window_minutes: int = (
+        INVERSE_CASCADE_VELOCITY_WINDOW_MINUTES
+    )
+    inverse_cascade_sustain_minutes: int = INVERSE_CASCADE_SUSTAIN_MINUTES
+    inverse_cascade_trail_percent: Decimal = INVERSE_CASCADE_TRAIL_PERCENT
+    inverse_cascade_route_invalidation_grace_minutes: int = (
+        INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES
+    )
+    inverse_cascade_proven_mfe_percent: Decimal = INVERSE_CASCADE_PROVEN_MFE_PERCENT
+    inverse_cascade_proven_trail_percent: Decimal = INVERSE_CASCADE_PROVEN_TRAIL_PERCENT
+    inverse_cascade_proven_trail_tighten_mfe_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT
+    )
+    inverse_cascade_proven_route_recovery_min_source_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT
+    )
     momentum_authority_required: bool = False
     momentum_authority_revoke_exits: bool = False
     momentum_authority_latch_once_active: bool = False
@@ -453,6 +526,67 @@ class BotConfig:
         if chop_permission_max_abs_source_percent < 0:
             raise BotError("CHOP_PERMISSION_MAX_ABS_SOURCE_PERCENT must be at least 0")
 
+        inverse_cascade_mode = os.environ.get(
+            "INVERSE_CASCADE_MODE",
+            INVERSE_CASCADE_MODE_SUSTAINED,
+        ).strip().upper()
+        if inverse_cascade_mode not in INVERSE_CASCADE_MODES:
+            raise BotError(
+                "INVERSE_CASCADE_MODE must be OFF, LOOSE, STRICT, VELOCITY, or SUSTAINED"
+            )
+        inverse_cascade_velocity_window_minutes = env_int(
+            "INVERSE_CASCADE_VELOCITY_WINDOW_MINUTES",
+            INVERSE_CASCADE_VELOCITY_WINDOW_MINUTES,
+        )
+        if inverse_cascade_velocity_window_minutes < 1:
+            raise BotError(
+                "INVERSE_CASCADE_VELOCITY_WINDOW_MINUTES must be at least 1"
+            )
+        inverse_cascade_sustain_minutes = env_int(
+            "INVERSE_CASCADE_SUSTAIN_MINUTES",
+            INVERSE_CASCADE_SUSTAIN_MINUTES,
+        )
+        if inverse_cascade_sustain_minutes < 1:
+            raise BotError("INVERSE_CASCADE_SUSTAIN_MINUTES must be at least 1")
+        inverse_cascade_trail_percent = env_decimal(
+            "INVERSE_CASCADE_TRAIL_PERCENT",
+            str(INVERSE_CASCADE_TRAIL_PERCENT),
+        )
+        if inverse_cascade_trail_percent <= 0:
+            raise BotError("INVERSE_CASCADE_TRAIL_PERCENT must be greater than 0")
+        inverse_cascade_route_invalidation_grace_minutes = env_int(
+            "INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES",
+            INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES,
+        )
+        if inverse_cascade_route_invalidation_grace_minutes < 0:
+            raise BotError(
+                "INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES must be at least 0"
+            )
+        inverse_cascade_proven_mfe_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_MFE_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_MFE_PERCENT),
+        )
+        if inverse_cascade_proven_mfe_percent < 0:
+            raise BotError("INVERSE_CASCADE_PROVEN_MFE_PERCENT must be at least 0")
+        inverse_cascade_proven_trail_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_TRAIL_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_TRAIL_PERCENT),
+        )
+        if inverse_cascade_proven_trail_percent <= 0:
+            raise BotError("INVERSE_CASCADE_PROVEN_TRAIL_PERCENT must be greater than 0")
+        inverse_cascade_proven_trail_tighten_mfe_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT),
+        )
+        if inverse_cascade_proven_trail_tighten_mfe_percent < 0:
+            raise BotError(
+                "INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT must be at least 0"
+            )
+        inverse_cascade_proven_route_recovery_min_source_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT),
+        )
+
         runtime_observer_context = None
         if env_bool("BALANCEDPURE_RUNTIME_OBSERVER_ENABLED", False):
             runtime_observer_context = {
@@ -494,6 +628,23 @@ class BotConfig:
             chop_permission_mode=chop_permission_mode,
             chop_permission_max_abs_source_percent=(
                 chop_permission_max_abs_source_percent
+            ),
+            inverse_cascade_mode=inverse_cascade_mode,
+            inverse_cascade_velocity_window_minutes=(
+                inverse_cascade_velocity_window_minutes
+            ),
+            inverse_cascade_sustain_minutes=inverse_cascade_sustain_minutes,
+            inverse_cascade_trail_percent=inverse_cascade_trail_percent,
+            inverse_cascade_route_invalidation_grace_minutes=(
+                inverse_cascade_route_invalidation_grace_minutes
+            ),
+            inverse_cascade_proven_mfe_percent=inverse_cascade_proven_mfe_percent,
+            inverse_cascade_proven_trail_percent=inverse_cascade_proven_trail_percent,
+            inverse_cascade_proven_trail_tighten_mfe_percent=(
+                inverse_cascade_proven_trail_tighten_mfe_percent
+            ),
+            inverse_cascade_proven_route_recovery_min_source_percent=(
+                inverse_cascade_proven_route_recovery_min_source_percent
             ),
             momentum_authority_required=env_bool("MOMENTUM_AUTHORITY_REQUIRED", False),
             momentum_authority_revoke_exits=env_bool(
@@ -603,6 +754,51 @@ class AlpacaClient:
             raise BotError(f"Unexpected bars response: {data!r}")
 
         return bars
+
+    def get_previous_session_close(self, symbol: str) -> Decimal | None:
+        target_date = datetime.now(NY_TZ).date()
+        start = datetime.combine(
+            target_date - timedelta(days=21),
+            datetime.min.time(),
+            NY_TZ,
+        )
+        end = datetime.combine(target_date + timedelta(days=1), datetime.min.time(), NY_TZ)
+        params = {
+            "timeframe": "1Day",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "limit": "1000",
+            "adjustment": "raw",
+            "feed": self.config.data_feed,
+            "sort": "asc",
+        }
+
+        data = self._data_request("GET", f"/stocks/{symbol}/bars", params)
+        bars = data.get("bars") or []
+        if isinstance(bars, dict):
+            bars = bars.get(symbol) or []
+        if not isinstance(bars, list):
+            raise BotError(f"Unexpected previous close bars response: {data!r}")
+
+        prior_bars: list[tuple[datetime, Decimal]] = []
+        for bar in bars:
+            if not isinstance(bar, dict):
+                continue
+            timestamp = parse_market_timestamp(bar.get("t"))
+            if timestamp is None or timestamp.astimezone(NY_TZ).date() >= target_date:
+                continue
+            close = bar.get("c")
+            if close is None:
+                continue
+            try:
+                prior_bars.append((timestamp, Decimal(str(close))))
+            except InvalidOperation:
+                continue
+        if not prior_bars:
+            return None
+
+        prior_bars.sort(key=lambda item: item[0])
+        return prior_bars[-1][1]
 
     def get_latest_trade(self, symbol: str) -> dict[str, Any] | None:
         data = self._data_request(
@@ -1219,6 +1415,28 @@ class BotStateStore:
             del trailing[symbol]
             self._write(data)
 
+    def get_inverse_cascade_state(self) -> dict[str, Any]:
+        data = self._read()
+        state = data.get("inverse_cascade", {})
+        return state if isinstance(state, dict) else {}
+
+    def set_inverse_cascade_state(self, state: dict[str, Any]) -> None:
+        data = self._read()
+        data["inverse_cascade"] = lifecycle_json_value(state)
+        self._write(data)
+
+    def update_inverse_cascade_state(self, **fields: Any) -> dict[str, Any]:
+        state = self.get_inverse_cascade_state()
+        state.update(lifecycle_json_value(fields))
+        self.set_inverse_cascade_state(state)
+        return state
+
+    def clear_inverse_cascade_state(self) -> None:
+        data = self._read()
+        if "inverse_cascade" in data:
+            data["inverse_cascade"] = {}
+            self._write(data)
+
     def get_last_entry_at(self, bot_name: str, symbol: str) -> datetime | None:
         data = self._read()
         raw = data.get("entries", {}).get(bot_name, {}).get(symbol)
@@ -1323,6 +1541,7 @@ class BotStateStore:
                 "regime": {},
                 "orders": {},
                 "v9": {},
+                "inverse_cascade": {},
             }
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -1334,6 +1553,7 @@ class BotStateStore:
         data.setdefault("entries", {})
         data.setdefault("regime", {})
         data.setdefault("orders", {})
+        data.setdefault("inverse_cascade", {})
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -1851,6 +2071,7 @@ class TrailingStopBot:
         avg_entry_price = decimal_from_api(
             position.get("avg_entry_price", current_price), "avg entry price"
         )
+        self._maybe_update_inverse_cascade_proven_state(symbol, avg_entry_price)
         high_water_mark = self.state_store.get_high_water_mark(symbol)
         reference_price = max(current_price, avg_entry_price)
 
@@ -1858,14 +2079,15 @@ class TrailingStopBot:
             high_water_mark = reference_price
             self.state_store.set_high_water_mark(symbol, high_water_mark)
 
+        trail_percent = self._effective_trail_percent(symbol)
         stop_price = high_water_mark * (
-            Decimal("1") - (self.config.trail_percent / Decimal("100"))
+            Decimal("1") - (trail_percent / Decimal("100"))
         )
         qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
 
         print(
             f"[RISK] {symbol}: position qty={format_decimal(qty)} current={current_price:.4f} "
-            f"hwm={high_water_mark:.4f} bot_stop={stop_price:.4f}"
+            f"hwm={high_water_mark:.4f} trail={trail_percent}% bot_stop={stop_price:.4f}"
         )
         stop_breached = current_price <= stop_price
         self._record_lifecycle(
@@ -1877,12 +2099,14 @@ class TrailingStopBot:
             avg_entry_price=avg_entry_price,
             high_water_mark=high_water_mark,
             stop_price=stop_price,
+            trail_percent=trail_percent,
             stop_breached=stop_breached,
             require_live_mark=require_live_mark,
         )
 
         if stop_breached:
             print(f"[RISK] {symbol}: trailing stop breached; submitting fractional market sell.")
+            self._mark_inverse_cascade_trailing_stop_lockout(symbol)
             self._record_lifecycle(
                 LIFECYCLE_INTENDED_EXIT,
                 symbol=symbol,
@@ -1891,6 +2115,7 @@ class TrailingStopBot:
                 reason="trailing_stop_breached",
                 current_price=current_price,
                 stop_price=stop_price,
+                trail_percent=trail_percent,
                 high_water_mark=high_water_mark,
             )
             try:
@@ -1922,6 +2147,52 @@ class TrailingStopBot:
             self.state_store.clear_symbol(symbol)
         else:
             print(f"[RISK] {symbol}: trailing stop holding.")
+
+    def _mark_inverse_cascade_trailing_stop_lockout(self, symbol: str) -> None:
+        if (
+            symbol != SOXS
+            or self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+        ):
+            return
+        state = self.state_store.get_inverse_cascade_state()
+        session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+        if (
+            state.get("mode") != INVERSE_CASCADE_MODE_SUSTAINED
+            or state.get("session_date") != session_date
+            or not state.get("entered_at")
+        ):
+            return
+        state["lockout_active"] = True
+        state["stopped_out_at"] = datetime.now(timezone.utc).isoformat()
+        state["stopped_out_reason"] = "trailing_stop_breached"
+        state["invalidation_started_at"] = None
+        self.state_store.set_inverse_cascade_state(state)
+
+    def _effective_trail_percent(self, symbol: str) -> Decimal:
+        if (
+            symbol == SOXS
+            and self.config.inverse_cascade_mode == INVERSE_CASCADE_MODE_SUSTAINED
+        ):
+            state = self.state_store.get_inverse_cascade_state()
+            session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+            if (
+                state.get("mode") == INVERSE_CASCADE_MODE_SUSTAINED
+                and state.get("session_date") == session_date
+                and state.get("entered_at")
+            ):
+                if state.get("proven_at"):
+                    max_mfe = optional_decimal_from_api(
+                        state.get("max_favorable_excursion_percent"),
+                        "inverse cascade max favorable excursion",
+                    )
+                    if (
+                        max_mfe is None
+                        or max_mfe
+                        < self.config.inverse_cascade_proven_trail_tighten_mfe_percent
+                    ):
+                        return self.config.inverse_cascade_proven_trail_percent
+                return self.config.inverse_cascade_trail_percent
+        return self.config.trail_percent
 
     def _latest_price(
         self,
@@ -1983,6 +2254,88 @@ class TrailingStopBot:
         if self.market_data is not None:
             return self.market_data.get_recent_bars(symbol, minutes)
         return self.client.get_recent_bars(symbol, minutes)
+
+    def _maybe_update_inverse_cascade_proven_state(
+        self,
+        symbol: str,
+        avg_entry_price: Decimal,
+    ) -> dict[str, Any]:
+        if (
+            self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or symbol != SOXS
+            or avg_entry_price <= 0
+        ):
+            return {}
+        state = self.state_store.get_inverse_cascade_state()
+        session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+        if (
+            state.get("mode") != INVERSE_CASCADE_MODE_SUSTAINED
+            or state.get("session_date") != session_date
+            or not state.get("entered_at")
+        ):
+            return state
+
+        highs = [
+            value
+            for bar in self._session_bars(symbol)
+            if (value := self._bar_decimal(bar, "h", "c", "o")) is not None
+        ]
+        if not highs:
+            return state
+
+        high_price = max(highs)
+        mfe_percent = (
+            (high_price - avg_entry_price) / avg_entry_price * Decimal("100")
+        )
+        previous_mfe = optional_decimal_from_api(
+            state.get("max_favorable_excursion_percent"),
+            "inverse cascade max favorable excursion",
+        )
+        changed = False
+        if previous_mfe is None or mfe_percent > previous_mfe:
+            state["max_favorable_excursion_percent"] = format_decimal(mfe_percent)
+            state["max_favorable_price"] = format_decimal(high_price)
+            changed = True
+
+        if (
+            not state.get("proven_at")
+            and mfe_percent >= self.config.inverse_cascade_proven_mfe_percent
+        ):
+            state["proven_at"] = datetime.now(timezone.utc).isoformat()
+            state["proven_mfe_percent"] = format_decimal(mfe_percent)
+            state["proven_threshold_percent"] = format_decimal(
+                self.config.inverse_cascade_proven_mfe_percent
+            )
+            changed = True
+
+        if changed:
+            self.state_store.set_inverse_cascade_state(state)
+        return state
+
+    def _session_bars(self, symbol: str) -> list[dict[str, Any]]:
+        session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+        return [
+            bar
+            for bar in self._recent_bars(symbol, 420)
+            if self._record_date(bar.get("t")) == session_date
+        ]
+
+    def _record_date(self, value: Any) -> str | None:
+        parsed = parse_market_timestamp(value)
+        if parsed is None:
+            return None
+        return parsed.astimezone(NY_TZ).date().isoformat()
+
+    def _bar_decimal(
+        self,
+        bar: dict[str, Any],
+        *field_names: str,
+    ) -> Decimal | None:
+        for field_name in field_names:
+            value = optional_decimal_from_api(bar.get(field_name), field_name)
+            if value is not None:
+                return value
+        return None
 
     def _latest_market_mark(
         self,
@@ -2149,6 +2502,7 @@ class EdgeWalkerBot:
         self._latest_freshness: MarketDataFreshness | None = None
         self._adaptive_posture: AdaptivePosture | None = None
         self._trend_trust: dict[str, Any] | None = None
+        self._inverse_cascade_context: dict[str, Any] | None = None
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
         payload = {
@@ -2223,6 +2577,7 @@ class EdgeWalkerBot:
         self._latest_freshness = None
         self._adaptive_posture = None
         self._trend_trust = None
+        self._inverse_cascade_context = None
         clock = self.client.get_clock()
         account = self.client.get_account()
         market_open = bool(clock.get("is_open"))
@@ -2303,6 +2658,7 @@ class EdgeWalkerBot:
         )
         route = RegimeRouter().route(signal.regime)
         self._v9_update_momentum_context(self._v9_authority_evaluation_route(route))
+        route = self._inverse_cascade_route_override(route)
         route = self._apply_enabled_bot_mask(route)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
@@ -2446,13 +2802,35 @@ class EdgeWalkerBot:
 
         stale_symbol = self._stale_symbol(route, positions)
         if stale_symbol:
+            stale_owner = self.state_store.get_position_owner(stale_symbol)
+            grace_action = self._maybe_hold_inverse_cascade_route_invalidated_position(
+                stale_symbol,
+                positions[stale_symbol],
+                orders,
+                signal.regime,
+                route.active_bot,
+                stale_owner,
+            )
+            if grace_action:
+                return self._build_status(
+                    checked_at,
+                    market_open,
+                    next_open,
+                    next_close,
+                    account,
+                    signal,
+                    route,
+                    positions,
+                    False,
+                    grace_action,
+                )
             action_taken = self._close_stale_position(
                 stale_symbol,
                 positions[stale_symbol],
                 orders,
                 signal.regime,
                 route.active_bot,
-                self.state_store.get_position_owner(stale_symbol),
+                stale_owner,
             )
             return self._build_status(
                 checked_at,
@@ -2466,6 +2844,8 @@ class EdgeWalkerBot:
                 False,
                 action_taken,
             )
+
+        self._clear_inverse_cascade_invalidation_when_route_valid(route, positions)
 
         authority_exit = self._maybe_exit_momentum_authority_revoked_position(
             route,
@@ -2687,6 +3067,10 @@ class EdgeWalkerBot:
             f"[TRADE] {route.active_bot}: submitting ${format_decimal(effective_notional)} "
             f"market buy for {route.routed_symbol}."
         )
+        lifecycle_context = self._entry_lifecycle_context(
+            route,
+            entry_decision.reason,
+        )
         self._record_lifecycle(
             LIFECYCLE_INTENDED_ENTRY,
             bot=route.active_bot,
@@ -2700,6 +3084,7 @@ class EdgeWalkerBot:
             regime=signal.regime,
             reason=entry_decision.reason,
             mode=self._directional_mode_for_route(route),
+            lifecycle_context=lifecycle_context,
         )
         try:
             order = self.client.submit_market_buy(route.routed_symbol, effective_notional)
@@ -2715,6 +3100,7 @@ class EdgeWalkerBot:
                 regime=signal.regime,
                 reason=entry_decision.reason,
                 mode=self._directional_mode_for_route(route),
+                lifecycle_context=lifecycle_context,
                 error=str(exc),
                 broker_constraint=self._broker_rejection_payload(
                     exc,
@@ -2734,13 +3120,16 @@ class EdgeWalkerBot:
             regime=signal.regime,
             reason=entry_decision.reason,
             mode=self._directional_mode_for_route(route),
+            lifecycle_context=lifecycle_context,
             order=order,
         )
         self.order_tracker.track_submitted_order(
             order,
             route.active_bot,
             entry_decision.reason,
+            lifecycle_context,
         )
+        self._mark_inverse_cascade_entry(route, entry_decision.reason)
         if not self.config.dry_run:
             self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
             self.state_store.set_last_entry_at(route.active_bot, route.routed_symbol)
@@ -3542,6 +3931,515 @@ class EdgeWalkerBot:
             return BotRoute(MOMENTUM_BOT, SOXL, True)
         return route
 
+    def _inverse_cascade_route_override(self, route: BotRoute) -> BotRoute:
+        self._inverse_cascade_context = None
+        if self.config.inverse_cascade_mode == INVERSE_CASCADE_MODE_OFF:
+            return route
+        if INVERSE_BOT not in self.config.enabled_bots:
+            return route
+
+        context = self._inverse_cascade_context_for_mode()
+        self._inverse_cascade_maybe_reset_state(context)
+        context["base_route_bot"] = route.active_bot
+        context["base_route_symbol"] = route.routed_symbol
+        reasons = context.get("reasons") or []
+        thresholds = context.get("thresholds") or {}
+        if (
+            context.get("mode") == INVERSE_CASCADE_MODE_SUSTAINED
+            and thresholds.get("block_source_uptrend")
+            and route.active_bot == MOMENTUM_BOT
+            and route.routed_symbol == SOXL
+        ):
+            reasons.append("source_uptrend_route_blocks_sustained_cascade")
+        if reasons:
+            print(
+                "[INVERSE] Cascade candidate blocked: "
+                f"mode={context.get('mode')} reason={','.join(reasons)} "
+                f"base={context.get('base_route_bot')}/{context.get('base_route_symbol') or 'NONE'} "
+                f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+                f"dd={self._decimal_text(context.get('source_drawdown_percent'))}% "
+                f"recovery={self._decimal_text(context.get('source_recovery_percent'))}% "
+                f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+                f"velocity={self._decimal_text(context.get('source_velocity_percent'))}% "
+                f"deepening={self._decimal_text(context.get('sustain_source_deepening_percent'))}% "
+                f"new_lows={context.get('sustain_source_new_low_count', '--')} "
+                f"sustain={context.get('sustained_window_minutes', '--')}m"
+            )
+            return route
+
+        self._inverse_cascade_context = context
+        self._inverse_cascade_clear_invalidation_state()
+        print(
+            "[INVERSE] Cascade candidate qualified: "
+            f"mode={context.get('mode')} "
+            f"base={context.get('base_route_bot')}/{context.get('base_route_symbol') or 'NONE'} "
+            f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+            f"dd={self._decimal_text(context.get('source_drawdown_percent'))}% "
+            f"recovery={self._decimal_text(context.get('source_recovery_percent'))}% "
+            f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+            f"velocity={self._decimal_text(context.get('source_velocity_percent'))}% "
+            f"deepening={self._decimal_text(context.get('sustain_source_deepening_percent'))}% "
+            f"new_lows={context.get('sustain_source_new_low_count', '--')} "
+            f"sustain={context.get('sustained_window_minutes', '--')}m"
+        )
+        if route.active_bot != INVERSE_BOT or route.routed_symbol != SOXS:
+            print(
+                "[ROUTER] inverse cascade override: "
+                f"from_bot={route.active_bot} from_symbol={route.routed_symbol or 'NONE'} "
+                f"to_bot={INVERSE_BOT} to_symbol={SOXS}"
+            )
+        return BotRoute(INVERSE_BOT, SOXS, True)
+
+    def _inverse_cascade_context_for_mode(self) -> dict[str, Any]:
+        mode = self.config.inverse_cascade_mode
+        thresholds = INVERSE_CASCADE_DEFAULTS.get(mode, {})
+        context: dict[str, Any] = {
+            "mode": mode,
+            "reasons": [],
+            "thresholds": thresholds,
+        }
+        reasons: list[str] = context["reasons"]
+
+        source_path = self._symbol_session_price_path(SOXL)
+        inverse_path = self._symbol_session_price_path(SOXS)
+        if source_path is None:
+            reasons.append("source_path_unavailable")
+        if inverse_path is None:
+            reasons.append("inverse_path_unavailable")
+        if source_path is None or inverse_path is None:
+            return context
+
+        source_recovery = source_path.current_percent - source_path.drawdown_percent
+        source_velocity = None
+        if mode in {INVERSE_CASCADE_MODE_VELOCITY, INVERSE_CASCADE_MODE_SUSTAINED}:
+            source_velocity = self._recent_session_return_percent(
+                SOXL,
+                self.config.inverse_cascade_velocity_window_minutes,
+            )
+
+        context.update(
+            {
+                "source_current_percent": source_path.current_percent,
+                "source_runup_percent": source_path.runup_percent,
+                "source_drawdown_percent": source_path.drawdown_percent,
+                "source_recovery_percent": source_recovery,
+                "inverse_current_percent": inverse_path.current_percent,
+                "inverse_runup_percent": inverse_path.runup_percent,
+                "source_velocity_percent": source_velocity,
+            }
+        )
+
+        source_current_max = thresholds.get("source_current_max")
+        if (
+            isinstance(source_current_max, Decimal)
+            and source_path.current_percent > source_current_max
+        ):
+            reasons.append("source_current_above_cascade_max")
+
+        source_drawdown_max = thresholds.get("source_drawdown_max")
+        if (
+            isinstance(source_drawdown_max, Decimal)
+            and source_path.drawdown_percent > source_drawdown_max
+        ):
+            reasons.append("source_drawdown_above_cascade_max")
+
+        inverse_current_min = thresholds.get("inverse_current_min")
+        if (
+            isinstance(inverse_current_min, Decimal)
+            and inverse_path.current_percent < inverse_current_min
+        ):
+            reasons.append("inverse_current_below_cascade_min")
+
+        source_recovery_max = thresholds.get("source_recovery_max")
+        if (
+            isinstance(source_recovery_max, Decimal)
+            and source_recovery > source_recovery_max
+        ):
+            reasons.append("source_recovery_above_cascade_max")
+
+        source_velocity_max = thresholds.get("source_velocity_max")
+        if mode in {INVERSE_CASCADE_MODE_VELOCITY, INVERSE_CASCADE_MODE_SUSTAINED}:
+            if source_velocity is None:
+                reasons.append("source_velocity_unavailable")
+            elif (
+                isinstance(source_velocity_max, Decimal)
+                and source_velocity > source_velocity_max
+            ):
+                reasons.append("source_velocity_above_cascade_max")
+
+        if mode == INVERSE_CASCADE_MODE_SUSTAINED:
+            context.update(self._inverse_cascade_sustained_window_context(thresholds))
+            reasons.extend(context.get("sustained_reasons") or [])
+
+        return context
+
+    def _inverse_cascade_sustained_window_context(
+        self,
+        thresholds: dict[str, Any],
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "sustained_reasons": [],
+            "sustained_window_minutes": self.config.inverse_cascade_sustain_minutes,
+        }
+        reasons: list[str] = context["sustained_reasons"]
+        window_minutes = self.config.inverse_cascade_sustain_minutes
+        source_bars = self._symbol_session_bars(SOXL)
+        inverse_bars = self._symbol_session_bars(SOXS)
+        if len(source_bars) < window_minutes or len(inverse_bars) < window_minutes:
+            reasons.append("sustained_window_insufficient_bars")
+            return context
+
+        source_open = self._v7_bar_decimal(source_bars[0], "o", "c")
+        inverse_open = self._v7_bar_decimal(inverse_bars[0], "o", "c")
+        if (
+            source_open is None
+            or inverse_open is None
+            or source_open <= 0
+            or inverse_open <= 0
+        ):
+            reasons.append("sustained_window_open_unavailable")
+            return context
+
+        source_recent = source_bars[-window_minutes:]
+        inverse_recent = inverse_bars[-window_minutes:]
+        source_threshold = thresholds.get("sustain_source_current_max")
+        inverse_threshold = thresholds.get("sustain_inverse_current_min")
+        source_percents: list[Decimal] = []
+        inverse_percents: list[Decimal] = []
+        for bar in source_recent:
+            price = self._v7_bar_decimal(bar, "c", "o")
+            if price is None:
+                reasons.append("sustained_source_price_unavailable")
+                break
+            source_percents.append((price - source_open) / source_open * Decimal("100"))
+        for bar in inverse_recent:
+            price = self._v7_bar_decimal(bar, "c", "o")
+            if price is None:
+                reasons.append("sustained_inverse_price_unavailable")
+                break
+            inverse_percents.append((price - inverse_open) / inverse_open * Decimal("100"))
+
+        if source_percents:
+            context["soxl_pct_from_open_at_cascade_window_start"] = source_percents[0]
+            source_prior_close = self._symbol_previous_session_close(SOXL)
+            source_window_start_price = self._v7_bar_decimal(source_recent[0], "c", "o")
+            if (
+                source_prior_close is not None
+                and source_prior_close > 0
+                and source_window_start_price is not None
+            ):
+                context["soxl_pct_vs_prior_close_at_cascade_window_start"] = (
+                    (source_window_start_price - source_prior_close)
+                    / source_prior_close
+                    * Decimal("100")
+                )
+            source_window_start_min = thresholds.get("sustain_source_window_start_min")
+            if (
+                isinstance(source_window_start_min, Decimal)
+                and source_percents[0] < source_window_start_min
+            ):
+                reasons.append("source_window_start_below_cascade_min")
+            source_prior_close_max = thresholds.get("sustain_source_prior_close_max")
+            source_prior_close_percent = context.get(
+                "soxl_pct_vs_prior_close_at_cascade_window_start"
+            )
+            if isinstance(source_prior_close_max, Decimal):
+                if not isinstance(source_prior_close_percent, Decimal):
+                    reasons.append("source_prior_close_unavailable")
+                elif source_prior_close_percent > source_prior_close_max:
+                    reasons.append("source_prior_close_above_cascade_max")
+            context["sustain_source_worst_percent"] = max(source_percents)
+            context["sustain_source_latest_percent"] = source_percents[-1]
+            source_deepening = source_percents[0] - source_percents[-1]
+            context["sustain_source_deepening_percent"] = source_deepening
+            (
+                direction_changes,
+                down_path_ratio,
+                path_length,
+                down_distance,
+            ) = self._inverse_cascade_window_quality(source_percents)
+            context["sustain_source_direction_changes"] = direction_changes
+            context["sustain_source_down_path_ratio"] = down_path_ratio
+            context["sustain_source_path_length_percent"] = path_length
+            context["sustain_source_down_distance_percent"] = down_distance
+            context.update(
+                self._inverse_cascade_entry_bar_momentum_context(
+                    source_recent,
+                    "soxl",
+                )
+            )
+        if inverse_percents:
+            context["sustain_inverse_worst_percent"] = min(inverse_percents)
+            context["sustain_inverse_latest_percent"] = inverse_percents[-1]
+            context.update(
+                self._inverse_cascade_entry_bar_momentum_context(
+                    inverse_recent,
+                    "soxs",
+                )
+            )
+            if context.get("entry_bar_soxs_direction") == "DOWN":
+                reasons.append("inverse_entry_bar_down")
+
+        source_new_low_count = self._inverse_cascade_recent_new_low_count(
+            source_bars,
+            window_minutes,
+        )
+        context["sustain_source_new_low_count"] = source_new_low_count
+
+        if (
+            isinstance(source_threshold, Decimal)
+            and source_percents
+            and any(percent > source_threshold for percent in source_percents)
+        ):
+            reasons.append("source_not_sustained_below_cascade_max")
+        if (
+            isinstance(inverse_threshold, Decimal)
+            and inverse_percents
+            and any(percent < inverse_threshold for percent in inverse_percents)
+        ):
+            reasons.append("inverse_not_sustained_above_cascade_min")
+
+        source_deepening_min = thresholds.get("sustain_source_deepening_min")
+        source_deepening = context.get("sustain_source_deepening_percent")
+        if (
+            isinstance(source_deepening_min, Decimal)
+            and isinstance(source_deepening, Decimal)
+            and source_deepening < source_deepening_min
+        ):
+            reasons.append("source_not_deepening_during_sustain")
+
+        source_new_low_count_min = thresholds.get("sustain_source_new_low_count_min")
+        if (
+            isinstance(source_new_low_count_min, int)
+            and source_new_low_count < source_new_low_count_min
+        ):
+            reasons.append("source_new_low_pressure_below_min")
+        return context
+
+    def _inverse_cascade_entry_bar_momentum_context(
+        self,
+        bars: list[dict[str, Any]],
+        symbol_key: str,
+    ) -> dict[str, Any]:
+        if len(bars) < 2:
+            return {}
+
+        prices: list[Decimal] = []
+        for bar in bars:
+            price = self._v7_bar_decimal(bar, "c", "o")
+            if price is None or price <= 0:
+                return {}
+            prices.append(price)
+
+        bar_moves: list[Decimal] = []
+        for index in range(1, len(prices)):
+            previous_price = prices[index - 1]
+            latest_price = prices[index]
+            if previous_price <= 0:
+                return {}
+            bar_moves.append(
+                (latest_price - previous_price) / previous_price * Decimal("100")
+            )
+
+        if not bar_moves:
+            return {}
+
+        bar_percent = bar_moves[-1]
+        if bar_percent > 0:
+            direction = "UP"
+        elif bar_percent < 0:
+            direction = "DOWN"
+        else:
+            direction = "FLAT"
+        context: dict[str, Any] = {
+            f"entry_bar_{symbol_key}_pct": bar_percent,
+            f"entry_bar_{symbol_key}_direction": direction,
+        }
+        prior_moves = bar_moves[:-1]
+        if prior_moves:
+            prior_avg_abs = sum(
+                (abs(move) for move in prior_moves),
+                Decimal("0"),
+            ) / Decimal(len(prior_moves))
+            context[f"entry_bar_{symbol_key}_prior_avg_abs_pct"] = prior_avg_abs
+            if prior_avg_abs > 0:
+                context[f"entry_bar_{symbol_key}_velocity_ratio"] = (
+                    abs(bar_percent) / prior_avg_abs
+                )
+        return context
+
+    def _inverse_cascade_window_quality(
+        self,
+        source_percents: list[Decimal],
+    ) -> tuple[int, Decimal | None, Decimal, Decimal]:
+        direction_changes = 0
+        previous_direction = 0
+        path_length = Decimal("0")
+        down_distance = Decimal("0")
+        for index in range(1, len(source_percents)):
+            delta = source_percents[index] - source_percents[index - 1]
+            if delta == 0:
+                continue
+            path_length += abs(delta)
+            if delta < 0:
+                down_distance += abs(delta)
+            direction = 1 if delta > 0 else -1
+            if previous_direction and direction != previous_direction:
+                direction_changes += 1
+            previous_direction = direction
+        down_path_ratio = (
+            down_distance / path_length if path_length > 0 else None
+        )
+        return direction_changes, down_path_ratio, path_length, down_distance
+
+    def _inverse_cascade_recent_new_low_count(
+        self,
+        source_bars: list[dict[str, Any]],
+        window_minutes: int,
+    ) -> int:
+        if len(source_bars) < window_minutes:
+            return 0
+
+        recent_start = len(source_bars) - window_minutes
+        running_low: Decimal | None = None
+        count = 0
+        for index, bar in enumerate(source_bars):
+            low_price = self._v7_bar_decimal(bar, "l", "c", "o")
+            if low_price is None:
+                continue
+            if running_low is None or low_price < running_low:
+                if index >= recent_start:
+                    count += 1
+                running_low = low_price
+        return count
+
+    def _inverse_cascade_session_date(self) -> str:
+        return datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+
+    def _inverse_cascade_same_session_state(self) -> dict[str, Any]:
+        state = self.state_store.get_inverse_cascade_state()
+        if state.get("session_date") != self._inverse_cascade_session_date():
+            if state:
+                self.state_store.clear_inverse_cascade_state()
+            return {}
+        return state
+
+    def _maybe_update_inverse_cascade_proven_state(
+        self,
+        symbol: str,
+        avg_entry_price: Decimal,
+    ) -> dict[str, Any]:
+        if (
+            self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or symbol != SOXS
+            or avg_entry_price <= 0
+        ):
+            return {}
+        state = self._inverse_cascade_same_session_state()
+        if (
+            state.get("mode") != INVERSE_CASCADE_MODE_SUSTAINED
+            or not state.get("entered_at")
+        ):
+            return state
+
+        session_bars = self._symbol_session_bars(symbol)
+        highs = [
+            value
+            for bar in session_bars
+            if (value := self._v7_bar_decimal(bar, "h", "c", "o")) is not None
+        ]
+        if not highs:
+            return state
+
+        high_price = max(highs)
+        mfe_percent = (
+            (high_price - avg_entry_price) / avg_entry_price * Decimal("100")
+        )
+        previous_mfe = optional_decimal_from_api(
+            state.get("max_favorable_excursion_percent"),
+            "inverse cascade max favorable excursion",
+        )
+        changed = False
+        if previous_mfe is None or mfe_percent > previous_mfe:
+            state["max_favorable_excursion_percent"] = format_decimal(mfe_percent)
+            state["max_favorable_price"] = format_decimal(high_price)
+            changed = True
+
+        if (
+            not state.get("proven_at")
+            and mfe_percent >= self.config.inverse_cascade_proven_mfe_percent
+        ):
+            state["proven_at"] = datetime.now(timezone.utc).isoformat()
+            state["proven_mfe_percent"] = format_decimal(mfe_percent)
+            state["proven_threshold_percent"] = format_decimal(
+                self.config.inverse_cascade_proven_mfe_percent
+            )
+            changed = True
+
+        if changed:
+            self.state_store.set_inverse_cascade_state(state)
+        return state
+
+    def _inverse_cascade_source_current_percent(self) -> Decimal | None:
+        source_path = self._symbol_session_price_path(SOXL)
+        if source_path is None:
+            return None
+        return source_path.current_percent
+
+    def _inverse_cascade_maybe_reset_state(self, context: dict[str, Any]) -> None:
+        if self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED:
+            return
+        state = self._inverse_cascade_same_session_state()
+        if not state.get("entered_at"):
+            return
+        if state.get("stopped_out_at"):
+            return
+        if self._position_qty(self.client.get_position(SOXS)) > 0:
+            return
+        thresholds = context.get("thresholds") or {}
+        reset_current_min = thresholds.get("reset_source_current_min")
+        source_current = context.get("source_current_percent")
+        if (
+            isinstance(reset_current_min, Decimal)
+            and isinstance(source_current, Decimal)
+            and source_current >= reset_current_min
+        ):
+            print(
+                "[INVERSE] Sustained cascade lockout reset: "
+                f"soxl={self._decimal_text(source_current)}% "
+                f"threshold={reset_current_min}%"
+            )
+            self.state_store.clear_inverse_cascade_state()
+
+    def _inverse_cascade_reentry_locked(self) -> bool:
+        if self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED:
+            return False
+        state = self._inverse_cascade_same_session_state()
+        return bool(state.get("entered_at") and state.get("lockout_active", True))
+
+    def _inverse_cascade_stopped_out_session_locked(self) -> bool:
+        if self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED:
+            return False
+        state = self._inverse_cascade_same_session_state()
+        return bool(state.get("stopped_out_at"))
+
+    def _inverse_cascade_clear_invalidation_state(self) -> None:
+        if self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED:
+            return
+        state = self._inverse_cascade_same_session_state()
+        if state.get("invalidation_started_at"):
+            state["invalidation_started_at"] = None
+            self.state_store.set_inverse_cascade_state(state)
+
+    def _inverse_cascade_context_active(self, route: BotRoute) -> bool:
+        context = self._inverse_cascade_context
+        return bool(
+            context
+            and not context.get("reasons")
+            and route.active_bot == INVERSE_BOT
+            and route.routed_symbol == SOXS
+        )
+
     def _effective_directional_mode_for_bot(self, bot_name: str) -> str:
         if (
             bot_name in {MOMENTUM_BOT, INVERSE_BOT}
@@ -3759,6 +4657,8 @@ class EdgeWalkerBot:
         del soxl_snapshot
         if route.active_bot not in {MOMENTUM_BOT, INVERSE_BOT}:
             return None
+        if self._inverse_cascade_context_active(route):
+            return None
         if self._v10_authority_state() != V10_AUTHORITY_STATE_NONE:
             return None
 
@@ -3874,6 +4774,12 @@ class EdgeWalkerBot:
         v7_decision = self._v7_entry_policy_decision(route, soxl_snapshot)
         if v7_decision is not None:
             return v7_decision
+        if self._inverse_cascade_context_active(route):
+            print(
+                "[V8] Inverse cascade bypasses regime survivability: "
+                f"mode={self.config.inverse_cascade_mode}"
+            )
+            return None
         return self._v8_regime_survivability_decision(route)
 
     def _v8_regime_survivability_decision(
@@ -4502,18 +5408,10 @@ class EdgeWalkerBot:
         return None
 
     def _v7_source_price_path(self) -> SourcePricePath | None:
-        try:
-            data_source = self.market_data or self.client
-            bars = data_source.get_recent_bars(SOXL, 420)
-        except (BotError, KeyError):
-            return None
+        return self._symbol_session_price_path(SOXL)
 
-        session_date = self._v7_session_date()
-        session_bars = [
-            bar
-            for bar in bars
-            if self._v7_record_date(bar.get("t")) == session_date
-        ]
+    def _symbol_session_price_path(self, symbol: str) -> SourcePricePath | None:
+        session_bars = self._symbol_session_bars(symbol)
         if len(session_bars) < 2:
             return None
 
@@ -4542,6 +5440,58 @@ class EdgeWalkerBot:
             runup_percent=(high_price - open_price) / open_price * Decimal("100"),
             drawdown_percent=(low_price - open_price) / open_price * Decimal("100"),
         )
+
+    def _symbol_session_bars(self, symbol: str) -> list[dict[str, Any]]:
+        try:
+            data_source = self.market_data or self.client
+            bars = data_source.get_recent_bars(symbol, 420)
+        except (BotError, KeyError):
+            return []
+
+        session_date = self._v7_session_date()
+        return [
+            bar
+            for bar in bars
+            if self._v7_record_date(bar.get("t")) == session_date
+        ]
+
+    def _symbol_previous_session_close(self, symbol: str) -> Decimal | None:
+        data_source = self.market_data or self.client
+        getter = getattr(data_source, "get_previous_session_close", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter(symbol)
+        except (BotError, KeyError):
+            return None
+        return optional_decimal_from_api(value, f"{symbol} previous session close")
+
+    def _recent_session_return_percent(
+        self,
+        symbol: str,
+        window_minutes: int,
+    ) -> Decimal | None:
+        session_bars = self._symbol_session_bars(symbol)
+        if len(session_bars) < 2:
+            return None
+
+        latest_bar = session_bars[-1]
+        latest_time = parse_market_timestamp(latest_bar.get("t"))
+        current_price = self._v7_bar_decimal(latest_bar, "c", "o")
+        if latest_time is None or current_price is None or current_price <= 0:
+            return None
+
+        cutoff = latest_time - timedelta(minutes=window_minutes)
+        reference_bar = session_bars[0]
+        for bar in session_bars:
+            bar_time = parse_market_timestamp(bar.get("t"))
+            if bar_time is None or bar_time > cutoff:
+                break
+            reference_bar = bar
+        reference_price = self._v7_bar_decimal(reference_bar, "c", "o")
+        if reference_price is None or reference_price <= 0:
+            return None
+        return (current_price - reference_price) / reference_price * Decimal("100")
 
     def _v7_bar_decimal(
         self,
@@ -4724,6 +5674,13 @@ class EdgeWalkerBot:
             return EntryDecision(entry_signal, reason)
 
         if route.active_bot == INVERSE_BOT and route.routed_symbol:
+            cascade_decision = self._inverse_cascade_entry_decision(route)
+            if cascade_decision is not None:
+                return cascade_decision
+            if self._inverse_cascade_stopped_out_session_locked():
+                return EntryDecision(False, "inverse_cascade_stopped_out_session_locked")
+            if self.config.inverse_cascade_mode == INVERSE_CASCADE_MODE_SUSTAINED:
+                return EntryDecision(False, "inverse_cascade_required")
             snapshot = self._directional_entry_snapshot(route.routed_symbol)
             if snapshot is None:
                 return EntryDecision(False, "inverse_confirmation_missing")
@@ -4738,6 +5695,165 @@ class EdgeWalkerBot:
             )
 
         return EntryDecision(False, "route_not_supported")
+
+    def _inverse_cascade_entry_decision(self, route: BotRoute) -> EntryDecision | None:
+        if not self._inverse_cascade_context_active(route):
+            return None
+
+        routed_symbol = route.routed_symbol or SOXS
+        cooldown_active, cooldown_remaining = self._directional_cooldown_status(
+            INVERSE_BOT,
+            routed_symbol,
+        )
+        if cooldown_active:
+            return EntryDecision(
+                False,
+                f"directional_cooldown_active_{cooldown_remaining}m",
+            )
+
+        context = self._inverse_cascade_context or {}
+        if self._inverse_cascade_reentry_locked():
+            return EntryDecision(False, "inverse_cascade_reentry_locked")
+        print(
+            "[ENTRY] InverseBot cascade check: "
+            f"mode={context.get('mode')} symbol={routed_symbol} "
+            f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+            f"soxl_dd={self._decimal_text(context.get('source_drawdown_percent'))}% "
+            f"soxl_recovery={self._decimal_text(context.get('source_recovery_percent'))}% "
+            f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+            f"velocity={self._decimal_text(context.get('source_velocity_percent'))}%"
+        )
+        return EntryDecision(
+            True,
+            f"inverse_cascade_{str(context.get('mode')).lower()}_confirmed",
+        )
+
+    def _entry_lifecycle_context(
+        self,
+        route: BotRoute,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        if route.active_bot != INVERSE_BOT or route.routed_symbol != SOXS:
+            return None
+
+        context: dict[str, Any] = {
+            "entry_family": "inverse_legacy",
+            "inverse_entry_family": "legacy",
+            "inverse_cascade_confirmed": False,
+        }
+        if not reason.startswith("inverse_cascade_"):
+            return context
+
+        cascade_context = self._inverse_cascade_context or {}
+        context.update(
+            {
+                "entry_family": "inverse_cascade",
+                "inverse_entry_family": "cascade",
+                "inverse_cascade_confirmed": True,
+                "inverse_cascade_mode": cascade_context.get("mode"),
+                "base_route_bot": cascade_context.get("base_route_bot"),
+                "base_route_symbol": cascade_context.get("base_route_symbol"),
+                "source_current_percent": cascade_context.get("source_current_percent"),
+                "source_drawdown_percent": cascade_context.get(
+                    "source_drawdown_percent"
+                ),
+                "source_recovery_percent": cascade_context.get(
+                    "source_recovery_percent"
+                ),
+                "source_velocity_percent": cascade_context.get(
+                    "source_velocity_percent"
+                ),
+                "inverse_current_percent": cascade_context.get(
+                    "inverse_current_percent"
+                ),
+                "sustain_source_deepening_percent": cascade_context.get(
+                    "sustain_source_deepening_percent"
+                ),
+                "sustain_source_new_low_count": cascade_context.get(
+                    "sustain_source_new_low_count"
+                ),
+                "soxl_pct_from_open_at_cascade_window_start": cascade_context.get(
+                    "soxl_pct_from_open_at_cascade_window_start"
+                ),
+                "soxl_pct_vs_prior_close_at_cascade_window_start": cascade_context.get(
+                    "soxl_pct_vs_prior_close_at_cascade_window_start"
+                ),
+                "sustain_source_direction_changes": cascade_context.get(
+                    "sustain_source_direction_changes"
+                ),
+                "sustain_source_down_path_ratio": cascade_context.get(
+                    "sustain_source_down_path_ratio"
+                ),
+                "sustain_source_path_length_percent": cascade_context.get(
+                    "sustain_source_path_length_percent"
+                ),
+                "sustain_source_down_distance_percent": cascade_context.get(
+                    "sustain_source_down_distance_percent"
+                ),
+                "entry_bar_soxl_pct": cascade_context.get("entry_bar_soxl_pct"),
+                "entry_bar_soxl_direction": cascade_context.get(
+                    "entry_bar_soxl_direction"
+                ),
+                "entry_bar_soxl_prior_avg_abs_pct": cascade_context.get(
+                    "entry_bar_soxl_prior_avg_abs_pct"
+                ),
+                "entry_bar_soxl_velocity_ratio": cascade_context.get(
+                    "entry_bar_soxl_velocity_ratio"
+                ),
+                "entry_bar_soxs_pct": cascade_context.get("entry_bar_soxs_pct"),
+                "entry_bar_soxs_direction": cascade_context.get(
+                    "entry_bar_soxs_direction"
+                ),
+                "entry_bar_soxs_prior_avg_abs_pct": cascade_context.get(
+                    "entry_bar_soxs_prior_avg_abs_pct"
+                ),
+                "entry_bar_soxs_velocity_ratio": cascade_context.get(
+                    "entry_bar_soxs_velocity_ratio"
+                ),
+                "sustained_window_minutes": cascade_context.get(
+                    "sustained_window_minutes"
+                ),
+            }
+        )
+        return context
+
+    def _mark_inverse_cascade_entry(self, route: BotRoute, reason: str) -> None:
+        if (
+            self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or route.active_bot != INVERSE_BOT
+            or route.routed_symbol != SOXS
+            or not reason.startswith("inverse_cascade_sustained_")
+        ):
+            return
+        context = self._inverse_cascade_context or {}
+        self.state_store.set_inverse_cascade_state(
+            {
+                "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                "session_date": self._inverse_cascade_session_date(),
+                "entered_at": datetime.now(timezone.utc).isoformat(),
+                "lockout_active": True,
+                "entry_reason": reason,
+                "source_current_percent": context.get("source_current_percent"),
+                "source_drawdown_percent": context.get("source_drawdown_percent"),
+                "source_velocity_percent": context.get("source_velocity_percent"),
+                "inverse_current_percent": context.get("inverse_current_percent"),
+                "sustain_source_deepening_percent": context.get(
+                    "sustain_source_deepening_percent"
+                ),
+                "sustain_source_new_low_count": context.get(
+                    "sustain_source_new_low_count"
+                ),
+                "sustained_window_minutes": context.get("sustained_window_minutes"),
+                "invalidation_started_at": None,
+                "max_favorable_excursion_percent": None,
+                "max_favorable_price": None,
+                "proven_at": None,
+                "proven_mfe_percent": None,
+                "proven_threshold_percent": format_decimal(
+                    self.config.inverse_cascade_proven_mfe_percent
+                ),
+            }
+        )
 
     def _directional_entry_decision(
         self,
@@ -4859,6 +5975,113 @@ class EdgeWalkerBot:
         if not position:
             return Decimal("0")
         return decimal_from_api(position.get("qty"), "position qty")
+
+    def _maybe_hold_inverse_cascade_route_invalidated_position(
+        self,
+        symbol: str,
+        position: dict[str, Any] | None,
+        orders: list[dict[str, Any]],
+        regime: str,
+        active_bot: str,
+        owner: str | None,
+    ) -> str | None:
+        del regime, active_bot
+        if (
+            self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or symbol != SOXS
+            or owner not in {INVERSE_BOT, None}
+        ):
+            return None
+        state = self._inverse_cascade_same_session_state()
+        if (
+            state.get("mode") != INVERSE_CASCADE_MODE_SUSTAINED
+            or not state.get("entered_at")
+        ):
+            return None
+        avg_entry_price = optional_decimal_from_api(
+            (position or {}).get("avg_entry_price"),
+            "avg entry price",
+        )
+        if avg_entry_price is not None:
+            state = self._maybe_update_inverse_cascade_proven_state(
+                symbol,
+                avg_entry_price,
+            )
+
+        now = datetime.now(timezone.utc)
+        symbol_orders = [order for order in orders if order.get("symbol") == symbol]
+        source_current_percent = self._inverse_cascade_source_current_percent()
+        if (
+            state.get("proven_at")
+            and source_current_percent is not None
+            and source_current_percent
+            < self.config.inverse_cascade_proven_route_recovery_min_source_percent
+        ):
+            state["invalidation_started_at"] = None
+            self.state_store.set_inverse_cascade_state(state)
+            print(
+                "[INVERSE] Proven cascade route invalidation suppressed: "
+                f"symbol={symbol} source_current={source_current_percent:.2f}% "
+                "state=proven"
+            )
+            risk_bot = TrailingStopBot(
+                config_for_symbol(self.config, symbol),
+                self.client,
+                self.state_store,
+                self.market_data,
+                self.lifecycle_ledger,
+            )
+            risk_bot._manage_trailing_stop(symbol, position or {}, symbol_orders)
+            return "hold_inverse_cascade_proven_route_suppressed"
+
+        grace_minutes = self.config.inverse_cascade_route_invalidation_grace_minutes
+        if grace_minutes <= 0:
+            return None
+
+        started_at = parse_market_timestamp(state.get("invalidation_started_at"))
+        if started_at is None:
+            started_at = now
+            state["invalidation_started_at"] = started_at.isoformat()
+            self.state_store.set_inverse_cascade_state(state)
+        elapsed = age_seconds(started_at, now) or 0
+        if elapsed >= grace_minutes * 60:
+            print(
+                "[INVERSE] Sustained cascade route invalidation grace expired: "
+                f"symbol={symbol} elapsed={self._rounded_seconds(elapsed)}s"
+            )
+            return None
+
+        print(
+            "[INVERSE] Sustained cascade route invalidation grace active: "
+            f"symbol={symbol} elapsed={self._rounded_seconds(elapsed)}s "
+            f"grace={grace_minutes}m"
+        )
+        risk_bot = TrailingStopBot(
+            config_for_symbol(self.config, symbol),
+            self.client,
+            self.state_store,
+            self.market_data,
+            self.lifecycle_ledger,
+        )
+        risk_bot._manage_trailing_stop(symbol, position or {}, symbol_orders)
+        return "hold_inverse_cascade_route_invalidation_grace"
+
+    def _clear_inverse_cascade_invalidation_when_route_valid(
+        self,
+        route: BotRoute,
+        positions: dict[str, dict[str, Any] | None],
+    ) -> None:
+        if (
+            self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or route.active_bot != INVERSE_BOT
+            or route.routed_symbol != SOXS
+            or self._position_qty(positions.get(SOXS)) <= 0
+        ):
+            return
+        owner = self.state_store.get_position_owner(SOXS)
+        if owner not in {INVERSE_BOT, None}:
+            return
+        self._inverse_cascade_clear_invalidation_state()
 
     def _maybe_exit_momentum_authority_revoked_position(
         self,

@@ -1656,3 +1656,23 @@ Watch:
 - Keep active config routing parked until broader batches and shadow selector
   evidence prove that the routing decision is better than simply staying with
   `Lead_Generalist`.
+
+2026-06-08:
+
+- Froze v9.1 as the validated Momentum permission layer after three 20-date
+  packs showed zero Pack 1 / Pack 2 regression and a `+$0.35` Pack 3
+  improvement versus v8.5.
+- v9.1 authority is intentionally conservative: it reads the
+  `Lead_Generalist` observer fingerprint, requires zero first-30 non-warmup
+  transitions, sufficient trend trust, and a material SOXL reclaim before
+  suppressing InverseBot inside Momentum Specialist.
+- Known limitation: v9.1 catches May 19-style authority, where SOXL has
+  materially reclaimed by checkpoint, but it can miss March 9-style delayed
+  breakouts where momentum develops after SOXL is still recovering at the
+  checkpoint.
+- Treat delayed-breakout misses in later v10 shadow output as authority-gate
+  calibration misses, not ChopBot fallback failures.
+- Next research step is v10 No-Authority Mode: after v9 evaluates inactive or
+  invalidated, suppress directional fresh entries, let ChopBot run clean, and
+  shadow-log suppressed MomentumBot/InverseBot entries with observer
+  fingerprints.

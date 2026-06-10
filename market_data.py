@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -57,8 +61,10 @@ class StreamingMarketDataService:
         self._latest_trades: dict[str, dict[str, Any]] = {}
         self._latest_quotes: dict[str, dict[str, Any]] = {}
         self._feed = config.data_feed
+        self._data_base_url = config.data_base_url
         self._api_key_id = config.api_key_id
         self._api_secret_key = config.api_secret_key
+        self._previous_session_closes: dict[tuple[str, str, str], Decimal] = {}
         self._connected = False
         self._authenticated = False
         self._subscribed = False
@@ -77,8 +83,10 @@ class StreamingMarketDataService:
             if self._needs_reconnect(config):
                 self._stop_locked()
                 self._feed = config.data_feed
+                self._data_base_url = config.data_base_url
                 self._api_key_id = config.api_key_id
                 self._api_secret_key = config.api_secret_key
+                self._previous_session_closes.clear()
                 self._connected = False
                 self._authenticated = False
                 self._subscribed = False
@@ -122,6 +130,32 @@ class StreamingMarketDataService:
         with self._lock:
             quote = self._latest_quotes.get(symbol.upper())
             return dict(quote) if quote else None
+
+    def get_previous_session_close(self, symbol: str) -> Decimal | None:
+        symbol = symbol.upper()
+        target_date = datetime.now(NY_TZ).date()
+        cache_key = (symbol, self._feed, target_date.isoformat())
+        with self._lock:
+            cached = self._previous_session_closes.get(cache_key)
+            if cached is not None:
+                return cached
+            data_base_url = self._data_base_url
+            feed = self._feed
+            api_key_id = self._api_key_id
+            api_secret_key = self._api_secret_key
+
+        close = self._fetch_previous_session_close(
+            symbol,
+            target_date,
+            data_base_url,
+            feed,
+            api_key_id,
+            api_secret_key,
+        )
+        if close is not None:
+            with self._lock:
+                self._previous_session_closes[cache_key] = close
+        return close
 
     def status(self, symbol: str, required_bars: int | None = None) -> dict[str, Any]:
         with self._lock:
@@ -426,6 +460,7 @@ class StreamingMarketDataService:
     def _needs_reconnect(self, config: BotConfig) -> bool:
         return (
             self._feed != config.data_feed
+            or self._data_base_url != config.data_base_url
             or self._api_key_id != config.api_key_id
             or self._api_secret_key != config.api_secret_key
         )
@@ -540,6 +575,79 @@ class StreamingMarketDataService:
             return "insufficient_bars_after_warmup"
 
         return None
+
+    def _fetch_previous_session_close(
+        self,
+        symbol: str,
+        target_date: Any,
+        data_base_url: str,
+        feed: str,
+        api_key_id: str,
+        api_secret_key: str,
+    ) -> Decimal | None:
+        start = datetime.combine(target_date - timedelta(days=21), datetime.min.time(), NY_TZ)
+        end = datetime.combine(target_date + timedelta(days=1), datetime.min.time(), NY_TZ)
+        params = {
+            "timeframe": "1Day",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "limit": "1000",
+            "adjustment": "raw",
+            "feed": feed,
+            "sort": "asc",
+        }
+        url = (
+            f"{data_base_url}/stocks/{symbol}/bars?"
+            f"{urllib.parse.urlencode(params)}"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "APCA-API-KEY-ID": api_key_id,
+                "APCA-API-SECRET-KEY": api_secret_key,
+                "Accept": "application/json",
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (
+            OSError,
+            TimeoutError,
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+        ) as exc:
+            with self._lock:
+                self._last_error = f"Could not fetch previous close for {symbol}: {exc}"
+            return None
+
+        bars = payload.get("bars") if isinstance(payload, dict) else None
+        if isinstance(bars, dict):
+            bars = bars.get(symbol) or []
+        if not isinstance(bars, list):
+            return None
+
+        prior_bars: list[tuple[datetime, Decimal]] = []
+        for bar in bars:
+            if not isinstance(bar, dict):
+                continue
+            timestamp = parse_market_timestamp(bar.get("t"))
+            if timestamp is None or timestamp.astimezone(NY_TZ).date() >= target_date:
+                continue
+            close = bar.get("c")
+            if close is None:
+                continue
+            try:
+                prior_bars.append((timestamp, Decimal(str(close))))
+            except InvalidOperation:
+                continue
+        if not prior_bars:
+            return None
+
+        prior_bars.sort(key=lambda item: item[0])
+        return prior_bars[-1][1]
 
     def _regular_session_completed_minutes(self, now: datetime) -> int:
         local_timestamp = now.astimezone(NY_TZ)

@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from bot import BotConfig
@@ -64,6 +65,20 @@ class FakeBarsClient:
     def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, object]]:
         self.calls.append((symbol, minutes))
         return self.bars_by_symbol.get(symbol, [])[-minutes:]
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "FakeHTTPResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class StreamingMarketDataServiceTest(unittest.TestCase):
@@ -278,6 +293,62 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
 
             self.assertEqual(client.calls, [])
             self.assertFalse(result["attempted"])
+
+    def test_previous_session_close_fetches_and_caches_daily_bar(self) -> None:
+        today = datetime.now(NY_TZ).date()
+        prior_day = today - timedelta(days=1)
+        current_day = today
+        prior_timestamp = datetime.combine(
+            prior_day,
+            datetime.min.time(),
+            NY_TZ,
+        ).astimezone(timezone.utc)
+        current_timestamp = datetime.combine(
+            current_day,
+            datetime.min.time(),
+            NY_TZ,
+        ).astimezone(timezone.utc)
+        calls: list[str] = []
+
+        def fake_urlopen(request: object, timeout: int) -> FakeHTTPResponse:
+            calls.append(getattr(request, "full_url"))
+            self.assertEqual(timeout, 20)
+            return FakeHTTPResponse(
+                {
+                    "bars": [
+                        {
+                            "t": prior_timestamp.isoformat().replace("+00:00", "Z"),
+                            "c": "101.25",
+                        },
+                        {
+                            "t": current_timestamp.isoformat().replace("+00:00", "Z"),
+                            "c": "102.75",
+                        },
+                    ],
+                    "symbol": "SOXL",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+
+            with patch("market_data.urllib.request.urlopen", fake_urlopen):
+                self.assertEqual(
+                    service.get_previous_session_close("SOXL"),
+                    Decimal("101.25"),
+                )
+                self.assertEqual(
+                    service.get_previous_session_close("SOXL"),
+                    Decimal("101.25"),
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("timeframe=1Day", calls[0])
+        self.assertIn("feed=iex", calls[0])
 
 
 if __name__ == "__main__":
