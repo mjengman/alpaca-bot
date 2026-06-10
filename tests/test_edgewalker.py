@@ -401,6 +401,46 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         return setup_state
 
+    def momentum_surge_client(
+        self,
+        latest_at: datetime,
+        *,
+        previous_close: str | None = "103",
+    ) -> FakeClient:
+        latest_utc = latest_at.astimezone(timezone.utc)
+        previous_session_closes = (
+            {SOXL: Decimal(previous_close)} if previous_close is not None else {}
+        )
+        return FakeClient(
+            {
+                SOXL: ohlc_bars(
+                    ("100", "100", "100", "100"),
+                    ("100", "100", "98", "98"),
+                    ("98", "99", "98", "99"),
+                    ("99", "101", "99", "101"),
+                    ("101", "102.6", "101", "102.6"),
+                    ("102.6", "102.9", "102.6", "102.9"),
+                    ("102.9", "103.2", "102.9", "103.2"),
+                    ("103.2", "103.6", "103.2", "103.6"),
+                    ("103.6", "105", "103.6", "105"),
+                    latest_at=latest_utc,
+                ),
+                SOXS: ohlc_bars(
+                    ("10", "10", "10", "10"),
+                    ("10", "10.1", "10", "10.1"),
+                    ("10.1", "10.1", "10", "10"),
+                    ("10", "10", "9.95", "9.95"),
+                    ("9.95", "9.95", "9.90", "9.90"),
+                    ("9.90", "9.90", "9.88", "9.88"),
+                    ("9.88", "9.88", "9.86", "9.86"),
+                    ("9.86", "9.86", "9.83", "9.83"),
+                    ("9.83", "9.83", "9.80", "9.80"),
+                    latest_at=latest_utc,
+                ),
+            },
+            previous_session_closes=previous_session_closes,
+        )
+
     def test_warmup_blocks_regime_routing_until_slow_sma_history_exists(self) -> None:
         client = FakeClient({"SOXL": bars("100", "99")})
 
@@ -3197,6 +3237,104 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.active_bot, "MomentumBot")
         self.assertEqual(status.entry_signal, True)
         self.assertEqual(status.action_taken, "market_buy")
+
+    def test_momentum_surge_mode_off_keeps_standard_v8_block(self) -> None:
+        current_time = datetime(2026, 6, 10, 10, 0, tzinfo=NY_TZ)
+        client = self.momentum_surge_client(current_time)
+
+        with patched_bot_time(current_time):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    directional_mode="AGGRESSIVE",
+                    directional_max_extension_percent=Decimal("1.00"),
+                    inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+                    enabled_bots=(MOMENTUM_BOT,),
+                    momentum_surge_mode=bot_module.MOMENTUM_SURGE_MODE_OFF,
+                ),
+            )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertNotIn("Momentum surge bypasses regime survivability", output)
+        self.assertIn("reason=v8_regime_too_young", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
+
+    def test_momentum_surge_sustained_bypasses_authority_and_v8_when_qualified(
+        self,
+    ) -> None:
+        current_time = datetime(2026, 6, 10, 10, 0, tzinfo=NY_TZ)
+        client = self.momentum_surge_client(current_time)
+
+        with patched_bot_time(current_time):
+            output, status, records = self.run_bot_with_lifecycle(
+                client,
+                bot_config=replace(
+                    config(),
+                    directional_mode="AGGRESSIVE",
+                    inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+                    enabled_bots=(MOMENTUM_BOT,),
+                    momentum_surge_mode=bot_module.MOMENTUM_SURGE_MODE_SUSTAINED,
+                    momentum_authority_required=True,
+                    v10_force_no_authority=True,
+                ),
+            )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [(SOXL, Decimal("25"))])
+        self.assertIn("[MOMENTUM] Surge candidate qualified", output)
+        self.assertIn("Momentum surge bypasses regime survivability", output)
+        self.assertNotIn("Momentum authority suppresses entry", output)
+        self.assertNotIn("No-authority suppresses directional entry", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.entry_signal, True)
+        self.assertEqual(status.action_taken, "market_buy")
+
+        submitted = [
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_ORDER_SUBMITTED
+        ][0]
+        context = submitted["lifecycle_context"]
+        self.assertEqual(context["entry_family"], "momentum_surge")
+        self.assertEqual(context["momentum_entry_family"], "surge")
+        self.assertTrue(context["momentum_surge_confirmed"])
+        self.assertEqual(
+            context["momentum_surge_mode"],
+            bot_module.MOMENTUM_SURGE_MODE_SUSTAINED,
+        )
+        self.assertEqual(context["entry_bar_soxl_direction"], "UP")
+        self.assertEqual(context["entry_bar_soxs_direction"], "DOWN")
+
+    def test_momentum_surge_sustained_requires_previous_close_context(self) -> None:
+        current_time = datetime(2026, 6, 10, 10, 0, tzinfo=NY_TZ)
+        client = self.momentum_surge_client(current_time, previous_close=None)
+
+        with patched_bot_time(current_time):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    directional_mode="AGGRESSIVE",
+                    inverse_cascade_mode=bot_module.INVERSE_CASCADE_MODE_OFF,
+                    enabled_bots=(MOMENTUM_BOT,),
+                    momentum_surge_mode=bot_module.MOMENTUM_SURGE_MODE_SUSTAINED,
+                ),
+            )
+
+        self.assertEqual(client.sells, [])
+        self.assertEqual(client.buys, [])
+        self.assertIn("source_prior_close_unavailable", output)
+        self.assertNotIn("Momentum surge bypasses regime survivability", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.entry_signal, False)
+        self.assertEqual(status.action_taken, "no_entry_signal")
 
     def test_adaptive_directional_selects_aggressive_for_strong_clean_trend(self) -> None:
         client = FakeClient({"SOXL": bars("100", "102", "103.2")})

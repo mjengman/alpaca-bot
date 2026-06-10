@@ -846,6 +846,14 @@ def _session_metrics(
         "inverse_cascade": Decimal("0"),
         "inverse_legacy": Decimal("0"),
     }
+    momentum_entry_counts = {
+        "momentum_surge": 0,
+        "momentum_legacy": 0,
+    }
+    momentum_entry_pl = {
+        "momentum_surge": Decimal("0"),
+        "momentum_legacy": Decimal("0"),
+    }
     for trade in trades:
         reason = str(trade.get("exit_reason") or "UNKNOWN")
         exit_reason_counts[reason] = exit_reason_counts.get(reason, 0) + 1
@@ -855,6 +863,9 @@ def _session_metrics(
         if entry_family in inverse_entry_counts:
             inverse_entry_counts[entry_family] += 1
             inverse_entry_pl[entry_family] += realized_pl
+        if entry_family in momentum_entry_counts:
+            momentum_entry_counts[entry_family] += 1
+            momentum_entry_pl[entry_family] += realized_pl
     entry_median = Decimal("0")
     if entry_ages:
         sorted_ages = sorted(entry_ages)
@@ -954,6 +965,10 @@ def _session_metrics(
         "inverse_cascade_pl": inverse_entry_pl["inverse_cascade"],
         "inverse_legacy_trade_count": inverse_entry_counts["inverse_legacy"],
         "inverse_legacy_pl": inverse_entry_pl["inverse_legacy"],
+        "momentum_surge_trade_count": momentum_entry_counts["momentum_surge"],
+        "momentum_surge_pl": momentum_entry_pl["momentum_surge"],
+        "momentum_legacy_trade_count": momentum_entry_counts["momentum_legacy"],
+        "momentum_legacy_pl": momentum_entry_pl["momentum_legacy"],
         "exit_reason_counts": exit_reason_counts,
         "exit_reason_pl": exit_reason_pl,
     }
@@ -1307,6 +1322,10 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "momentum_pl": _rounded(bot_pl["MomentumBot"]),
         "chop_pl": _rounded(bot_pl["ChopBot"]),
         "inverse_pl": _rounded(bot_pl["InverseBot"]),
+        "momentum_surge_trades": int(metrics["momentum_surge_trade_count"]),
+        "momentum_surge_pl": _rounded(metrics["momentum_surge_pl"]),
+        "momentum_legacy_trades": int(metrics["momentum_legacy_trade_count"]),
+        "momentum_legacy_pl": _rounded(metrics["momentum_legacy_pl"]),
         "inverse_cascade_trades": int(metrics["inverse_cascade_trade_count"]),
         "inverse_cascade_pl": _rounded(metrics["inverse_cascade_pl"]),
         "inverse_legacy_trades": int(metrics["inverse_legacy_trade_count"]),

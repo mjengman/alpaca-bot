@@ -112,6 +112,31 @@ INVERSE_CASCADE_PROVEN_MFE_PERCENT = Decimal("0.50")
 INVERSE_CASCADE_PROVEN_TRAIL_PERCENT = Decimal("6.00")
 INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT = Decimal("4.00")
 INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT = Decimal("0.00")
+MOMENTUM_SURGE_MODE_OFF = "OFF"
+MOMENTUM_SURGE_MODE_SUSTAINED = "SUSTAINED"
+MOMENTUM_SURGE_MODES = {
+    MOMENTUM_SURGE_MODE_OFF,
+    MOMENTUM_SURGE_MODE_SUSTAINED,
+}
+MOMENTUM_SURGE_DEFAULTS = {
+    MOMENTUM_SURGE_MODE_SUSTAINED: {
+        "source_current_min": Decimal("2.50"),
+        "source_drawdown_max": Decimal("-1.50"),
+        "inverse_current_max": Decimal("-0.75"),
+        "sustain_source_current_min": Decimal("2.50"),
+        "sustain_source_prior_close_max": Decimal("2.00"),
+        "sustain_inverse_current_max": Decimal("-0.75"),
+        "sustain_source_deepening_min": Decimal("0.60"),
+        "sustain_source_deepening_strong_min": Decimal("0.90"),
+        "sustain_source_shallow_deepening_current_min": Decimal("7.00"),
+        "sustain_source_new_high_count_min": 2,
+        "sustain_source_direction_changes_max": 1,
+        "sustain_source_up_path_ratio_min": Decimal("0.65"),
+        "entry_bar_inverse_max": Decimal("-0.10"),
+        "entry_end_minute": 15 * 60 + 30,
+    },
+}
+MOMENTUM_SURGE_SUSTAIN_MINUTES = 5
 REGIME_STRENGTH_RANGE = "RANGE"
 REGIME_STRENGTH_WEAK = "WEAK"
 REGIME_STRENGTH_MODERATE = "MODERATE"
@@ -203,6 +228,11 @@ V10_AUTHORITY_STATE_MOMENTUM = "momentum"
 V10_AUTHORITY_STATE_NONE = "none"
 MOMENTUM_AUTHORITY_REQUIRED_REASON = "momentum_authority_required"
 MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON = "momentum_authority_revoked_exit"
+MOMENTUM_ROUTE_HOLD_ENABLED = False
+MOMENTUM_ROUTE_INVALIDATION_GRACE_MINUTES = 0
+MOMENTUM_ROUTE_MIN_SOURCE_PERCENT = Decimal("2.00")
+MOMENTUM_PROVEN_MFE_PERCENT = Decimal("0.75")
+MOMENTUM_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT = Decimal("2.00")
 CHOP_PERMISSION_SUPPRESSION_REASON = "chop_permission_gate_blocked"
 NY_TZ = ZoneInfo("America/New_York")
 
@@ -363,6 +393,8 @@ class BotConfig:
     inverse_cascade_proven_route_recovery_min_source_percent: Decimal = (
         INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT
     )
+    momentum_surge_mode: str = MOMENTUM_SURGE_MODE_SUSTAINED
+    momentum_surge_sustain_minutes: int = MOMENTUM_SURGE_SUSTAIN_MINUTES
     momentum_authority_required: bool = False
     momentum_authority_revoke_exits: bool = False
     momentum_authority_latch_once_active: bool = False
@@ -386,6 +418,15 @@ class BotConfig:
     )
     momentum_authority_reclaim_start_minutes: int = V9_MOMENTUM_RECLAIM_START_MINUTES
     momentum_authority_reclaim_end_minutes: int = V9_MOMENTUM_RECLAIM_END_MINUTES
+    momentum_route_hold_enabled: bool = MOMENTUM_ROUTE_HOLD_ENABLED
+    momentum_route_invalidation_grace_minutes: int = (
+        MOMENTUM_ROUTE_INVALIDATION_GRACE_MINUTES
+    )
+    momentum_route_min_source_percent: Decimal = MOMENTUM_ROUTE_MIN_SOURCE_PERCENT
+    momentum_proven_mfe_percent: Decimal = MOMENTUM_PROVEN_MFE_PERCENT
+    momentum_proven_route_recovery_min_source_percent: Decimal = (
+        MOMENTUM_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT
+    )
     preset_name: str | None = None
     v9_observer_context: dict[str, Any] | None = None
     v10_force_no_authority: bool = False
@@ -586,6 +627,18 @@ class BotConfig:
             "INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT",
             str(INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT),
         )
+        momentum_surge_mode = os.environ.get(
+            "MOMENTUM_SURGE_MODE",
+            MOMENTUM_SURGE_MODE_SUSTAINED,
+        ).strip().upper()
+        if momentum_surge_mode not in MOMENTUM_SURGE_MODES:
+            raise BotError("MOMENTUM_SURGE_MODE must be OFF or SUSTAINED.")
+        momentum_surge_sustain_minutes = env_int(
+            "MOMENTUM_SURGE_SUSTAIN_MINUTES",
+            MOMENTUM_SURGE_SUSTAIN_MINUTES,
+        )
+        if momentum_surge_sustain_minutes < 1:
+            raise BotError("MOMENTUM_SURGE_SUSTAIN_MINUTES must be at least 1.")
 
         runtime_observer_context = None
         if env_bool("BALANCEDPURE_RUNTIME_OBSERVER_ENABLED", False):
@@ -646,6 +699,8 @@ class BotConfig:
             inverse_cascade_proven_route_recovery_min_source_percent=(
                 inverse_cascade_proven_route_recovery_min_source_percent
             ),
+            momentum_surge_mode=momentum_surge_mode,
+            momentum_surge_sustain_minutes=momentum_surge_sustain_minutes,
             momentum_authority_required=env_bool("MOMENTUM_AUTHORITY_REQUIRED", False),
             momentum_authority_revoke_exits=env_bool(
                 "MOMENTUM_AUTHORITY_REVOKE_EXITS",
@@ -694,6 +749,26 @@ class BotConfig:
             momentum_authority_reclaim_end_minutes=env_int(
                 "MOMENTUM_AUTHORITY_RECLAIM_END_MINUTES",
                 V9_MOMENTUM_RECLAIM_END_MINUTES,
+            ),
+            momentum_route_hold_enabled=env_bool(
+                "MOMENTUM_ROUTE_HOLD_ENABLED",
+                MOMENTUM_ROUTE_HOLD_ENABLED,
+            ),
+            momentum_route_invalidation_grace_minutes=env_int(
+                "MOMENTUM_ROUTE_INVALIDATION_GRACE_MINUTES",
+                MOMENTUM_ROUTE_INVALIDATION_GRACE_MINUTES,
+            ),
+            momentum_route_min_source_percent=env_decimal(
+                "MOMENTUM_ROUTE_MIN_SOURCE_PERCENT",
+                str(MOMENTUM_ROUTE_MIN_SOURCE_PERCENT),
+            ),
+            momentum_proven_mfe_percent=env_decimal(
+                "MOMENTUM_PROVEN_MFE_PERCENT",
+                str(MOMENTUM_PROVEN_MFE_PERCENT),
+            ),
+            momentum_proven_route_recovery_min_source_percent=env_decimal(
+                "MOMENTUM_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT",
+                str(MOMENTUM_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT),
             ),
             preset_name=os.environ.get("PRESET_NAME") or None,
             v9_observer_context=runtime_observer_context,
@@ -1437,6 +1512,22 @@ class BotStateStore:
             data["inverse_cascade"] = {}
             self._write(data)
 
+    def get_momentum_state(self) -> dict[str, Any]:
+        data = self._read()
+        state = data.get("momentum", {})
+        return state if isinstance(state, dict) else {}
+
+    def set_momentum_state(self, state: dict[str, Any]) -> None:
+        data = self._read()
+        data["momentum"] = lifecycle_json_value(state)
+        self._write(data)
+
+    def clear_momentum_state(self) -> None:
+        data = self._read()
+        if "momentum" in data:
+            data["momentum"] = {}
+            self._write(data)
+
     def get_last_entry_at(self, bot_name: str, symbol: str) -> datetime | None:
         data = self._read()
         raw = data.get("entries", {}).get(bot_name, {}).get(symbol)
@@ -1542,6 +1633,7 @@ class BotStateStore:
                 "orders": {},
                 "v9": {},
                 "inverse_cascade": {},
+                "momentum": {},
             }
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -1554,6 +1646,7 @@ class BotStateStore:
         data.setdefault("regime", {})
         data.setdefault("orders", {})
         data.setdefault("inverse_cascade", {})
+        data.setdefault("momentum", {})
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -2503,6 +2596,7 @@ class EdgeWalkerBot:
         self._adaptive_posture: AdaptivePosture | None = None
         self._trend_trust: dict[str, Any] | None = None
         self._inverse_cascade_context: dict[str, Any] | None = None
+        self._momentum_surge_context: dict[str, Any] | None = None
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
         payload = {
@@ -2658,6 +2752,7 @@ class EdgeWalkerBot:
         )
         route = RegimeRouter().route(signal.regime)
         self._v9_update_momentum_context(self._v9_authority_evaluation_route(route))
+        route = self._momentum_surge_route_override(route)
         route = self._inverse_cascade_route_override(route)
         route = self._apply_enabled_bot_mask(route)
         routed_symbol = route.routed_symbol or "NONE"
@@ -2803,6 +2898,27 @@ class EdgeWalkerBot:
         stale_symbol = self._stale_symbol(route, positions)
         if stale_symbol:
             stale_owner = self.state_store.get_position_owner(stale_symbol)
+            momentum_grace_action = self._maybe_hold_momentum_route_invalidated_position(
+                stale_symbol,
+                positions[stale_symbol],
+                orders,
+                signal.regime,
+                route.active_bot,
+                stale_owner,
+            )
+            if momentum_grace_action:
+                return self._build_status(
+                    checked_at,
+                    market_open,
+                    next_open,
+                    next_close,
+                    account,
+                    signal,
+                    route,
+                    positions,
+                    False,
+                    momentum_grace_action,
+                )
             grace_action = self._maybe_hold_inverse_cascade_route_invalidated_position(
                 stale_symbol,
                 positions[stale_symbol],
@@ -2846,6 +2962,7 @@ class EdgeWalkerBot:
             )
 
         self._clear_inverse_cascade_invalidation_when_route_valid(route, positions)
+        self._clear_momentum_invalidation_when_route_valid(route, positions)
 
         authority_exit = self._maybe_exit_momentum_authority_revoked_position(
             route,
@@ -3130,6 +3247,7 @@ class EdgeWalkerBot:
             lifecycle_context,
         )
         self._mark_inverse_cascade_entry(route, entry_decision.reason)
+        self._mark_momentum_entry(route, entry_decision.reason)
         if not self.config.dry_run:
             self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
             self.state_store.set_last_entry_at(route.active_bot, route.routed_symbol)
@@ -3931,6 +4049,345 @@ class EdgeWalkerBot:
             return BotRoute(MOMENTUM_BOT, SOXL, True)
         return route
 
+    def _momentum_surge_route_override(self, route: BotRoute) -> BotRoute:
+        self._momentum_surge_context = None
+        if self.config.momentum_surge_mode == MOMENTUM_SURGE_MODE_OFF:
+            return route
+        if MOMENTUM_BOT not in self.config.enabled_bots:
+            return route
+
+        context = self._momentum_surge_context_for_mode()
+        context["base_route_bot"] = route.active_bot
+        context["base_route_symbol"] = route.routed_symbol
+        reasons = context.get("reasons") or []
+        if reasons:
+            print(
+                "[MOMENTUM] Surge candidate blocked: "
+                f"mode={context.get('mode')} reason={','.join(reasons)} "
+                f"base={context.get('base_route_bot')}/{context.get('base_route_symbol') or 'NONE'} "
+                f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+                f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+                f"deepening={self._decimal_text(context.get('sustain_source_deepening_percent'))}% "
+                f"new_highs={context.get('sustain_source_new_high_count', '--')} "
+                f"sustain={context.get('sustained_window_minutes', '--')}m"
+            )
+            return route
+
+        self._momentum_surge_context = context
+        print(
+            "[MOMENTUM] Surge candidate qualified: "
+            f"mode={context.get('mode')} "
+            f"base={context.get('base_route_bot')}/{context.get('base_route_symbol') or 'NONE'} "
+            f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+            f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+            f"deepening={self._decimal_text(context.get('sustain_source_deepening_percent'))}% "
+            f"new_highs={context.get('sustain_source_new_high_count', '--')} "
+            f"sustain={context.get('sustained_window_minutes', '--')}m"
+        )
+        if route.active_bot != MOMENTUM_BOT or route.routed_symbol != SOXL:
+            print(
+                "[ROUTER] momentum surge override: "
+                f"from_bot={route.active_bot} from_symbol={route.routed_symbol or 'NONE'} "
+                f"to_bot={MOMENTUM_BOT} to_symbol={SOXL}"
+            )
+        return BotRoute(MOMENTUM_BOT, SOXL, True)
+
+    def _momentum_surge_context_for_mode(self) -> dict[str, Any]:
+        mode = self.config.momentum_surge_mode
+        thresholds = MOMENTUM_SURGE_DEFAULTS.get(mode, {})
+        context: dict[str, Any] = {
+            "mode": mode,
+            "reasons": [],
+            "thresholds": thresholds,
+        }
+        reasons: list[str] = context["reasons"]
+
+        source_path = self._symbol_session_price_path(SOXL)
+        inverse_path = self._symbol_session_price_path(SOXS)
+        if source_path is None:
+            reasons.append("source_path_unavailable")
+        if inverse_path is None:
+            reasons.append("inverse_path_unavailable")
+        if source_path is None or inverse_path is None:
+            return context
+
+        context.update(
+            {
+                "source_current_percent": source_path.current_percent,
+                "source_runup_percent": source_path.runup_percent,
+                "source_drawdown_percent": source_path.drawdown_percent,
+                "inverse_current_percent": inverse_path.current_percent,
+                "inverse_runup_percent": inverse_path.runup_percent,
+                "inverse_drawdown_percent": inverse_path.drawdown_percent,
+            }
+        )
+
+        source_current_min = thresholds.get("source_current_min")
+        if (
+            isinstance(source_current_min, Decimal)
+            and source_path.current_percent < source_current_min
+        ):
+            reasons.append("source_current_below_surge_min")
+
+        source_drawdown_max = thresholds.get("source_drawdown_max")
+        if (
+            isinstance(source_drawdown_max, Decimal)
+            and source_path.drawdown_percent > source_drawdown_max
+        ):
+            reasons.append("source_drawdown_above_surge_max")
+
+        inverse_current_max = thresholds.get("inverse_current_max")
+        if (
+            isinstance(inverse_current_max, Decimal)
+            and inverse_path.current_percent > inverse_current_max
+        ):
+            reasons.append("inverse_current_above_surge_max")
+
+        if mode == MOMENTUM_SURGE_MODE_SUSTAINED:
+            context.update(self._momentum_surge_sustained_window_context(thresholds))
+            reasons.extend(context.get("sustained_reasons") or [])
+
+        return context
+
+    def _momentum_surge_sustained_window_context(
+        self,
+        thresholds: dict[str, Any],
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "sustained_reasons": [],
+            "sustained_window_minutes": self.config.momentum_surge_sustain_minutes,
+        }
+        reasons: list[str] = context["sustained_reasons"]
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        entry_minute_of_day = now_ny.hour * 60 + now_ny.minute
+        context["entry_minute_of_day"] = entry_minute_of_day
+        entry_end_minute = thresholds.get("entry_end_minute")
+        if (
+            isinstance(entry_end_minute, int)
+            and entry_minute_of_day > entry_end_minute
+        ):
+            reasons.append("momentum_surge_after_entry_window")
+        window_minutes = self.config.momentum_surge_sustain_minutes
+        source_bars = self._symbol_session_bars(SOXL)
+        inverse_bars = self._symbol_session_bars(SOXS)
+        if len(source_bars) < window_minutes or len(inverse_bars) < window_minutes:
+            reasons.append("sustained_window_insufficient_bars")
+            return context
+
+        source_open = self._v7_bar_decimal(source_bars[0], "o", "c")
+        inverse_open = self._v7_bar_decimal(inverse_bars[0], "o", "c")
+        if (
+            source_open is None
+            or inverse_open is None
+            or source_open <= 0
+            or inverse_open <= 0
+        ):
+            reasons.append("sustained_window_open_unavailable")
+            return context
+
+        source_recent = source_bars[-window_minutes:]
+        inverse_recent = inverse_bars[-window_minutes:]
+        source_percents: list[Decimal] = []
+        inverse_percents: list[Decimal] = []
+        for bar in source_recent:
+            price = self._v7_bar_decimal(bar, "c", "o")
+            if price is None:
+                reasons.append("sustained_source_price_unavailable")
+                break
+            source_percents.append((price - source_open) / source_open * Decimal("100"))
+        for bar in inverse_recent:
+            price = self._v7_bar_decimal(bar, "c", "o")
+            if price is None:
+                reasons.append("sustained_inverse_price_unavailable")
+                break
+            inverse_percents.append((price - inverse_open) / inverse_open * Decimal("100"))
+
+        if source_percents:
+            context["soxl_pct_from_open_at_momentum_window_start"] = source_percents[0]
+            source_prior_close = self._symbol_previous_session_close(SOXL)
+            source_window_start_price = self._v7_bar_decimal(source_recent[0], "c", "o")
+            if (
+                source_prior_close is not None
+                and source_prior_close > 0
+                and source_window_start_price is not None
+            ):
+                context["soxl_pct_vs_prior_close_at_momentum_window_start"] = (
+                    (source_window_start_price - source_prior_close)
+                    / source_prior_close
+                    * Decimal("100")
+                )
+            source_prior_close_max = thresholds.get("sustain_source_prior_close_max")
+            source_prior_close_percent = context.get(
+                "soxl_pct_vs_prior_close_at_momentum_window_start"
+            )
+            if isinstance(source_prior_close_max, Decimal):
+                if not isinstance(source_prior_close_percent, Decimal):
+                    reasons.append("source_prior_close_unavailable")
+                elif source_prior_close_percent > source_prior_close_max:
+                    reasons.append("source_prior_close_above_surge_max")
+
+            context["sustain_source_worst_percent"] = min(source_percents)
+            context["sustain_source_latest_percent"] = source_percents[-1]
+            source_deepening = source_percents[-1] - source_percents[0]
+            context["sustain_source_deepening_percent"] = source_deepening
+            (
+                direction_changes,
+                up_path_ratio,
+                path_length,
+                up_distance,
+            ) = self._momentum_surge_window_quality(source_percents)
+            context["sustain_source_direction_changes"] = direction_changes
+            context["sustain_source_up_path_ratio"] = up_path_ratio
+            context["sustain_source_path_length_percent"] = path_length
+            context["sustain_source_up_distance_percent"] = up_distance
+            context.update(
+                self._inverse_cascade_entry_bar_momentum_context(
+                    source_recent,
+                    "soxl",
+                )
+            )
+            if context.get("entry_bar_soxl_direction") != "UP":
+                reasons.append("source_entry_bar_not_up")
+
+        if inverse_percents:
+            context["sustain_inverse_worst_percent"] = max(inverse_percents)
+            context["sustain_inverse_latest_percent"] = inverse_percents[-1]
+            context.update(
+                self._inverse_cascade_entry_bar_momentum_context(
+                    inverse_recent,
+                    "soxs",
+                )
+            )
+            if context.get("entry_bar_soxs_direction") != "DOWN":
+                reasons.append("inverse_entry_bar_not_down")
+            entry_bar_inverse_max = thresholds.get("entry_bar_inverse_max")
+            entry_bar_soxs_pct = context.get("entry_bar_soxs_pct")
+            if (
+                isinstance(entry_bar_inverse_max, Decimal)
+                and isinstance(entry_bar_soxs_pct, Decimal)
+                and entry_bar_soxs_pct > entry_bar_inverse_max
+            ):
+                reasons.append("inverse_entry_bar_above_surge_max")
+
+        source_new_high_count = self._momentum_surge_recent_new_high_count(
+            source_bars,
+            window_minutes,
+        )
+        context["sustain_source_new_high_count"] = source_new_high_count
+
+        source_threshold = thresholds.get("sustain_source_current_min")
+        if (
+            isinstance(source_threshold, Decimal)
+            and source_percents
+            and any(percent < source_threshold for percent in source_percents)
+        ):
+            reasons.append("source_not_sustained_above_surge_min")
+
+        inverse_threshold = thresholds.get("sustain_inverse_current_max")
+        if (
+            isinstance(inverse_threshold, Decimal)
+            and inverse_percents
+            and any(percent > inverse_threshold for percent in inverse_percents)
+        ):
+            reasons.append("inverse_not_sustained_below_surge_max")
+
+        source_deepening_min = thresholds.get("sustain_source_deepening_min")
+        source_deepening = context.get("sustain_source_deepening_percent")
+        if (
+            isinstance(source_deepening_min, Decimal)
+            and isinstance(source_deepening, Decimal)
+            and source_deepening < source_deepening_min
+        ):
+            reasons.append("source_not_deepening_during_sustain")
+
+        source_deepening_strong_min = thresholds.get(
+            "sustain_source_deepening_strong_min"
+        )
+        shallow_current_min = thresholds.get(
+            "sustain_source_shallow_deepening_current_min"
+        )
+        source_latest = context.get("sustain_source_latest_percent")
+        if (
+            isinstance(source_deepening_strong_min, Decimal)
+            and isinstance(shallow_current_min, Decimal)
+            and isinstance(source_deepening, Decimal)
+            and isinstance(source_latest, Decimal)
+            and source_deepening < source_deepening_strong_min
+            and source_latest < shallow_current_min
+        ):
+            reasons.append("source_shallow_surge_current_below_min")
+
+        source_new_high_count_min = thresholds.get("sustain_source_new_high_count_min")
+        if (
+            isinstance(source_new_high_count_min, int)
+            and source_new_high_count < source_new_high_count_min
+        ):
+            reasons.append("source_new_high_pressure_below_min")
+
+        source_direction_changes_max = thresholds.get(
+            "sustain_source_direction_changes_max"
+        )
+        direction_changes = context.get("sustain_source_direction_changes")
+        if (
+            isinstance(source_direction_changes_max, int)
+            and isinstance(direction_changes, int)
+            and direction_changes > source_direction_changes_max
+        ):
+            reasons.append("source_direction_changes_above_surge_max")
+
+        source_up_path_ratio_min = thresholds.get("sustain_source_up_path_ratio_min")
+        up_path_ratio = context.get("sustain_source_up_path_ratio")
+        if (
+            isinstance(source_up_path_ratio_min, Decimal)
+            and isinstance(up_path_ratio, Decimal)
+            and up_path_ratio < source_up_path_ratio_min
+        ):
+            reasons.append("source_up_path_ratio_below_surge_min")
+        return context
+
+    def _momentum_surge_window_quality(
+        self,
+        source_percents: list[Decimal],
+    ) -> tuple[int, Decimal | None, Decimal, Decimal]:
+        direction_changes = 0
+        previous_direction = 0
+        path_length = Decimal("0")
+        up_distance = Decimal("0")
+        for index in range(1, len(source_percents)):
+            delta = source_percents[index] - source_percents[index - 1]
+            if delta == 0:
+                continue
+            path_length += abs(delta)
+            if delta > 0:
+                up_distance += abs(delta)
+            direction = 1 if delta > 0 else -1
+            if previous_direction and direction != previous_direction:
+                direction_changes += 1
+            previous_direction = direction
+        up_path_ratio = up_distance / path_length if path_length > 0 else None
+        return direction_changes, up_path_ratio, path_length, up_distance
+
+    def _momentum_surge_recent_new_high_count(
+        self,
+        source_bars: list[dict[str, Any]],
+        window_minutes: int,
+    ) -> int:
+        if len(source_bars) < window_minutes:
+            return 0
+
+        recent_start = len(source_bars) - window_minutes
+        running_high: Decimal | None = None
+        count = 0
+        for index, bar in enumerate(source_bars):
+            high_price = self._v7_bar_decimal(bar, "h", "c", "o")
+            if high_price is None:
+                continue
+            if running_high is None or high_price > running_high:
+                if index >= recent_start:
+                    count += 1
+                running_high = high_price
+        return count
+
     def _inverse_cascade_route_override(self, route: BotRoute) -> BotRoute:
         self._inverse_cascade_context = None
         if self.config.inverse_cascade_mode == INVERSE_CASCADE_MODE_OFF:
@@ -4316,6 +4773,9 @@ class EdgeWalkerBot:
     def _inverse_cascade_session_date(self) -> str:
         return datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
 
+    def _momentum_session_date(self) -> str:
+        return datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+
     def _inverse_cascade_same_session_state(self) -> dict[str, Any]:
         state = self.state_store.get_inverse_cascade_state()
         if state.get("session_date") != self._inverse_cascade_session_date():
@@ -4323,6 +4783,37 @@ class EdgeWalkerBot:
                 self.state_store.clear_inverse_cascade_state()
             return {}
         return state
+
+    def _momentum_same_session_state(self) -> dict[str, Any]:
+        state = self.state_store.get_momentum_state()
+        if state.get("session_date") != self._momentum_session_date():
+            if state:
+                self.state_store.clear_momentum_state()
+            return {}
+        return state
+
+    def _mark_momentum_entry(self, route: BotRoute, reason: str) -> None:
+        if (
+            not self.config.momentum_route_hold_enabled
+            or route.active_bot != MOMENTUM_BOT
+            or route.routed_symbol != SOXL
+        ):
+            return
+        self.state_store.set_momentum_state(
+            {
+                "session_date": self._momentum_session_date(),
+                "entered_at": datetime.now(timezone.utc).isoformat(),
+                "entry_reason": reason,
+                "invalidation_started_at": None,
+                "max_favorable_excursion_percent": None,
+                "max_favorable_price": None,
+                "proven_at": None,
+                "proven_mfe_percent": None,
+                "proven_threshold_percent": format_decimal(
+                    self.config.momentum_proven_mfe_percent
+                ),
+            }
+        )
 
     def _maybe_update_inverse_cascade_proven_state(
         self,
@@ -4380,7 +4871,66 @@ class EdgeWalkerBot:
             self.state_store.set_inverse_cascade_state(state)
         return state
 
+    def _maybe_update_momentum_proven_state(
+        self,
+        symbol: str,
+        avg_entry_price: Decimal,
+    ) -> dict[str, Any]:
+        if (
+            not self.config.momentum_route_hold_enabled
+            or symbol != SOXL
+            or avg_entry_price <= 0
+        ):
+            return {}
+        state = self._momentum_same_session_state()
+        if not state.get("entered_at"):
+            return state
+
+        session_bars = self._symbol_session_bars(symbol)
+        highs = [
+            value
+            for bar in session_bars
+            if (value := self._v7_bar_decimal(bar, "h", "c", "o")) is not None
+        ]
+        if not highs:
+            return state
+
+        high_price = max(highs)
+        mfe_percent = (
+            (high_price - avg_entry_price) / avg_entry_price * Decimal("100")
+        )
+        previous_mfe = optional_decimal_from_api(
+            state.get("max_favorable_excursion_percent"),
+            "momentum max favorable excursion",
+        )
+        changed = False
+        if previous_mfe is None or mfe_percent > previous_mfe:
+            state["max_favorable_excursion_percent"] = format_decimal(mfe_percent)
+            state["max_favorable_price"] = format_decimal(high_price)
+            changed = True
+
+        if (
+            not state.get("proven_at")
+            and mfe_percent >= self.config.momentum_proven_mfe_percent
+        ):
+            state["proven_at"] = datetime.now(timezone.utc).isoformat()
+            state["proven_mfe_percent"] = format_decimal(mfe_percent)
+            state["proven_threshold_percent"] = format_decimal(
+                self.config.momentum_proven_mfe_percent
+            )
+            changed = True
+
+        if changed:
+            self.state_store.set_momentum_state(state)
+        return state
+
     def _inverse_cascade_source_current_percent(self) -> Decimal | None:
+        source_path = self._symbol_session_price_path(SOXL)
+        if source_path is None:
+            return None
+        return source_path.current_percent
+
+    def _momentum_source_current_percent(self) -> Decimal | None:
         source_path = self._symbol_session_price_path(SOXL)
         if source_path is None:
             return None
@@ -4438,6 +4988,15 @@ class EdgeWalkerBot:
             and not context.get("reasons")
             and route.active_bot == INVERSE_BOT
             and route.routed_symbol == SOXS
+        )
+
+    def _momentum_surge_context_active(self, route: BotRoute) -> bool:
+        context = self._momentum_surge_context
+        return bool(
+            context
+            and not context.get("reasons")
+            and route.active_bot == MOMENTUM_BOT
+            and route.routed_symbol == SOXL
         )
 
     def _effective_directional_mode_for_bot(self, bot_name: str) -> str:
@@ -4545,6 +5104,8 @@ class EdgeWalkerBot:
     ) -> EntryDecision | None:
         del soxl_snapshot
         if route.active_bot != MOMENTUM_BOT:
+            return None
+        if self._momentum_surge_context_active(route):
             return None
         if not self.config.momentum_authority_required:
             return None
@@ -4656,6 +5217,8 @@ class EdgeWalkerBot:
     ) -> EntryDecision | None:
         del soxl_snapshot
         if route.active_bot not in {MOMENTUM_BOT, INVERSE_BOT}:
+            return None
+        if self._momentum_surge_context_active(route):
             return None
         if self._inverse_cascade_context_active(route):
             return None
@@ -4778,6 +5341,12 @@ class EdgeWalkerBot:
             print(
                 "[V8] Inverse cascade bypasses regime survivability: "
                 f"mode={self.config.inverse_cascade_mode}"
+            )
+            return None
+        if self._momentum_surge_context_active(route):
+            print(
+                "[V8] Momentum surge bypasses regime survivability: "
+                f"mode={self.config.momentum_surge_mode}"
             )
             return None
         return self._v8_regime_survivability_decision(route)
@@ -5634,6 +6203,9 @@ class EdgeWalkerBot:
         soxl_snapshot: SmaSnapshot,
     ) -> EntryDecision:
         if route.active_bot == MOMENTUM_BOT:
+            surge_decision = self._momentum_surge_entry_decision(route)
+            if surge_decision is not None:
+                return surge_decision
             snapshot = self._directional_entry_snapshot(SOXL, soxl_snapshot)
             return self._directional_entry_decision(
                 bot_name=MOMENTUM_BOT,
@@ -5696,6 +6268,34 @@ class EdgeWalkerBot:
 
         return EntryDecision(False, "route_not_supported")
 
+    def _momentum_surge_entry_decision(self, route: BotRoute) -> EntryDecision | None:
+        if not self._momentum_surge_context_active(route):
+            return None
+
+        cooldown_active, cooldown_remaining = self._directional_cooldown_status(
+            MOMENTUM_BOT,
+            SOXL,
+        )
+        if cooldown_active:
+            return EntryDecision(
+                False,
+                f"directional_cooldown_active_{cooldown_remaining}m",
+            )
+
+        context = self._momentum_surge_context or {}
+        print(
+            "[ENTRY] MomentumBot surge check: "
+            f"mode={context.get('mode')} symbol={SOXL} "
+            f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+            f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+            f"deepening={self._decimal_text(context.get('sustain_source_deepening_percent'))}% "
+            f"new_highs={context.get('sustain_source_new_high_count', '--')}"
+        )
+        return EntryDecision(
+            True,
+            f"momentum_surge_{str(context.get('mode')).lower()}_confirmed",
+        )
+
     def _inverse_cascade_entry_decision(self, route: BotRoute) -> EntryDecision | None:
         if not self._inverse_cascade_context_active(route):
             return None
@@ -5733,6 +6333,89 @@ class EdgeWalkerBot:
         route: BotRoute,
         reason: str,
     ) -> dict[str, Any] | None:
+        if route.active_bot == MOMENTUM_BOT and route.routed_symbol == SOXL:
+            context: dict[str, Any] = {
+                "entry_family": "momentum_legacy",
+                "momentum_entry_family": "legacy",
+                "momentum_surge_confirmed": False,
+            }
+            if not reason.startswith("momentum_surge_"):
+                return context
+
+            surge_context = self._momentum_surge_context or {}
+            context.update(
+                {
+                    "entry_family": "momentum_surge",
+                    "momentum_entry_family": "surge",
+                    "momentum_surge_confirmed": True,
+                    "momentum_surge_mode": surge_context.get("mode"),
+                    "base_route_bot": surge_context.get("base_route_bot"),
+                    "base_route_symbol": surge_context.get("base_route_symbol"),
+                    "source_current_percent": surge_context.get(
+                        "source_current_percent"
+                    ),
+                    "source_runup_percent": surge_context.get("source_runup_percent"),
+                    "source_drawdown_percent": surge_context.get(
+                        "source_drawdown_percent"
+                    ),
+                    "inverse_current_percent": surge_context.get(
+                        "inverse_current_percent"
+                    ),
+                    "sustain_source_deepening_percent": surge_context.get(
+                        "sustain_source_deepening_percent"
+                    ),
+                    "sustain_source_new_high_count": surge_context.get(
+                        "sustain_source_new_high_count"
+                    ),
+                    "soxl_pct_from_open_at_momentum_window_start": (
+                        surge_context.get(
+                            "soxl_pct_from_open_at_momentum_window_start"
+                        )
+                    ),
+                    "soxl_pct_vs_prior_close_at_momentum_window_start": (
+                        surge_context.get(
+                            "soxl_pct_vs_prior_close_at_momentum_window_start"
+                        )
+                    ),
+                    "sustain_source_direction_changes": surge_context.get(
+                        "sustain_source_direction_changes"
+                    ),
+                    "sustain_source_up_path_ratio": surge_context.get(
+                        "sustain_source_up_path_ratio"
+                    ),
+                    "sustain_source_path_length_percent": surge_context.get(
+                        "sustain_source_path_length_percent"
+                    ),
+                    "sustain_source_up_distance_percent": surge_context.get(
+                        "sustain_source_up_distance_percent"
+                    ),
+                    "entry_bar_soxl_pct": surge_context.get("entry_bar_soxl_pct"),
+                    "entry_bar_soxl_direction": surge_context.get(
+                        "entry_bar_soxl_direction"
+                    ),
+                    "entry_bar_soxl_prior_avg_abs_pct": surge_context.get(
+                        "entry_bar_soxl_prior_avg_abs_pct"
+                    ),
+                    "entry_bar_soxl_velocity_ratio": surge_context.get(
+                        "entry_bar_soxl_velocity_ratio"
+                    ),
+                    "entry_bar_soxs_pct": surge_context.get("entry_bar_soxs_pct"),
+                    "entry_bar_soxs_direction": surge_context.get(
+                        "entry_bar_soxs_direction"
+                    ),
+                    "entry_bar_soxs_prior_avg_abs_pct": surge_context.get(
+                        "entry_bar_soxs_prior_avg_abs_pct"
+                    ),
+                    "entry_bar_soxs_velocity_ratio": surge_context.get(
+                        "entry_bar_soxs_velocity_ratio"
+                    ),
+                    "sustained_window_minutes": surge_context.get(
+                        "sustained_window_minutes"
+                    ),
+                }
+            )
+            return context
+
         if route.active_bot != INVERSE_BOT or route.routed_symbol != SOXS:
             return None
 
@@ -6066,6 +6749,99 @@ class EdgeWalkerBot:
         risk_bot._manage_trailing_stop(symbol, position or {}, symbol_orders)
         return "hold_inverse_cascade_route_invalidation_grace"
 
+    def _maybe_hold_momentum_route_invalidated_position(
+        self,
+        symbol: str,
+        position: dict[str, Any] | None,
+        orders: list[dict[str, Any]],
+        regime: str,
+        active_bot: str,
+        owner: str | None,
+    ) -> str | None:
+        del regime, active_bot
+        if (
+            not self.config.momentum_route_hold_enabled
+            or symbol != SOXL
+            or owner not in {MOMENTUM_BOT, None}
+        ):
+            return None
+        state = self._momentum_same_session_state()
+        if not state.get("entered_at"):
+            return None
+
+        avg_entry_price = optional_decimal_from_api(
+            (position or {}).get("avg_entry_price"),
+            "avg entry price",
+        )
+        if avg_entry_price is not None:
+            state = self._maybe_update_momentum_proven_state(
+                symbol,
+                avg_entry_price,
+            )
+
+        source_current_percent = self._momentum_source_current_percent()
+        if source_current_percent is None:
+            return None
+
+        symbol_orders = [order for order in orders if order.get("symbol") == symbol]
+        if (
+            state.get("proven_at")
+            and source_current_percent
+            >= self.config.momentum_proven_route_recovery_min_source_percent
+        ):
+            state["invalidation_started_at"] = None
+            self.state_store.set_momentum_state(state)
+            print(
+                "[MOMENTUM] Proven route invalidation suppressed: "
+                f"symbol={symbol} source_current={source_current_percent:.2f}% "
+                "state=proven"
+            )
+            risk_bot = TrailingStopBot(
+                config_for_symbol(self.config, symbol),
+                self.client,
+                self.state_store,
+                self.market_data,
+                self.lifecycle_ledger,
+            )
+            risk_bot._manage_trailing_stop(symbol, position or {}, symbol_orders)
+            return "hold_momentum_proven_route_suppressed"
+
+        grace_minutes = self.config.momentum_route_invalidation_grace_minutes
+        if (
+            grace_minutes <= 0
+            or source_current_percent < self.config.momentum_route_min_source_percent
+        ):
+            return None
+
+        now = datetime.now(timezone.utc)
+        started_at = parse_market_timestamp(state.get("invalidation_started_at"))
+        if started_at is None:
+            started_at = now
+            state["invalidation_started_at"] = started_at.isoformat()
+            self.state_store.set_momentum_state(state)
+        elapsed = age_seconds(started_at, now) or 0
+        if elapsed >= grace_minutes * 60:
+            print(
+                "[MOMENTUM] Route invalidation grace expired: "
+                f"symbol={symbol} elapsed={self._rounded_seconds(elapsed)}s"
+            )
+            return None
+
+        print(
+            "[MOMENTUM] Route invalidation grace active: "
+            f"symbol={symbol} source_current={source_current_percent:.2f}% "
+            f"elapsed={self._rounded_seconds(elapsed)}s grace={grace_minutes}m"
+        )
+        risk_bot = TrailingStopBot(
+            config_for_symbol(self.config, symbol),
+            self.client,
+            self.state_store,
+            self.market_data,
+            self.lifecycle_ledger,
+        )
+        risk_bot._manage_trailing_stop(symbol, position or {}, symbol_orders)
+        return "hold_momentum_route_invalidation_grace"
+
     def _clear_inverse_cascade_invalidation_when_route_valid(
         self,
         route: BotRoute,
@@ -6082,6 +6858,26 @@ class EdgeWalkerBot:
         if owner not in {INVERSE_BOT, None}:
             return
         self._inverse_cascade_clear_invalidation_state()
+
+    def _clear_momentum_invalidation_when_route_valid(
+        self,
+        route: BotRoute,
+        positions: dict[str, dict[str, Any] | None],
+    ) -> None:
+        if (
+            not self.config.momentum_route_hold_enabled
+            or route.active_bot != MOMENTUM_BOT
+            or route.routed_symbol != SOXL
+            or self._position_qty(positions.get(SOXL)) <= 0
+        ):
+            return
+        owner = self.state_store.get_position_owner(SOXL)
+        if owner not in {MOMENTUM_BOT, None}:
+            return
+        state = self._momentum_same_session_state()
+        if state.get("invalidation_started_at"):
+            state["invalidation_started_at"] = None
+            self.state_store.set_momentum_state(state)
 
     def _maybe_exit_momentum_authority_revoked_position(
         self,
