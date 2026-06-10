@@ -5273,7 +5273,7 @@ class EdgeWalkerBot:
         preset_name = (self.config.preset_name or "").lower()
         if "momentum" in preset_name:
             return True
-        if not preset_name and route.active_bot == MOMENTUM_BOT:
+        if route.active_bot == MOMENTUM_BOT and route.routed_symbol == SOXL:
             return True
         return False
 

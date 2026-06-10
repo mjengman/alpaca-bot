@@ -2376,6 +2376,40 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertIn("soxl_below_v9_momentum_floor", decision["activation_reason"])
         self.assertIn("trend_trust_below_v9_minimum", decision["activation_reason"])
 
+    def test_router_preset_can_activate_momentum_authority_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            bot = EdgeWalkerBot(
+                replace(
+                    config(),
+                    preset_name="Router_StrictAuthority_ChopFirewall",
+                    momentum_authority_min_trust_score=66,
+                    momentum_authority_min_source_percent=Decimal("4.00"),
+                    v9_observer_context={
+                        "observer_preset": "BalancedPure_LiveObserver",
+                        "early_transition_count": 1,
+                        "early_transitions_per_hour": 2,
+                        "early_non_warmup_transition_count": 0,
+                        "early_non_warmup_transitions_per_hour": 0,
+                        "trend_trust_score": 72,
+                        "source_open_to_current_percent": 4.35,
+                        "early_transition_window_minutes": 30,
+                    },
+                ),
+                FakeClient({"SOXL": bars("100", "104.35")}),
+                state_store,
+            )
+
+            decision = bot._v9_momentum_context_activation_decision(
+                BotRoute(MOMENTUM_BOT, SOXL, True)
+            )
+
+        self.assertTrue(decision["active"])
+        self.assertEqual(
+            decision["activation_reason"],
+            "v9_momentum_clean_tape_context",
+        )
+
     def test_v9_strict_reclaim_allows_clean_secondary_checkpoint(self) -> None:
         current_time = datetime(2026, 3, 23, 10, 20, tzinfo=NY_TZ).astimezone(
             timezone.utc
