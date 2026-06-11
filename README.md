@@ -161,7 +161,7 @@ Use the Notifications modal to configure:
 - Notification email address
 - Apps Script endpoint URL
 - Optional shared secret
-- Trade, P/L, daily-summary, and error-notification toggles
+- Trade, P/L, warmup, daily-summary, and error-notification toggles
 - Error-notification cooldown
 
 The notification sender keeps a local dedupe/cooldown ledger in

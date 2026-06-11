@@ -836,6 +836,76 @@ class BotRunner:
             cooldown_minutes=int(settings.get("error_cooldown_minutes") or 30),
         )
 
+    def _maybe_send_warmup_notification(
+        self,
+        edgewalker_status: dict[str, Any] | None,
+        regime_transition: dict[str, Any] | None,
+        run_timestamp: datetime,
+    ) -> None:
+        settings = notification_settings()
+        if not (
+            settings.get("enabled")
+            and settings.get("notify_warmup")
+            and isinstance(edgewalker_status, dict)
+        ):
+            return
+
+        session_date = _ny_date_text(run_timestamp)
+        regime = _optional_text(edgewalker_status.get("regime"))
+        checked_at = run_timestamp.astimezone(NY_TZ).isoformat(timespec="seconds")
+
+        if regime == "WARMUP":
+            subject = "Edgewalker warmup started"
+            body = "\n".join(
+                [
+                    subject,
+                    "",
+                    f"Session: {session_date}",
+                    f"Time: {checked_at}",
+                    "State: collecting market data before entries are allowed.",
+                ]
+            )
+            self._deliver_notification_event(
+                event_id=f"warmup-started:{session_date}",
+                subject=subject,
+                body=body,
+            )
+            return
+
+        if not isinstance(regime_transition, dict):
+            return
+        if regime_transition.get("from") != "WARMUP" or not regime:
+            return
+
+        active_bot = _specialist_display_name(
+            _optional_text(edgewalker_status.get("active_bot"))
+        )
+        routed_symbol = _optional_text(edgewalker_status.get("routed_symbol")) or "None"
+        action = _optional_text(edgewalker_status.get("action_taken")) or "waiting"
+        reason = _optional_text(
+            edgewalker_status.get("entry_block_reason")
+            or edgewalker_status.get("primary_no_trade_reason")
+            or edgewalker_status.get("reason")
+        ) or "No reason reported."
+        subject = f"Edgewalker warmup ended: {regime}"
+        body = "\n".join(
+            [
+                subject,
+                "",
+                f"Session: {session_date}",
+                f"Time: {checked_at}",
+                f"Active specialist: {active_bot}",
+                f"Routed: {routed_symbol}",
+                f"Action: {action}",
+                f"Reason: {reason}",
+            ]
+        )
+        self._deliver_notification_event(
+            event_id=f"warmup-ended:{session_date}",
+            subject=subject,
+            body=body,
+        )
+
     def _maybe_send_lifecycle_notifications(self, run_timestamp: datetime) -> None:
         settings = notification_settings()
         if not settings.get("enabled"):
@@ -1188,6 +1258,7 @@ class BotRunner:
         error: str | None = None
         edgewalker_status: dict[str, Any] | None = None
         authority_state: dict[str, Any] | None = None
+        regime_transition: dict[str, Any] | None = None
         broker_state = broker_constraint_payload(broker_constraint_ok())
         run_timestamp = datetime.now(timezone.utc)
         try:
@@ -1227,9 +1298,9 @@ class BotRunner:
             self._last_run_at = now_iso()
             self._last_error = error
             self._broker_state = broker_state
-            transition = self._regime_transition_locked(edgewalker_status)
-            if transition:
-                lines.append(_format_regime_transition(transition))
+            regime_transition = self._regime_transition_locked(edgewalker_status)
+            if regime_transition:
+                lines.append(_format_regime_transition(regime_transition))
             if edgewalker_status:
                 self._edgewalker_status = edgewalker_status
             self._last_output = lines[-40:] if lines else ["Cycle complete."]
@@ -1242,7 +1313,19 @@ class BotRunner:
                 error=error,
                 edgewalker_status=edgewalker_status,
                 broker_state=broker_state,
-                regime_transition=transition,
+                regime_transition=regime_transition,
+            )
+        self._maybe_send_warmup_notification(
+            edgewalker_status,
+            regime_transition,
+            run_timestamp,
+        )
+        self._maybe_send_lifecycle_notifications(run_timestamp)
+        if error:
+            self._maybe_send_error_notification(
+                category="cycle_error",
+                subject="Edgewalker cycle error",
+                body=f"Edgewalker hit a cycle error:\n\n{error}",
             )
 
     def _broker_state_for_cycle_error(
@@ -1367,13 +1450,6 @@ class BotRunner:
                 order_state=order_state,
             )
 
-        self._maybe_send_lifecycle_notifications(run_timestamp)
-        if error:
-            self._maybe_send_error_notification(
-                category="cycle_error",
-                subject="Edgewalker cycle error",
-                body=f"Edgewalker hit a cycle error:\n\n{error}",
-            )
         try:
             _append_daily_jsonl(record, timestamp)
         except OSError as exc:
@@ -1993,6 +2069,9 @@ def notification_settings(values: dict[str, str] | None = None) -> dict[str, Any
         "notify_data_errors": _env_bool_text(
             _env_first(values, "NOTIFY_DATA_ERRORS", default="true")
         ),
+        "notify_warmup": _env_bool_text(
+            _env_first(values, "NOTIFY_WARMUP", default="false")
+        ),
         "error_cooldown_minutes": cooldown_minutes,
     }
 
@@ -2156,6 +2235,11 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
     updates["NOTIFY_DATA_ERRORS"] = (
         "true"
         if _payload_bool(notifications.get("notify_data_errors"), default=True)
+        else "false"
+    )
+    updates["NOTIFY_WARMUP"] = (
+        "true"
+        if _payload_bool(notifications.get("notify_warmup"), default=False)
         else "false"
     )
     cooldown_raw = notifications.get("error_cooldown_minutes")

@@ -2867,6 +2867,7 @@ class ServerLoggingTest(unittest.TestCase):
                     "notify_trade_entered": True,
                     "notify_trade_exited": True,
                     "notify_daily_summary": True,
+                    "notify_warmup": True,
                     "notify_data_errors": True,
                     "error_cooldown_minutes": 17,
                 },
@@ -2892,12 +2893,14 @@ class ServerLoggingTest(unittest.TestCase):
             settings["notifications"]["apps_script_secret_masked"],
             "********1234",
         )
+        self.assertTrue(settings["notifications"]["notify_warmup"])
         self.assertEqual(settings["notifications"]["error_cooldown_minutes"], 17)
         self.assertNotIn("paper-secret-5678", json.dumps(settings))
         self.assertNotIn("notify-secret-1234", json.dumps(settings))
         self.assertIn("ALPACA_LIVE_API_KEY_ID=live-key-1234", env_text)
         self.assertIn("OPERATOR_SPREADSHEET_AUTO_POST=true", env_text)
         self.assertIn("NOTIFICATIONS_ENABLED=true", env_text)
+        self.assertIn("NOTIFY_WARMUP=true", env_text)
         self.assertIn(
             "NOTIFICATION_APPS_SCRIPT_URL=https://script.google.com/macros/s/example/exec",
             env_text,
@@ -3219,6 +3222,67 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(payload["body"], "Trade entered.")
         self.assertEqual(payload["html_body"], "<p>Trade entered.</p>")
         self.assertEqual(payload["shared_secret"], "notify-secret")
+
+    def test_warmup_notifications_are_deduped_by_session(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._activity_log = []
+        runner._last_output = []
+        runner._last_error = None
+        runner._notification_state = {"sent_event_ids": [], "cooldowns": {}}
+        runner._save_activity_log = lambda: None
+        timestamp = datetime(2026, 6, 11, 13, 30, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "notifications.json"
+            with (
+                patch("server.NOTIFICATION_STATE_PATH", state_path),
+                patch(
+                    "server.notification_settings",
+                    return_value={
+                        "enabled": True,
+                        "notify_warmup": True,
+                        "error_cooldown_minutes": 30,
+                    },
+                ),
+                patch(
+                    "server.send_notification_email",
+                    return_value={"status": "sent"},
+                ) as send_email,
+            ):
+                runner._maybe_send_warmup_notification(
+                    {"regime": "WARMUP", "action_taken": "collecting_data"},
+                    None,
+                    timestamp,
+                )
+                runner._maybe_send_warmup_notification(
+                    {"regime": "WARMUP", "action_taken": "collecting_data"},
+                    None,
+                    timestamp,
+                )
+                runner._maybe_send_warmup_notification(
+                    {
+                        "regime": "DOWNTREND",
+                        "active_bot": INVERSE_BOT,
+                        "routed_symbol": "SOXS",
+                        "action_taken": "no_entry_signal",
+                    },
+                    {"from": "WARMUP", "to": "DOWNTREND"},
+                    timestamp,
+                )
+
+        subjects = [call.kwargs["subject"] for call in send_email.call_args_list]
+        self.assertEqual(
+            subjects,
+            [
+                "Edgewalker warmup started",
+                "Edgewalker warmup ended: DOWNTREND",
+            ],
+        )
+        self.assertEqual(
+            runner._notification_state["sent_event_ids"],
+            ["warmup-started:2026-06-11", "warmup-ended:2026-06-11"],
+        )
 
     def test_notification_error_uses_cooldown_on_failure(self) -> None:
         runner = BotRunner.__new__(BotRunner)

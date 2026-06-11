@@ -138,6 +138,7 @@ const els = {
   notifyTradeEntered: document.querySelector("#notifyTradeEnteredInput"),
   notifyTradeExited: document.querySelector("#notifyTradeExitedInput"),
   notifyDailySummary: document.querySelector("#notifyDailySummaryInput"),
+  notifyWarmup: document.querySelector("#notifyWarmupInput"),
   notifyDataErrors: document.querySelector("#notifyDataErrorsInput"),
   openOperatorSpreadsheet: document.querySelector("#openOperatorSpreadsheet"),
   openResearchSpreadsheet: document.querySelector("#openResearchSpreadsheet"),
@@ -3952,6 +3953,9 @@ function applySettings(settings) {
   if (els.notifyDailySummary) {
     els.notifyDailySummary.checked = notifications.notify_daily_summary !== false;
   }
+  if (els.notifyWarmup) {
+    els.notifyWarmup.checked = notifications.notify_warmup === true;
+  }
   if (els.notifyDataErrors) {
     els.notifyDataErrors.checked = notifications.notify_data_errors !== false;
   }
@@ -4023,6 +4027,7 @@ function settingsPayloadFromForm() {
       notify_trade_entered: Boolean(els.notifyTradeEntered?.checked),
       notify_trade_exited: Boolean(els.notifyTradeExited?.checked),
       notify_daily_summary: Boolean(els.notifyDailySummary?.checked),
+      notify_warmup: Boolean(els.notifyWarmup?.checked),
       notify_data_errors: Boolean(els.notifyDataErrors?.checked),
       error_cooldown_minutes: els.notificationErrorCooldown?.value || "30",
     },
