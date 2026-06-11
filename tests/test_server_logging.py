@@ -41,6 +41,7 @@ from server import (
     _current_ny_activity,
     _cycle_log_record,
     _daily_log_path,
+    _deterministic_daily_narrative_sections,
     _display_date_label,
     _extract_session_context,
     _format_regime_transition,
@@ -2490,7 +2491,7 @@ class ServerLoggingTest(unittest.TestCase):
 
         self.assertEqual(prompt["date"], "2026-05-22")
         self.assertEqual(prompt["display_date"], "May 22 2026")
-        self.assertIn("MARKET: OPEN", prompt["prompt"])
+        self.assertIn("Use only the verified story beats", prompt["prompt"])
         self.assertIn('"tldr"', prompt["prompt"])
 
     def test_custom_summary_prompt_uses_inclusive_log_range(self) -> None:
@@ -2778,6 +2779,96 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertIn("1 closed trade, 0W/1L", grounded["bot_performance"][CHOP_BOT])
         self.assertIn("6 closed trades, 2W/4L", grounded["bot_performance"][INVERSE_BOT])
 
+    def test_deterministic_daily_narrative_grounded_in_story_beats(self) -> None:
+        context = {
+            "session": {
+                "date": "2026-06-11",
+                "total_cycles": 432,
+            },
+            "market": {
+                "symbol": "SOXL",
+            },
+            "session_metrics": {
+                "regime_transition_count": 41,
+                "stale_bar_cycles": 11,
+                "route_invalidation_exit_count": 3,
+                "trailing_stop_exit_count": 1,
+                "trend_trust": {
+                    "average_score": "37.3",
+                },
+            },
+            "error_count": 0,
+            "performance": {
+                "session_realized_pl": "-1.21",
+                "session_trade_count": 4,
+                "session_wins": 1,
+                "session_losses": 3,
+                "reconciliation_confidence": "HIGH",
+                "realized_trades": [
+                    {
+                        "bot": MOMENTUM_BOT,
+                        "exit_reason": "trailing_stop_breached",
+                    },
+                    {
+                        "bot": CHOP_BOT,
+                        "exit_reason": "route_invalidated_exit",
+                    },
+                    {
+                        "bot": CHOP_BOT,
+                        "exit_reason": "route_invalidated_exit",
+                    },
+                    {
+                        "bot": CHOP_BOT,
+                        "exit_reason": "route_invalidated_exit",
+                    },
+                ],
+                "bot_performance": [
+                    {
+                        "bot": MOMENTUM_BOT,
+                        "realized_pl": "-0.45",
+                        "trade_count": 1,
+                        "wins": 0,
+                        "losses": 1,
+                        "avg_mfe_percent": "2.03",
+                        "avg_mae_percent": "-0.14",
+                        "avg_capture_ratio_percent": "-7.07",
+                        "avg_hold_seconds": "672",
+                    },
+                    {
+                        "bot": CHOP_BOT,
+                        "realized_pl": "-0.76",
+                        "trade_count": 3,
+                        "wins": 1,
+                        "losses": 2,
+                        "avg_mfe_percent": "0.17",
+                        "avg_mae_percent": "-0.44",
+                        "avg_capture_ratio_percent": "-250.88",
+                        "avg_hold_seconds": "90",
+                    },
+                    {
+                        "bot": INVERSE_BOT,
+                        "realized_pl": "0",
+                        "trade_count": 0,
+                        "wins": 0,
+                        "losses": 0,
+                    },
+                ],
+            },
+        }
+
+        with patch("server._live_session_count_through", return_value=1):
+            sections = _deterministic_daily_narrative_sections(context)
+
+        self.assertIn("slightly red", sections["tldr"])
+        self.assertIn("-$1.21", sections["tldr"])
+        self.assertIn("41 transitions across 432 cycles", sections["highlight"])
+        self.assertIn("37.3 (LOW)", sections["highlight"])
+        self.assertIn("Every exit was route invalidation", sections["bot_performance"][CHOP_BOT])
+        self.assertIn("gate discipline", sections["bot_performance"][INVERSE_BOT])
+        self.assertIn("No parameter conclusions", sections["analysis"])
+        self.assertIn("Early live observation is data collection", sections["analysis"])
+        self.assertNotIn("consider adjusting", json.dumps(sections).lower())
+
     def test_generate_session_summary_reuses_matching_cache(self) -> None:
         log_records = [
             {
@@ -2817,7 +2908,6 @@ class ServerLoggingTest(unittest.TestCase):
                 patch("server.LOGS_ROOT", root),
                 patch("server.NARRATIVE_CACHE_PATH", cache_path),
                 patch("server.LifecycleLedger", FakeLifecycleLedger),
-                patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}),
                 patch(
                     "server._call_openai",
                     return_value='{"tldr": "Cached read.", "bottom_line": "Done."}',
@@ -2831,11 +2921,11 @@ class ServerLoggingTest(unittest.TestCase):
                     cache_only=True,
                 )
 
-        self.assertEqual(call_openai.call_count, 1)
+        self.assertEqual(call_openai.call_count, 0)
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
         self.assertTrue(cache_only["cached"])
-        self.assertEqual(second["narrative"]["tldr"], "Cached read.")
+        self.assertIn("Edgewalker", second["narrative"]["tldr"])
 
     def test_environment_settings_round_trip_masks_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

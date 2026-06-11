@@ -99,7 +99,7 @@ UNKNOWN_MARKET_ENVIRONMENT = ""
 NOTIFICATION_PROVIDER_APPS_SCRIPT = "apps_script"
 NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
 NOTIFICATION_SENT_EVENT_LIMIT = 500
-NARRATIVE_GROUNDING_VERSION = "ledger-grounded-v2"
+NARRATIVE_GROUNDING_VERSION = "deterministic-daily-v3"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
@@ -3947,6 +3947,353 @@ def _ledger_bot_performance_sections(
     return sections
 
 
+def _narrative_plural(count: int, singular: str, plural: str | None = None) -> str:
+    label = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {label}"
+
+
+def _narrative_trust_tier(score: float | None) -> str:
+    if score is None:
+        return "UNKNOWN"
+    if score < 40:
+        return "LOW"
+    if score <= 65:
+        return "MODERATE"
+    return "HIGH"
+
+
+def _narrative_transition_character(
+    transitions: int,
+    cycles: int,
+) -> tuple[str, str]:
+    if cycles <= 0 or transitions <= 0:
+        return "stable", "no confirmed regime transitions"
+    rate = transitions / cycles
+    cycle_gap = max(1, round(cycles / transitions))
+    if rate >= 0.08 or transitions >= 30:
+        label = "churn-heavy"
+    elif rate >= 0.03 or transitions >= 10:
+        label = "active"
+    else:
+        label = "mostly stable"
+    return label, f"{transitions} transitions across {cycles} cycles, about one every {cycle_gap} cycles"
+
+
+def _narrative_result_status(value: Any) -> str:
+    realized = _decimal_from_value(value) or Decimal("0")
+    if realized > 0:
+        return "GREEN"
+    if realized < 0:
+        return "RED"
+    return "FLAT"
+
+
+def _bot_trade_exit_counts(
+    realized_trades: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for trade in realized_trades:
+        bot = _optional_text(trade.get("bot")) or "UNKNOWN"
+        reason = _optional_text(trade.get("exit_reason")) or "UNKNOWN"
+        bot_counts = counts.setdefault(bot, {})
+        bot_counts[reason] = bot_counts.get(reason, 0) + 1
+    return counts
+
+
+def _narrative_trade_quality_clause(item: dict[str, Any]) -> str:
+    mfe = _decimal_from_value(item.get("avg_mfe_percent"))
+    capture = _decimal_from_value(item.get("avg_capture_ratio_percent"))
+    hold = _decimal_from_value(item.get("avg_hold_seconds"))
+    clauses = []
+    if mfe is not None:
+        clauses.append(f"avg MFE {_narrative_percent(mfe)}")
+    if capture is not None:
+        clauses.append(f"capture {_narrative_percent(capture)}")
+    if hold is not None:
+        hold_int = int(hold)
+        if hold_int < 120:
+            clauses.append(f"avg hold {hold_int}s")
+        else:
+            minutes = hold / Decimal("60")
+            clauses.append(f"avg hold {minutes.quantize(Decimal('0.1'))}m")
+    return ", ".join(clauses)
+
+
+def _deterministic_bot_narrative_sections(
+    context: dict[str, Any],
+) -> dict[str, str]:
+    performance = context.get("performance")
+    by_bot = _bot_performance_by_name(performance)
+    realized_trades = []
+    if isinstance(performance, dict) and isinstance(
+        performance.get("realized_trades"),
+        list,
+    ):
+        realized_trades = [
+            trade for trade in performance["realized_trades"] if isinstance(trade, dict)
+        ]
+    exit_counts = _bot_trade_exit_counts(realized_trades)
+
+    sections: dict[str, str] = {}
+    for bot in BOT_PERFORMANCE_ORDER:
+        display = SPECIALIST_DISPLAY_NAMES.get(bot, bot)
+        item = by_bot.get(bot)
+        if not item:
+            sections[bot] = f"{display} stayed flat; no closed trades."
+            continue
+
+        trade_count = int(item.get("trade_count") or 0)
+        realized_pl = _decimal_from_value(item.get("realized_pl")) or Decimal("0")
+        if trade_count <= 0:
+            if bot == INVERSE_BOT:
+                sections[bot] = (
+                    f"{display} stayed flat. That reads as gate discipline: no clean "
+                    "cascade qualified strongly enough to justify a SOXS entry."
+                )
+            else:
+                sections[bot] = f"{display} stayed flat; no qualifying setup fired."
+            continue
+
+        wins = int(item.get("wins") or 0)
+        losses = int(item.get("losses") or 0)
+        parts = [
+            f"{display} closed {_narrative_plural(trade_count, 'trade')} "
+            f"({wins}W/{losses}L) for {_narrative_money(realized_pl)}."
+        ]
+
+        bot_exits = exit_counts.get(bot, {})
+        route_exits = bot_exits.get("route_invalidated_exit", 0)
+        trail_exits = bot_exits.get("trailing_stop_breached", 0)
+        if route_exits and route_exits == trade_count:
+            parts.append(
+                "Every exit was route invalidation, so regime flips were the pressure point."
+            )
+        elif route_exits:
+            parts.append(
+                f"{route_exits} exit(s) were route invalidations, tying the result to regime churn."
+            )
+        if trail_exits and trail_exits == trade_count:
+            parts.append("The exit path was trailing-stop based.")
+        elif trail_exits:
+            parts.append(f"{trail_exits} exit(s) came from the trailing stop.")
+
+        quality = _narrative_trade_quality_clause(item)
+        if quality:
+            parts.append(f"Quality read: {quality}.")
+
+        capture = _decimal_from_value(item.get("avg_capture_ratio_percent"))
+        if capture is not None and capture < 0:
+            parts.append(
+                "Negative capture means available favorable movement reversed before the close."
+            )
+
+        sections[bot] = " ".join(parts)
+
+    return sections
+
+
+def _live_session_count_through(target_date: str) -> int | None:
+    try:
+        paths = sorted(LOGS_ROOT.glob("edgewalker-*.jsonl"))
+    except OSError:
+        return None
+    count = 0
+    for path in paths:
+        date_text = path.stem[len("edgewalker-") :]
+        if date_text > target_date:
+            continue
+        try:
+            records = _load_log_records(path)
+        except BotError:
+            continue
+        if not records:
+            continue
+        has_live_order_mode = any(
+            isinstance(record.get("config"), dict)
+            and record["config"].get("active_environment") == "live"
+            and not bool(record["config"].get("dry_run"))
+            for record in records
+        )
+        if has_live_order_mode:
+            count += 1
+    return count or None
+
+
+def _deterministic_daily_narrative_sections(
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    session = context.get("session") if isinstance(context.get("session"), dict) else {}
+    market = context.get("market") if isinstance(context.get("market"), dict) else {}
+    metrics = (
+        context.get("session_metrics")
+        if isinstance(context.get("session_metrics"), dict)
+        else {}
+    )
+    performance = (
+        context.get("performance")
+        if isinstance(context.get("performance"), dict)
+        else {}
+    )
+
+    date_text = _optional_text(session.get("date"))
+    cycles = int(session.get("total_cycles") or 0)
+    transitions = int(
+        metrics.get("regime_transition_count")
+        or len(context.get("regime_transitions") or [])
+        or 0
+    )
+    trend_metrics = (
+        metrics.get("trend_trust") if isinstance(metrics.get("trend_trust"), dict) else {}
+    )
+    trust_score = _float_from_value(trend_metrics.get("average_score"))
+    trust_tier = _narrative_trust_tier(trust_score)
+    character, transition_text = _narrative_transition_character(transitions, cycles)
+    symbol = _optional_text(market.get("symbol")) or "primary symbol"
+    realized_pl = _decimal_from_value(performance.get("session_realized_pl")) or Decimal("0")
+    result_status = _narrative_result_status(realized_pl)
+    trade_count = int(performance.get("session_trade_count") or 0)
+    wins = int(performance.get("session_wins") or 0)
+    losses = int(performance.get("session_losses") or 0)
+    error_count = int(context.get("error_count") or 0)
+    stale_cycles = int(metrics.get("stale_bar_cycles") or 0)
+    route_exits = int(metrics.get("route_invalidation_exit_count") or 0)
+    trail_exits = int(metrics.get("trailing_stop_exit_count") or 0)
+    session_count = _live_session_count_through(date_text) if date_text else None
+
+    trust_text = (
+        f"average trend trust {trust_score:.1f} ({trust_tier})"
+        if trust_score is not None
+        else "trend trust unavailable"
+    )
+    trade_summary = (
+        f"{_narrative_plural(trade_count, 'closed trade')} ({wins}W/{losses}L)"
+        if trade_count
+        else "no closed trades"
+    )
+    result_phrase = (
+        "finished green"
+        if result_status == "GREEN"
+        else "finished flat"
+        if result_status == "FLAT"
+        else "finished slightly red"
+        if abs(realized_pl) < Decimal("5")
+        else "finished red"
+    )
+
+    tldr = (
+        f"Edgewalker {result_phrase} at {_narrative_money(realized_pl)} "
+        f"with {trade_summary} during a {character} {symbol} session."
+    )
+    highlight = (
+        f"The main story was regime churn: {transition_text}, with {trust_text}."
+    )
+
+    market_conditions = (
+        f"{symbol} traded through {character} tape. {transition_text.capitalize()}, "
+        f"and {trust_text} kept the specialist gates selective instead of chasing every move."
+    )
+
+    exit_clauses = []
+    if route_exits:
+        exit_clauses.append(_narrative_plural(route_exits, "route-invalidation exit"))
+    if trail_exits:
+        exit_clauses.append(_narrative_plural(trail_exits, "trailing-stop exit"))
+    if exit_clauses:
+        exit_text = ", ".join(exit_clauses)
+        market_conditions += f" Exit pressure came from {exit_text}."
+
+    if error_count:
+        operational = f"{_narrative_plural(error_count, 'operational error')} noted."
+    elif stale_cycles:
+        operational = (
+            f"No broker or order errors were noted. Data had "
+            f"{_narrative_plural(stale_cycles, 'stale cycle')}, but reconciliation remained "
+            f"{_optional_text(performance.get('reconciliation_confidence')) or 'available'}."
+        )
+    else:
+        operational = "No broker, order, or data issues were noted."
+
+    if result_status == "RED" and (transitions >= 20 or (trust_score is not None and trust_score < 45)):
+        verdict = (
+            f"This was a structurally difficult session, not a strategy failure: "
+            f"{transition_text} and {trust_text} created conditions where restraint mattered."
+        )
+    elif result_status == "GREEN" and transitions >= 20:
+        verdict = (
+            f"Strong execution despite noisy tape: {transition_text} and {trust_text}, "
+            f"yet the roster still finished positive."
+        )
+    elif result_status == "FLAT":
+        verdict = (
+            "Patience was the correct result: no qualifying edge paid enough to justify a net position."
+        )
+    else:
+        verdict = (
+            f"The result was {_narrative_money(realized_pl)} with {trade_summary}; keep watching for repeated patterns."
+        )
+
+    analysis_parts = [
+        verdict,
+        "No parameter conclusions are justified from one session; watch for multi-session patterns before changing the locked build.",
+    ]
+    if session_count is not None and session_count <= 10:
+        analysis_parts.append(
+            "Early live observation is data collection, not evidence for tuning."
+        )
+
+    bottom_line = (
+        f"{_narrative_money(realized_pl)} on {trade_summary}. "
+        f"The useful read is environment quality: {character} tape with {trust_text}."
+    )
+
+    return {
+        "tldr": tldr,
+        "highlight": highlight,
+        "bot_performance": _deterministic_bot_narrative_sections(context),
+        "market_conditions": market_conditions,
+        "operational_issues": operational,
+        "analysis": " ".join(analysis_parts),
+        "bottom_line": bottom_line,
+        "story_beats": {
+            "regime_character": highlight,
+            "day_verdict": verdict,
+            "patience_guardrail": analysis_parts[-1],
+        },
+    }
+
+
+def _build_daily_polish_prompt(
+    context: dict[str, Any],
+    sections: dict[str, Any],
+) -> str:
+    payload = {
+        key: value
+        for key, value in sections.items()
+        if key in {
+            "tldr",
+            "highlight",
+            "bot_performance",
+            "market_conditions",
+            "operational_issues",
+            "analysis",
+            "bottom_line",
+        }
+    }
+    session = context.get("session") if isinstance(context.get("session"), dict) else {}
+    return "\n".join(
+        [
+            "You are polishing Edgewalker's daily operator narrative.",
+            "Use only the verified story beats below. Do not add facts, advice, or parameter changes.",
+            "Keep the tone calm, causal, and operator-grade: no alarm, no hype, no premature tuning.",
+            f"SESSION: {session.get('date')} | CYCLES: {session.get('total_cycles')}",
+            "",
+            json.dumps(payload, indent=2, sort_keys=True),
+            "",
+            "Return valid JSON with the same keys and no extra commentary.",
+        ]
+    )
+
+
 def _ground_narrative_sections(
     sections: dict[str, Any],
     context: dict[str, Any],
@@ -7056,7 +7403,7 @@ def _extract_session_context(
             "position_notional": f"${last_config.get('position_notional', '?')}",
         },
         "market": {
-            "symbol": "SOXL",
+            "symbol": last_config.get("symbol") or SOXL,
             "price_range": price_range,
             "initial_regime": first.get("regime", "UNKNOWN"),
             "was_open": market_was_open,
@@ -7767,22 +8114,18 @@ def generate_session_summary(
                 cycle_count=len(records),
             )
 
-        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            raise BotError(
-                "OPENAI_API_KEY is not configured. Add it to your .env file."
-            )
-        prompt = _build_summary_prompt(context)
-        raw_narrative = _call_openai(prompt, api_key)
-        narrative_sections = _ground_narrative_sections(
-            _parse_narrative_response(raw_narrative),
-            context,
-        )
+        narrative_sections = _deterministic_daily_narrative_sections(context)
         summary = {
             "available": True,
             "cached": False,
             "timeframe": "1D",
-            "summary": raw_narrative,
+            "summary": _narrative_for_spreadsheet(
+                {
+                    "narrative": narrative_sections,
+                    "display_date": _display_date_label(target_date),
+                    "cycle_count": len(records),
+                }
+            ),
             "narrative": narrative_sections,
             "date": target_date,
             "display_date": _display_date_label(target_date),
@@ -7873,7 +8216,8 @@ def build_summary_prompt(
             target_date,
             LifecycleLedger().read_all(),
         )
-        prompt = _build_summary_prompt(context)
+        sections = _deterministic_daily_narrative_sections(context)
+        prompt = _build_daily_polish_prompt(context, sections)
         return {
             "timeframe": timeframe,
             "date": target_date,
