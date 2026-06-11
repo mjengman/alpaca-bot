@@ -819,6 +819,7 @@ automatic production changes.
 These are important, but should follow the operational truth phase.
 
 - Persistent database layer
+- Event-driven signal/risk separation
 - Trade journal export
 - Lab / tuning console for parameter experiments
 - Advanced simulation and backtesting engine
@@ -836,6 +837,47 @@ Notes:
 
 - Arena work depends on clean lifecycle and metrics primitives.
 - Multi-symbol support depends on broker-state and allocation controls.
+- Event-driven signal/risk separation should not be rushed during the first
+  live week. The current bridge is deliberate: bar-aligned scans while flat,
+  faster 5-second scans while a position or order is active.
+
+### Event-Driven Signal/Risk Separation
+
+Status: deferred until after roughly one week of live evidence on the current
+`60s` flat scan / `5s` active-position scan model.
+
+Concept:
+
+- Separate entry/signal evaluation from open-position risk management.
+- Trigger entry evaluation from completed one-minute bars, since regimes,
+  moving averages, surge/cascade sustain windows, and backtests are all
+  bar-based.
+- Trigger risk evaluation from live quote/trade updates while a SOXL/SOXS
+  position or pending order exists, because trailing exits and broker
+  reconciliation have materially higher latency sensitivity than entries.
+- Keep both loops behind a single coherent state model so fills, pending
+  orders, route ownership, lifecycle records, and duplicate-exit guards cannot
+  race each other.
+
+Why not now:
+
+- The first live session showed a real exit-latency problem, and the 5-second
+  active scan is the smallest safe fire-fix.
+- A fully event-driven architecture is the correct destination, but it raises
+  state-management complexity: duplicate exits, fill reconciliation races,
+  stale position reads, and route/risk loop contention.
+- Edgewalker needs live evidence before a larger nervous-system rewrite.
+
+Acceptance criteria before build:
+
+- At least several live sessions, preferably about a week, under the current
+  active-scan model.
+- Lifecycle records showing whether 5-second active scans materially reduce
+  trail overshoot and negative capture.
+- A written state-machine design for entry loop, risk loop, broker
+  reconciliation, dedupe, and lock boundaries.
+- Tests proving live tick risk checks cannot submit duplicate exits and cannot
+  fight pending broker orders.
 
 ## Suggested Next Sprint
 

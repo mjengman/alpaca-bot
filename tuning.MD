@@ -1536,6 +1536,39 @@ Watch:
 - Whether `POLL_SEC` is better treated as an exit-precision setting than an
   entry-logic setting while regimes remain one-minute-bar based.
 
+## Deferred Architecture Candidate: Event-Driven Signal/Risk Split
+
+Status: defer until the current live build has about a week of evidence.
+
+Current bridge:
+
+- Flat / no pending order: scan on the configured bar-aligned cadence.
+- Open position or pending order: scan every `5s` for tighter bot-managed exit
+  handling and broker reconciliation.
+
+Concept:
+
+- Completed one-minute bars should trigger signal evaluation.
+- Live quote/trade ticks should trigger open-position risk checks.
+- Broker fills and lifecycle records should remain the source of truth for
+  whether an entry, pending order, open position, or exit is active.
+
+Why this waits:
+
+- It is architecturally sound, but it changes the control model from one simple
+  loop into coordinated entry, risk, and reconciliation loops.
+- The first live-session fire was latency around bot-managed exits; the active
+  `5s` scan directly addresses that without changing entry doctrine.
+- We need live evidence before deciding whether event-driven risk checks are
+  necessary, and what exact failure modes they must solve.
+
+Watch:
+
+- Trail-trigger overshoot after active scan deployment.
+- Capture ratio on live trailing-stop exits.
+- Duplicate-order or pending-order edge cases during fast risk scans.
+- Whether 5-second active scans are sufficient in normal live volatility.
+
 ## Go-Live Readiness Checklist
 
 - [ ] Fresh-cross doctrine explicitly accepted or revised.
