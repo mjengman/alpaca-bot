@@ -126,8 +126,12 @@ const els = {
   spreadsheetOperatorNotes: document.querySelector("#spreadsheetOperatorNotesInput"),
   notificationsEnabled: document.querySelector("#notificationsEnabledInput"),
   notificationEmail: document.querySelector("#notificationEmailInput"),
-  notificationFromEmail: document.querySelector("#notificationFromEmailInput"),
-  resendApiKey: document.querySelector("#resendApiKeyInput"),
+  notificationAppsScriptUrl: document.querySelector(
+    "#notificationAppsScriptUrlInput",
+  ),
+  notificationAppsScriptSecret: document.querySelector(
+    "#notificationAppsScriptSecretInput",
+  ),
   notificationErrorCooldown: document.querySelector(
     "#notificationErrorCooldownInput",
   ),
@@ -3932,8 +3936,8 @@ function applySettings(settings) {
   if (els.notificationEmail) {
     els.notificationEmail.value = notifications.email || "";
   }
-  if (els.notificationFromEmail) {
-    els.notificationFromEmail.value = notifications.from_email || "";
+  if (els.notificationAppsScriptUrl) {
+    els.notificationAppsScriptUrl.value = notifications.apps_script_url || "";
   }
   if (els.notificationErrorCooldown) {
     els.notificationErrorCooldown.value =
@@ -3957,7 +3961,10 @@ function applySettings(settings) {
     [els.paperApiSecret, settings.paper?.api_secret_key_masked],
     [els.liveApiKey, settings.live?.api_key_id_masked],
     [els.liveApiSecret, settings.live?.api_secret_key_masked],
-    [els.resendApiKey, notifications.resend_api_key_masked],
+    [
+      els.notificationAppsScriptSecret,
+      notifications.apps_script_secret_masked,
+    ],
   ];
   secretFields.forEach(([input, masked]) => {
     if (!input) return;
@@ -4011,8 +4018,8 @@ function settingsPayloadFromForm() {
     notifications: {
       enabled: Boolean(els.notificationsEnabled?.checked),
       email: els.notificationEmail?.value || "",
-      from_email: els.notificationFromEmail?.value || "",
-      resend_api_key: els.resendApiKey?.value || "",
+      apps_script_url: els.notificationAppsScriptUrl?.value || "",
+      apps_script_secret: els.notificationAppsScriptSecret?.value || "",
       notify_trade_entered: Boolean(els.notifyTradeEntered?.checked),
       notify_trade_exited: Boolean(els.notifyTradeExited?.checked),
       notify_daily_summary: Boolean(els.notifyDailySummary?.checked),

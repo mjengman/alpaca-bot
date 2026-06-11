@@ -1614,23 +1614,23 @@
               />
             </label>
             <label class="settings-field">
-              <span>From Email</span>
+              <span>Apps Script Endpoint</span>
               <input
-                id="notificationFromEmailInput"
-                type="text"
+                id="notificationAppsScriptUrlInput"
+                type="url"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="Edgewalker <alerts@yourdomain.com>"
-                aria-label="Verified Resend sender"
+                placeholder="https://script.google.com/macros/s/.../exec"
+                aria-label="Apps Script notification endpoint"
               />
             </label>
             <label class="settings-field">
-              <span>Resend API Key</span>
+              <span>Shared Secret</span>
               <input
-                id="resendApiKeyInput"
+                id="notificationAppsScriptSecretInput"
                 type="password"
                 autocomplete="off"
-                aria-label="Resend API key"
+                aria-label="Apps Script shared secret"
               />
             </label>
             <label class="settings-field">

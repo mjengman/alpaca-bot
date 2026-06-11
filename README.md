@@ -149,6 +149,25 @@ Spreadsheet setup:
 - The Apps Script should route rows with `is_backtest=true` into the research
   tab and live/paper rows into the daily session tab.
 
+## Notifications
+
+Edgewalker can send low-volume operator emails through the same Google Apps
+Script surface used for spreadsheet logging. The app posts notification payloads
+to the configured Apps Script endpoint, and the script delivers them with
+`MailApp.sendEmail`.
+
+Use the Notifications modal to configure:
+
+- Notification email address
+- Apps Script endpoint URL
+- Optional shared secret
+- Trade, P/L, daily-summary, and error-notification toggles
+- Error-notification cooldown
+
+The notification sender keeps a local dedupe/cooldown ledger in
+`.notification_events.json`, so restarts do not repeatedly resend the same trade
+or error event.
+
 ## Useful Commands
 
 ```bash

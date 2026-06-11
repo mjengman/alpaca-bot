@@ -95,7 +95,7 @@ SPECIALIST_DISPLAY_NAMES = {
 }
 LOCKED_FULL_ROSTER_PROFILE = "FULL_ROSTER_LOCKED"
 UNKNOWN_MARKET_ENVIRONMENT = ""
-NOTIFICATION_PROVIDER_RESEND = "resend"
+NOTIFICATION_PROVIDER_APPS_SCRIPT = "apps_script"
 NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
 NOTIFICATION_SENT_EVENT_LIMIT = 500
 NARRATIVE_GROUNDING_VERSION = "ledger-grounded-v2"
@@ -1956,10 +1956,10 @@ def notification_settings(values: dict[str, str] | None = None) -> dict[str, Any
     provider = _env_first(
         values,
         "NOTIFICATION_PROVIDER",
-        default=NOTIFICATION_PROVIDER_RESEND,
+        default=NOTIFICATION_PROVIDER_APPS_SCRIPT,
     ).strip().lower()
-    if provider != NOTIFICATION_PROVIDER_RESEND:
-        provider = NOTIFICATION_PROVIDER_RESEND
+    if provider != NOTIFICATION_PROVIDER_APPS_SCRIPT:
+        provider = NOTIFICATION_PROVIDER_APPS_SCRIPT
     cooldown_minutes = _notification_cooldown_minutes(
         _env_first(
             values,
@@ -1967,16 +1967,20 @@ def notification_settings(values: dict[str, str] | None = None) -> dict[str, Any
             default=str(NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES),
         )
     )
-    resend_api_key = _env_first(values, "RESEND_API_KEY")
+    apps_script_secret = _env_first(values, "NOTIFICATION_APPS_SCRIPT_SECRET")
     return {
         "enabled": _env_bool_text(
             _env_first(values, "NOTIFICATIONS_ENABLED", default="false")
         ),
         "email": _env_first(values, "NOTIFICATION_EMAIL"),
-        "from_email": _env_first(values, "NOTIFICATION_FROM_EMAIL"),
         "provider": provider,
-        "resend_api_key_masked": _mask_secret(resend_api_key),
-        "has_resend_api_key": bool(resend_api_key),
+        "apps_script_url": _env_first(
+            values,
+            "NOTIFICATION_APPS_SCRIPT_URL",
+            "NOTIFICATION_APPS_SCRIPT_ENDPOINT",
+        ),
+        "apps_script_secret_masked": _mask_secret(apps_script_secret),
+        "has_apps_script_secret": bool(apps_script_secret),
         "notify_trade_entered": _env_bool_text(
             _env_first(values, "NOTIFY_TRADE_ENTERED", default="true")
         ),
@@ -2121,15 +2125,19 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
     updates["NOTIFICATION_EMAIL"] = _optional_text(
         notifications.get("email")
     ) or ""
-    updates["NOTIFICATION_FROM_EMAIL"] = _optional_text(
-        notifications.get("from_email") or notifications.get("fromEmail")
+    updates["NOTIFICATION_PROVIDER"] = NOTIFICATION_PROVIDER_APPS_SCRIPT
+    updates["NOTIFICATION_APPS_SCRIPT_URL"] = _optional_text(
+        notifications.get("apps_script_url")
+        or notifications.get("appsScriptUrl")
+        or notifications.get("endpoint_url")
+        or notifications.get("endpointUrl")
     ) or ""
-    updates["NOTIFICATION_PROVIDER"] = NOTIFICATION_PROVIDER_RESEND
-    resend_api_key = _optional_text(
-        notifications.get("resend_api_key") or notifications.get("resendApiKey")
+    apps_script_secret = _optional_text(
+        notifications.get("apps_script_secret")
+        or notifications.get("appsScriptSecret")
     )
-    if not _is_secret_placeholder(resend_api_key):
-        updates["RESEND_API_KEY"] = resend_api_key.strip()
+    if not _is_secret_placeholder(apps_script_secret):
+        updates["NOTIFICATION_APPS_SCRIPT_SECRET"] = apps_script_secret.strip()
     updates["NOTIFY_TRADE_ENTERED"] = (
         "true"
         if _payload_bool(notifications.get("notify_trade_entered"), default=True)
@@ -2245,14 +2253,14 @@ def _save_notification_state(state: dict[str, Any]) -> None:
     )
 
 
-def _resend_error_message(exc: urllib.error.HTTPError) -> str:
+def _apps_script_error_message(exc: urllib.error.HTTPError) -> str:
     try:
         body = exc.read().decode("utf-8")
     except Exception:
         body = ""
     if body:
-        return f"Resend HTTP {exc.code}: {body[:240]}"
-    return f"Resend HTTP {exc.code}"
+        return f"Apps Script HTTP {exc.code}: {body[:240]}"
+    return f"Apps Script HTTP {exc.code}"
 
 
 def send_notification_email(
@@ -2263,31 +2271,30 @@ def send_notification_email(
 ) -> dict[str, Any]:
     values = _read_env_values()
     settings = notification_settings(values)
-    if settings["provider"] != NOTIFICATION_PROVIDER_RESEND:
-        raise BotError("Only Resend notifications are supported.")
+    if settings["provider"] != NOTIFICATION_PROVIDER_APPS_SCRIPT:
+        raise BotError("Only Google Apps Script notifications are supported.")
     recipient = _optional_text(settings.get("email"))
-    sender = _optional_text(settings.get("from_email"))
-    api_key = _env_first(values, "RESEND_API_KEY")
+    endpoint = _optional_text(settings.get("apps_script_url"))
+    shared_secret = _env_first(values, "NOTIFICATION_APPS_SCRIPT_SECRET")
     if not recipient:
         raise BotError("Add a notification email address first.")
-    if not sender:
-        raise BotError("Add a verified Resend sender email first.")
-    if not api_key:
-        raise BotError("Add a Resend API key first.")
+    if not endpoint:
+        raise BotError("Add an Apps Script notification endpoint first.")
 
     payload = {
-        "from": sender,
-        "to": [recipient],
+        "kind": "notification",
+        "to": recipient,
         "subject": subject,
-        "text": text,
+        "body": text,
     }
+    if shared_secret:
+        payload["shared_secret"] = shared_secret
     if html:
-        payload["html"] = html
+        payload["html_body"] = html
     request = urllib.request.Request(
-        "https://api.resend.com/emails",
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={
-            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -2299,6 +2306,10 @@ def send_notification_email(
                 parsed = json.loads(response_body) if response_body else {}
             except json.JSONDecodeError:
                 parsed = {"raw": response_body}
+            if parsed.get("status") == "error":
+                raise BotError(
+                    str(parsed.get("message") or "Apps Script notification failed.")
+                )
             return {
                 "status": "sent",
                 "provider": settings["provider"],
@@ -2306,7 +2317,7 @@ def send_notification_email(
                 "response": parsed,
             }
     except urllib.error.HTTPError as exc:
-        raise BotError(_resend_error_message(exc)) from exc
+        raise BotError(_apps_script_error_message(exc)) from exc
     except urllib.error.URLError as exc:
         raise BotError(f"Notification send failed: {exc.reason}") from exc
     except TimeoutError as exc:

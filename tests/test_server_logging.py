@@ -74,6 +74,7 @@ from server import (
     run_roster_dress_rehearsal_from_payload,
     run_research_comparison_from_payload,
     save_alpaca_environment_settings,
+    send_notification_email,
     set_live_trading_armed,
     set_live_trading_disarmed,
 )
@@ -2861,8 +2862,8 @@ class ServerLoggingTest(unittest.TestCase):
                 "notifications": {
                     "enabled": True,
                     "email": "operator@example.com",
-                    "from_email": "Edgewalker <alerts@example.com>",
-                    "resend_api_key": "re_test_123456789",
+                    "apps_script_url": "https://script.google.com/macros/s/example/exec",
+                    "apps_script_secret": "notify-secret-1234",
                     "notify_trade_entered": True,
                     "notify_trade_exited": True,
                     "notify_daily_summary": True,
@@ -2883,14 +2884,25 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertTrue(settings["operator_spreadsheet"]["auto_post_enabled"])
         self.assertTrue(settings["notifications"]["enabled"])
         self.assertEqual(settings["notifications"]["email"], "operator@example.com")
-        self.assertEqual(settings["notifications"]["resend_api_key_masked"], "********6789")
+        self.assertEqual(
+            settings["notifications"]["apps_script_url"],
+            "https://script.google.com/macros/s/example/exec",
+        )
+        self.assertEqual(
+            settings["notifications"]["apps_script_secret_masked"],
+            "********1234",
+        )
         self.assertEqual(settings["notifications"]["error_cooldown_minutes"], 17)
         self.assertNotIn("paper-secret-5678", json.dumps(settings))
-        self.assertNotIn("re_test_123456789", json.dumps(settings))
+        self.assertNotIn("notify-secret-1234", json.dumps(settings))
         self.assertIn("ALPACA_LIVE_API_KEY_ID=live-key-1234", env_text)
         self.assertIn("OPERATOR_SPREADSHEET_AUTO_POST=true", env_text)
         self.assertIn("NOTIFICATIONS_ENABLED=true", env_text)
-        self.assertIn("RESEND_API_KEY=re_test_123456789", env_text)
+        self.assertIn(
+            "NOTIFICATION_APPS_SCRIPT_URL=https://script.google.com/macros/s/example/exec",
+            env_text,
+        )
+        self.assertIn("NOTIFICATION_APPS_SCRIPT_SECRET=notify-secret-1234", env_text)
 
     def test_environment_settings_normalizes_bare_alpaca_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3156,6 +3168,57 @@ class ServerLoggingTest(unittest.TestCase):
             "[NOTIFY] Sent: Edgewalker entered SOXL",
             [line for _, line in runner._activity_log],
         )
+
+    def test_notification_email_posts_to_apps_script_endpoint(self) -> None:
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"status":"success","remaining_quota":99}'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "NOTIFICATIONS_ENABLED=true",
+                        "NOTIFICATION_EMAIL=operator@example.com",
+                        "NOTIFICATION_PROVIDER=apps_script",
+                        "NOTIFICATION_APPS_SCRIPT_URL=https://script.google.com/macros/s/example/exec",
+                        "NOTIFICATION_APPS_SCRIPT_SECRET=notify-secret",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("server.ENV_PATH", env_path),
+                patch(
+                    "server.urllib.request.urlopen",
+                    return_value=FakeResponse(),
+                ) as urlopen,
+            ):
+                result = send_notification_email(
+                    subject="Edgewalker entered SOXL",
+                    text="Trade entered.",
+                    html="<p>Trade entered.</p>",
+                )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(result["provider"], "apps_script")
+        self.assertEqual(request.full_url, "https://script.google.com/macros/s/example/exec")
+        self.assertEqual(payload["kind"], "notification")
+        self.assertEqual(payload["to"], "operator@example.com")
+        self.assertEqual(payload["subject"], "Edgewalker entered SOXL")
+        self.assertEqual(payload["body"], "Trade entered.")
+        self.assertEqual(payload["html_body"], "<p>Trade entered.</p>")
+        self.assertEqual(payload["shared_secret"], "notify-secret")
 
     def test_notification_error_uses_cooldown_on_failure(self) -> None:
         runner = BotRunner.__new__(BotRunner)
