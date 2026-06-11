@@ -633,6 +633,25 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.specialist-build-list {
+  display: inline;
+}
+
+.specialist-build-list .has-tooltip {
+  display: inline;
+  width: auto;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: none;
+}
+
+.specialist-build-separator {
+  color: var(--muted);
+  margin: 0 2px;
+}
+
 .status-sizing-card {
   grid-column: span 2;
   min-height: 116px;

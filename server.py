@@ -87,6 +87,13 @@ ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
+SPECIALIST_DISPLAY_NAMES = {
+    MOMENTUM_BOT: "Momentum Surge",
+    CHOP_BOT: "Chop Firewall",
+    INVERSE_BOT: "Inverse Cascade",
+}
+LOCKED_FULL_ROSTER_PROFILE = "FULL_ROSTER_LOCKED"
+UNKNOWN_MARKET_ENVIRONMENT = ""
 NARRATIVE_GROUNDING_VERSION = "ledger-grounded-v2"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
@@ -96,6 +103,8 @@ PRESET_AUTHORITY_MODEL_V6 = "v6_0945_high_confidence_with_rebound_block"
 OPERATOR_SPREADSHEET_COLUMNS = [
     "date",
     "mode",
+    "build_profile",
+    "enabled_specialists",
     "starting_account_value",
     "ending_account_value",
     "realized_pl_dollars",
@@ -108,6 +117,9 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "momentum_pl",
     "chop_pl",
     "inverse_pl",
+    "momentum_trades",
+    "chop_trades",
+    "inverse_trades",
     "top_pl_bot",
     "bottom_pl_bot",
     "regime_transitions",
@@ -149,6 +161,7 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "position_sizing_mode",
     "position_notional",
     "position_allocation_percent",
+    "effective_position_notional",
     "poll_seconds",
     "trail_percent",
     "fast_sma_minutes",
@@ -180,7 +193,12 @@ OPERATOR_SPREADSHEET_COLUMNS = [
     "momentum_authority_reclaim_end_minutes",
     "v10_force_no_authority",
     "dry_run",
+    "order_mode",
     "active_environment",
+    "market_environment",
+    "primary_no_trade_reason",
+    "route_reason_summary",
+    "prior_close_status",
     "data_feed",
     "operator_notes",
     "daily_narrative",
@@ -3318,6 +3336,101 @@ def _config_snapshot_int(
         return default
 
 
+def _config_enabled_bots(config: dict[str, Any]) -> list[str]:
+    raw = config.get("enabled_bots")
+    if isinstance(raw, list):
+        return [_optional_text(bot) for bot in raw if _optional_text(bot)]
+    if isinstance(raw, str):
+        return [bot.strip() for bot in raw.split(",") if bot.strip()]
+    return []
+
+
+def _enabled_specialists_text(enabled_bots: list[str]) -> str:
+    return " | ".join(
+        SPECIALIST_DISPLAY_NAMES.get(bot, bot)
+        for bot in enabled_bots
+        if bot in BOT_PERFORMANCE_ORDER
+    )
+
+
+def _build_profile(config: dict[str, Any]) -> str:
+    enabled_bots = _config_enabled_bots(config)
+    if tuple(enabled_bots) == tuple(EDGEWALKER_BOTS) or set(enabled_bots) == set(
+        EDGEWALKER_BOTS
+    ):
+        return LOCKED_FULL_ROSTER_PROFILE
+    return "CUSTOM"
+
+
+def _effective_position_notional(
+    config: dict[str, Any],
+    account_value: Decimal,
+) -> float:
+    sizing_mode = _config_snapshot_text(config, "position_sizing_mode")
+    if sizing_mode == "DYNAMIC":
+        allocation = _decimal_from_value(config.get("position_allocation_percent"))
+        if allocation is None:
+            return 0.0
+        return _rounded_number(account_value * allocation / Decimal("100"))
+    return _config_snapshot_number(config, "position_notional")
+
+
+def _bot_trade_count(performance: dict[str, Any], bot: str) -> int:
+    item = _bot_performance_by_name(performance).get(bot) or {}
+    return int(item.get("trade_count") or 0)
+
+
+def _record_contains_text(record: dict[str, Any], needle: str) -> bool:
+    try:
+        return needle in json.dumps(record, default=str)
+    except (TypeError, ValueError):
+        return False
+
+
+def _prior_close_status(record: dict[str, Any]) -> str:
+    if _record_contains_text(record, "source_prior_close_unavailable"):
+        return "MISSING"
+    return "GUARDED"
+
+
+def _primary_no_trade_reason(record: dict[str, Any]) -> str:
+    if record.get("position_symbol"):
+        return ""
+    action = _optional_text(record.get("action_taken"))
+    if action and action != "no_entry_signal":
+        return action
+    for context_key in ("v9_momentum_context", "v10_no_authority_context"):
+        context = record.get(context_key)
+        if isinstance(context, dict):
+            reason = _optional_text(
+                context.get("invalidation_reason") or context.get("activation_reason")
+            )
+            if reason:
+                return reason
+    for line in record.get("console_lines") or []:
+        match = re.search(r"reason=([a-zA-Z0-9_,-]+)", str(line))
+        if match:
+            return match.group(1)
+    return action or ""
+
+
+def _route_reason_summary(record: dict[str, Any]) -> str:
+    parts = []
+    active_bot = _optional_text(record.get("active_bot"))
+    routed_symbol = _optional_text(record.get("routed_symbol"))
+    action = _optional_text(record.get("action_taken"))
+    reason = _primary_no_trade_reason(record)
+    if active_bot:
+        parts.append(f"bot={active_bot}")
+    if routed_symbol:
+        parts.append(f"route={routed_symbol}")
+    if action:
+        parts.append(f"action={action}")
+    if reason and reason != action:
+        parts.append(f"reason={reason}")
+    return "; ".join(parts)
+
+
 def build_operator_spreadsheet_daily_row(
     date: str | None = None,
     *,
@@ -3350,6 +3463,7 @@ def build_operator_spreadsheet_daily_row(
     first = export_records[0]
     last = export_records[-1]
     last_config = last.get("config") if isinstance(last.get("config"), dict) else {}
+    enabled_bots = _config_enabled_bots(last_config)
     starting_account = _decimal_from_value(
         first.get("portfolio_value") or first.get("account_value")
     ) or Decimal("0")
@@ -3404,6 +3518,8 @@ def build_operator_spreadsheet_daily_row(
         "mode": last.get("config", {}).get("directional_mode")
         or last.get("directional_mode")
         or "",
+        "build_profile": _build_profile(last_config),
+        "enabled_specialists": _enabled_specialists_text(enabled_bots),
         "starting_account_value": _rounded_number(starting_account),
         "ending_account_value": _rounded_number(ending_account),
         "realized_pl_dollars": _rounded_number(realized_pl),
@@ -3416,6 +3532,9 @@ def build_operator_spreadsheet_daily_row(
         "momentum_pl": _rounded_number(bot_pl.get(MOMENTUM_BOT)),
         "chop_pl": _rounded_number(bot_pl.get(CHOP_BOT)),
         "inverse_pl": _rounded_number(bot_pl.get(INVERSE_BOT)),
+        "momentum_trades": _bot_trade_count(performance, MOMENTUM_BOT),
+        "chop_trades": _bot_trade_count(performance, CHOP_BOT),
+        "inverse_trades": _bot_trade_count(performance, INVERSE_BOT),
         "top_pl_bot": _top_pl_bot(bot_pl),
         "bottom_pl_bot": _bottom_pl_bot(bot_pl),
         "regime_transitions": int(
@@ -3476,6 +3595,10 @@ def build_operator_spreadsheet_daily_row(
             last_config,
             "position_allocation_percent",
         ),
+        "effective_position_notional": _effective_position_notional(
+            last_config,
+            starting_account,
+        ),
         "poll_seconds": _config_snapshot_int(last_config, "poll_seconds"),
         "trail_percent": _config_snapshot_number(last_config, "trail_percent"),
         "fast_sma_minutes": _config_snapshot_int(last_config, "fast_sma_minutes"),
@@ -3512,15 +3635,86 @@ def build_operator_spreadsheet_daily_row(
             last_config,
             "directional_cooldown_minutes",
         ),
+        "chop_permission_mode": _config_snapshot_text(
+            last_config,
+            "chop_permission_mode",
+        ),
+        "chop_permission_max_abs_source_percent": _config_snapshot_number(
+            last_config,
+            "chop_permission_max_abs_source_percent",
+        ),
         "adaptive_shadow_enabled": bool(
             last_config.get("adaptive_shadow_enabled", False)
         ),
+        "enabled_bots": ",".join(enabled_bots),
+        "momentum_authority_required": bool(
+            last_config.get("momentum_authority_required", False)
+        ),
+        "momentum_authority_revoke_exits": bool(
+            last_config.get("momentum_authority_revoke_exits", False)
+        ),
+        "momentum_authority_latch_once_active": bool(
+            last_config.get("momentum_authority_latch_once_active", False)
+        ),
+        "momentum_authority_min_trust_score": _config_snapshot_int(
+            last_config,
+            "momentum_authority_min_trust_score",
+        ),
+        "momentum_authority_min_source_percent": _config_snapshot_number(
+            last_config,
+            "momentum_authority_min_source_percent",
+        ),
+        "momentum_authority_max_transitions_per_hour": _config_snapshot_number(
+            last_config,
+            "momentum_authority_max_transitions_per_hour",
+        ),
+        "momentum_authority_reclaim_enabled": bool(
+            last_config.get("momentum_authority_reclaim_enabled", False)
+        ),
+        "momentum_authority_reclaim_min_trust_score": _config_snapshot_int(
+            last_config,
+            "momentum_authority_reclaim_min_trust_score",
+        ),
+        "momentum_authority_reclaim_min_source_percent": _config_snapshot_number(
+            last_config,
+            "momentum_authority_reclaim_min_source_percent",
+        ),
+        "momentum_authority_reclaim_max_raw_transition_count": _config_snapshot_int(
+            last_config,
+            "momentum_authority_reclaim_max_raw_transition_count",
+        ),
+        "momentum_authority_reclaim_max_non_warmup_transition_count": (
+            _config_snapshot_int(
+                last_config,
+                "momentum_authority_reclaim_max_non_warmup_transition_count",
+            )
+        ),
+        "momentum_authority_reclaim_start_minutes": _config_snapshot_int(
+            last_config,
+            "momentum_authority_reclaim_start_minutes",
+        ),
+        "momentum_authority_reclaim_end_minutes": _config_snapshot_int(
+            last_config,
+            "momentum_authority_reclaim_end_minutes",
+        ),
+        "v10_force_no_authority": bool(
+            last_config.get("v10_force_no_authority", False)
+        ),
         "dry_run": bool(last_config.get("dry_run", False)),
+        "order_mode": _config_snapshot_text(
+            last_config,
+            "active_environment",
+            export_environment or current_alpaca_environment(),
+        ),
         "active_environment": _config_snapshot_text(
             last_config,
             "active_environment",
             export_environment or current_alpaca_environment(),
         ),
+        "market_environment": UNKNOWN_MARKET_ENVIRONMENT,
+        "primary_no_trade_reason": _primary_no_trade_reason(last),
+        "route_reason_summary": _route_reason_summary(last),
+        "prior_close_status": _prior_close_status(last),
         "data_feed": _config_snapshot_text(last_config, "data_feed"),
         "operator_notes": operator_notes,
         "daily_narrative": daily_narrative,

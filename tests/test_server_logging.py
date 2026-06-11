@@ -15,6 +15,7 @@ from bot import (
     BotConfig,
     BotError,
     CHOP_BOT,
+    EDGEWALKER_BOTS,
     INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_ORDER_ACCEPTED,
@@ -1921,6 +1922,7 @@ class ServerLoggingTest(unittest.TestCase):
                     "directional_strong_chase_max_extension_percent": "1.00",
                     "directional_min_strength": "MODERATE",
                     "directional_cooldown_minutes": 4,
+                    "enabled_bots": list(EDGEWALKER_BOTS),
                     "adaptive_shadow_enabled": True,
                     "dry_run": False,
                     "active_environment": "paper",
@@ -1970,6 +1972,11 @@ class ServerLoggingTest(unittest.TestCase):
         )
         self.assertEqual(row["date"], "2026-06-01")
         self.assertEqual(row["mode"], "BALANCED")
+        self.assertEqual(row["build_profile"], "FULL_ROSTER_LOCKED")
+        self.assertEqual(
+            row["enabled_specialists"],
+            "Momentum Surge | Chop Firewall | Inverse Cascade",
+        )
         self.assertEqual(row["starting_account_value"], 1000.0)
         self.assertEqual(row["ending_account_value"], 1140.0)
         self.assertEqual(row["realized_pl_dollars"], 140.0)
@@ -1981,6 +1988,9 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["win_rate"], 100.0)
         self.assertEqual(row["momentum_pl"], 100.0)
         self.assertEqual(row["inverse_pl"], 40.0)
+        self.assertEqual(row["momentum_trades"], 1)
+        self.assertEqual(row["chop_trades"], 0)
+        self.assertEqual(row["inverse_trades"], 1)
         self.assertEqual(row["top_pl_bot"], MOMENTUM_BOT)
         self.assertEqual(row["bottom_pl_bot"], "")
         self.assertEqual(row["regime_transitions"], 1)
@@ -2020,6 +2030,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["position_sizing_mode"], "DYNAMIC")
         self.assertEqual(row["position_notional"], 25.0)
         self.assertEqual(row["position_allocation_percent"], 50.0)
+        self.assertEqual(row["effective_position_notional"], 500.0)
         self.assertEqual(row["poll_seconds"], 30)
         self.assertEqual(row["trail_percent"], 1.25)
         self.assertEqual(row["fast_sma_minutes"], 5)
@@ -2033,8 +2044,12 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["directional_min_strength"], "MODERATE")
         self.assertEqual(row["directional_cooldown_minutes"], 4)
         self.assertTrue(row["adaptive_shadow_enabled"])
+        self.assertEqual(row["enabled_bots"], ",".join(EDGEWALKER_BOTS))
         self.assertFalse(row["dry_run"])
+        self.assertEqual(row["order_mode"], "paper")
         self.assertEqual(row["active_environment"], "paper")
+        self.assertEqual(row["market_environment"], "")
+        self.assertEqual(row["prior_close_status"], "GUARDED")
         self.assertEqual(row["data_feed"], "iex")
         self.assertEqual(row["operator_notes"], "round 2 conservative")
 
