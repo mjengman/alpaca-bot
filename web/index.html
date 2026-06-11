@@ -128,12 +128,12 @@
         <div class="section-head">
           <h2
             class="has-tooltip"
-            data-tooltip="Operator-facing strategy configuration for the next Edgewalker run."
+            data-tooltip="Operator-facing live status, locked build, sizing, and run controls."
           >
-            Strategy Controls
+            EdgeWalker Status
           </h2>
           <div class="section-actions">
-            <strong>Run config</strong>
+            <strong>Live control</strong>
             <button
               type="button"
               class="log-toggle panel-collapse-toggle has-tooltip"
@@ -141,15 +141,121 @@
               aria-controls="strategyControlsBody"
               data-collapse-target="#strategyControlsBody"
               data-collapse-key="strategy-controls"
-              data-collapse-label="Strategy Controls"
-              data-tooltip="Hide Strategy Controls."
+              data-collapse-label="EdgeWalker Status"
+              data-tooltip="Hide EdgeWalker Status."
             >
               Hide
             </button>
           </div>
         </div>
         <div id="strategyControlsBody" class="controls-body">
-          <div class="control-grid">
+          <div class="edge-status-grid">
+            <div class="status-card">
+              <span
+                class="has-tooltip"
+                data-tooltip="Current runner state for the repeating EdgeWalker loop."
+                >State</span
+              >
+              <strong id="edgeRunStateValue">Stopped</strong>
+            </div>
+            <div class="status-card status-card-wide">
+              <span
+                class="has-tooltip"
+                data-tooltip="The production strategy build is locked to the validated full-roster specialist stack."
+                >Locked build</span
+              >
+              <strong>Full Roster</strong>
+              <small>Momentum Surge · Chop Firewall · Inverse Cascade</small>
+            </div>
+            <div class="status-card">
+              <span
+                class="has-tooltip"
+                data-tooltip="Current Alpaca portfolio value."
+                >Account value</span
+              >
+              <strong id="portfolioValue">--</strong>
+            </div>
+            <div class="status-card">
+              <span
+                class="has-tooltip"
+                data-tooltip="Strategy/session P/L from realized trades plus open-position P/L."
+                >Day P/L</span
+              >
+              <strong id="dayPlValue">--</strong>
+            </div>
+            <div class="status-card">
+              <span
+                class="has-tooltip"
+                data-tooltip="Current buying power reported by Alpaca."
+                >Buying power</span
+              >
+              <strong id="buyingPowerValue">--</strong>
+            </div>
+            <label class="field status-sizing-card">
+              <span
+                class="has-tooltip"
+                data-tooltip="The only normal live-session strategy control. Choose fixed dollars or a percent of current buying power."
+                >Position size</span
+              >
+              <div class="status-sizing-controls">
+                <select id="positionSizingInput" aria-label="Position sizing mode">
+                  <option value="FIXED">Fixed $</option>
+                  <option value="25" selected>25% BP</option>
+                  <option value="50">50% BP</option>
+                  <option value="75">75% BP</option>
+                  <option value="95">Full deployment</option>
+                  <option value="CUSTOM">Custom % BP</option>
+                </select>
+                <input
+                  id="notionalInput"
+                  type="number"
+                  min="1"
+                  step="1"
+                  value="25"
+                  aria-label="Position dollars"
+                />
+              </div>
+              <div class="custom-allocation" id="customAllocationField" hidden>
+                <input
+                  id="customAllocationInput"
+                  type="number"
+                  min="0.1"
+                  max="100"
+                  step="0.1"
+                  value="25"
+                  aria-label="Custom buying power percent"
+                />
+                <span class="allocation-suffix">% BP</span>
+              </div>
+              <small id="positionSizeSummaryValue">25% BP</small>
+            </label>
+            <div id="controlsActionRow" class="button-row controls-action-row status-action-card">
+              <div class="status-action-copy">
+                <span>Controls</span>
+                <small>Check or run the locked build.</small>
+              </div>
+              <div class="status-action-buttons">
+                <button
+                  id="runOnceButton"
+                  type="button"
+                  class="secondary has-tooltip"
+                  data-tooltip="Run one evaluation cycle without starting the repeating loop."
+                >
+                  Check now
+                </button>
+                <button
+                  id="toggleButton"
+                  type="button"
+                  class="primary has-tooltip"
+                  data-tooltip="Start the repeating bot loop with the current settings."
+                >
+                  Turn On
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="control-grid strategy-config-fields">
           <!-- Signal is fixed to SOXL for the MVP. Bring this field back when we add broader ticker routing.
           <label class="field">
             <span class="has-tooltip" data-tooltip="SOXL is the regime source. Edgewalker routes between SOXL, SOXS, or no trade.">Signal</span>
@@ -218,50 +324,6 @@
               <option value="OFF" selected>Off</option>
               <option value="V6_0945">v6 09:45 auto</option>
             </select>
-          </label>
-
-          <label class="field">
-            <span
-              class="has-tooltip"
-              data-tooltip="Fixed mode uses this as the configured order size. Dynamic modes show a read-only dollar preview from current buying power."
-              >Position $</span
-            >
-            <input
-              id="notionalInput"
-              type="number"
-              min="1"
-              step="1"
-              value="25"
-              aria-label="Position dollars"
-            />
-          </label>
-
-          <label class="field">
-            <span
-              class="has-tooltip"
-              data-tooltip="Choose Fixed dollars or dynamically deploy a percent of current buying power. Full deployment uses 95% to leave broker safety margin."
-              >Sizing</span
-            >
-            <select id="positionSizingInput" aria-label="Position sizing mode">
-              <option value="FIXED" selected>Fixed $</option>
-              <option value="25">25% BP</option>
-              <option value="50">50% BP</option>
-              <option value="75">75% BP</option>
-              <option value="95">Full deployment</option>
-              <option value="CUSTOM">Custom % BP</option>
-            </select>
-            <div class="custom-allocation" id="customAllocationField" hidden>
-              <input
-                id="customAllocationInput"
-                type="number"
-                min="0.1"
-                max="100"
-                step="0.1"
-                value="25"
-                aria-label="Custom buying power percent"
-              />
-              <span class="allocation-suffix">% BP</span>
-            </div>
           </label>
 
           <label class="field">
@@ -712,40 +774,6 @@
               hidden
             ></div>
           </div>
-
-          <div id="controlsActionRow" class="button-row controls-action-row">
-            <div
-              id="liveStrategyBadge"
-              class="live-strategy-badge has-tooltip"
-              data-tooltip="Current execution build posted when Edgewalker starts."
-            >
-              Manual controls
-            </div>
-            <button
-              id="applyGoLiveRouterButton"
-              type="button"
-              class="secondary has-tooltip"
-              data-tooltip="Apply the validated Router_StrictAuthority_ChopFirewall live configuration to Strategy Controls."
-            >
-              Apply Go-Live
-            </button>
-            <button
-              id="runOnceButton"
-              type="button"
-              class="secondary has-tooltip"
-              data-tooltip="Run one evaluation cycle without starting the repeating loop."
-            >
-              Check now
-            </button>
-            <button
-              id="toggleButton"
-              type="button"
-              class="primary has-tooltip"
-              data-tooltip="Start the repeating bot loop with the current settings."
-            >
-              Turn On
-            </button>
-          </div>
         </div>
       </section>
 
@@ -753,7 +781,7 @@
         <div class="section-head">
           <h2
             class="has-tooltip"
-            data-tooltip="Current regime classification, specialist route, account state, and open-position risk."
+            data-tooltip="Current market read, active specialist route, decision, reason, and open-position risk."
           >
             Decision State
           </h2>
@@ -787,7 +815,7 @@
             <span
               class="has-tooltip"
               data-tooltip="The specialist bot currently allowed to evaluate entries. Only one bot is active per cycle."
-              >Active bot</span
+              >Active specialist</span
             >
             <strong id="activeBotValue">Waiting</strong>
           </div>
@@ -810,38 +838,19 @@
           <div>
             <span
               class="has-tooltip"
-              data-tooltip="Preset authority state for this session. v6 starts from Lead_Generalist and may route a HIGH-confidence 09:45 specialist signal."
-              >Authority</span
+              data-tooltip="Short explanation of why EdgeWalker is acting, waiting, or standing aside."
+              >Reason</span
             >
-            <strong id="authorityValue">Off</strong>
+            <strong
+              id="actionReasonValue"
+              class="has-tooltip"
+              data-tooltip="EdgeWalker has not received a strategy status yet."
+              >Waiting</strong
+            >
           </div>
         </div>
 
         <div class="decision-grid">
-          <div>
-            <span
-              class="has-tooltip"
-              data-tooltip="Current paper account portfolio value from Alpaca."
-              >Account value</span
-            >
-            <strong id="portfolioValue">--</strong>
-          </div>
-          <div>
-            <span
-              class="has-tooltip"
-              data-tooltip="Today's account equity change, calculated from Alpaca equity minus last equity when available."
-              >Day P/L</span
-            >
-            <strong id="dayPlValue">--</strong>
-          </div>
-          <div>
-            <span
-              class="has-tooltip"
-              data-tooltip="Current buying power reported by Alpaca."
-              >Buying power</span
-            >
-            <strong id="buyingPowerValue">--</strong>
-          </div>
           <div class="price-stack-cell">
             <div class="price-stack">
               <div class="price-stack-row">
@@ -861,22 +870,6 @@
                 <strong id="inversePriceValue">--</strong>
               </div>
             </div>
-          </div>
-          <div>
-            <span
-              class="has-tooltip"
-              data-tooltip="Fast/slow SMA separation used to decide trend versus chop."
-              >SMA gap</span
-            >
-            <strong id="gapValue">--</strong>
-          </div>
-          <div>
-            <span
-              class="has-tooltip"
-              data-tooltip="Current SOXL/SOXS basket exposure. Edgewalker should hold at most one."
-              >Position</span
-            >
-            <strong id="positionValue">Flat</strong>
           </div>
           <div class="position-risk-cell">
             <div class="position-risk-row">
@@ -925,7 +918,7 @@
             class="has-tooltip"
             data-tooltip="Realized same-session performance split by Edgewalker specialist bot."
           >
-            Bot Performance
+            Specialist Performance
           </h2>
           <div class="section-actions">
             <strong id="botPerformanceSummaryValue">No closed trades</strong>
@@ -936,8 +929,8 @@
               aria-controls="botPerformanceGrid"
               data-collapse-target="#botPerformanceGrid"
               data-collapse-key="bot-performance"
-              data-collapse-label="Bot Performance"
-              data-tooltip="Hide Bot Performance."
+              data-collapse-label="Specialist Performance"
+              data-tooltip="Hide Specialist Performance."
             >
               Hide
             </button>
@@ -976,8 +969,8 @@
           <div class="metric">
             <span
               class="has-tooltip"
-              data-tooltip="Shows whether the bot is simulating orders or sending paper orders to Alpaca."
-              >Mode</span
+              data-tooltip="Shows whether the bot is simulating orders or sending paper/live orders to Alpaca."
+              >Order mode</span
             >
             <strong id="modeValue">Paper orders</strong>
           </div>
@@ -1010,14 +1003,14 @@
           <div class="metric">
             <span
               class="has-tooltip"
-              data-tooltip="Adaptive posture selector output. Active only when Directional mode is Adaptive; otherwise it can run as shadow telemetry."
-              >Adaptive</span
+              data-tooltip="Previous-session close is fetched on demand by surge/cascade gates. If unavailable, those gates fail closed."
+              >Prior close</span
             >
             <strong
-              id="adaptiveValue"
+              id="priorCloseValue"
               class="has-tooltip"
-              data-tooltip="Adaptive posture has not evaluated yet."
-              >Waiting</strong
+              data-tooltip="Previous-session close is guarded by fail-closed specialist gates."
+              >Guarded</strong
             >
           </div>
           <div class="metric">

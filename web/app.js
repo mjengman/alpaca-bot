@@ -191,9 +191,12 @@ const els = {
   liveStrategyBadge: document.querySelector("#liveStrategyBadge"),
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
+  edgeRunState: document.querySelector("#edgeRunStateValue"),
+  positionSizeSummary: document.querySelector("#positionSizeSummaryValue"),
   mode: document.querySelector("#modeValue"),
   dataStatus: document.querySelector("#dataStatusValue"),
   brokerState: document.querySelector("#brokerStateValue"),
+  priorClose: document.querySelector("#priorCloseValue"),
   adaptive: document.querySelector("#adaptiveValue"),
   sessionRealizedPl: document.querySelector("#sessionRealizedPlValue"),
   sessionTrades: document.querySelector("#sessionTradesValue"),
@@ -205,6 +208,7 @@ const els = {
   activeBot: document.querySelector("#activeBotValue"),
   routedSymbol: document.querySelector("#routedSymbolValue"),
   action: document.querySelector("#actionValue"),
+  actionReason: document.querySelector("#actionReasonValue"),
   authority: document.querySelector("#authorityValue"),
   portfolio: document.querySelector("#portfolioValue"),
   dayPl: document.querySelector("#dayPlValue"),
@@ -258,6 +262,14 @@ const settingInputs = [
   els.slow,
   els.dryRun,
 ].filter(Boolean);
+
+const sizingControlInputs = new Set(
+  [els.notional, els.positionSizing, els.customAllocation].filter(Boolean),
+);
+
+const lockedStrategyInputs = settingInputs.filter(
+  (input) => !sizingControlInputs.has(input),
+);
 
 const tooltipBubble = document.createElement("div");
 tooltipBubble.className = "tooltip-bubble";
@@ -484,6 +496,7 @@ function syncSizingControls() {
   }
   els.notional.disabled = state.running || state.busy || dynamicSizing;
   els.notional.closest(".field")?.classList.toggle("is-disabled", dynamicSizing);
+  renderPositionSizeSummary();
 }
 
 function selectedAllocationPercent() {
@@ -494,6 +507,27 @@ function selectedAllocationPercent() {
     return els.customAllocation?.value.trim() || "";
   }
   return els.positionSizing.value;
+}
+
+function renderPositionSizeSummary(status = null) {
+  if (!els.positionSizeSummary || !els.positionSizing) {
+    return;
+  }
+  const mode = els.positionSizing.value;
+  const effectiveNotional =
+    status?.effective_position_notional !== undefined
+      ? status.effective_position_notional
+      : dynamicNotionalPreview();
+  if (mode === "FIXED") {
+    els.positionSizeSummary.textContent = `${formatMoney(els.notional.value)} fixed`;
+    return;
+  }
+  const allocation = selectedAllocationPercent();
+  const dollars = formatMoney(effectiveNotional);
+  els.positionSizeSummary.textContent =
+    effectiveNotional === null || effectiveNotional === undefined
+      ? `${allocation}% BP`
+      : `${allocation}% BP · ${dollars}`;
 }
 
 function validateAllocationPercent(value) {
@@ -612,7 +646,9 @@ function goLiveRouterFirewallConfig() {
     presetVersion: GO_LIVE_ROUTER_VERSION,
     presetAuthorityMode: "OFF",
     presetAuthorityPresets: [],
-    enabledBots: ["MomentumBot", "ChopBot"],
+    positionSizingMode: "DYNAMIC",
+    positionAllocationPercent: "25",
+    enabledBots: ["MomentumBot", "ChopBot", "InverseBot"],
     directionalMode: "BALANCED",
     directionalMaxExtensionPercent: "0.40",
     directionalStrongChaseMaxExtensionPercent: "1.00",
@@ -639,6 +675,7 @@ function goLiveRouterFirewallConfig() {
     chopEntryDiscountPercent: "0.35",
     chopPermissionMode: "FIREWALL",
     chopPermissionMaxAbsSourcePercent: "2.00",
+    inverseCascadeMode: "SUSTAINED",
     v9ObserverContext: {
       observer_preset: "BalancedPure_LiveObserver",
       runtime_observer: true,
@@ -1070,10 +1107,11 @@ function combinedRouterValidationPresets() {
     {
       name: "Router_StrictAuthority_ChopFirewall",
       notes:
-        "Combined Router validation: MomentumBot uses BalancedTight StrictAuthority; ChopBot uses Chop_Gap020 with the dirty-tape firewall gate; BalancedPure remains observer-only.",
+        "Combined Router validation: MomentumBot uses BalancedTight StrictAuthority; ChopBot uses Chop_Gap020 with the dirty-tape firewall gate; InverseBot uses sustained cascade mode; BalancedPure remains observer-only.",
       overrides: {
-        enabledBots: ["MomentumBot", "ChopBot"],
+        enabledBots: ["MomentumBot", "ChopBot", "InverseBot"],
         chopPermissionMode: "FIREWALL",
+        inverseCascadeMode: "SUSTAINED",
       },
     },
     {
@@ -1604,6 +1642,27 @@ function renderBrokerState(brokerState) {
   } else {
     els.brokerState.classList.add("data-danger");
   }
+}
+
+function renderPriorCloseStatus(status) {
+  if (!els.priorClose) {
+    return;
+  }
+  els.priorClose.classList.remove("data-live", "data-warn", "data-danger");
+
+  const contextText = JSON.stringify(status?.v9_momentum_context || {});
+  if (contextText.includes("source_prior_close_unavailable")) {
+    els.priorClose.textContent = "Missing";
+    els.priorClose.dataset.tooltip =
+      "A specialist gate reported missing previous-session close context and failed closed.";
+    els.priorClose.classList.add("data-danger");
+    return;
+  }
+
+  els.priorClose.textContent = "Guarded";
+  els.priorClose.dataset.tooltip =
+    "Previous-session close is fetched on demand by Momentum Surge and Inverse Cascade. If unavailable, those gates fail closed.";
+  els.priorClose.classList.add("data-live");
 }
 
 function renderAdaptiveStatus(status) {
@@ -5169,7 +5228,109 @@ function renderPresetAuthority(authority) {
   )}. Selected: ${formatAuthorityRole(selectedRole)}. Confidence: ${confidence}. ${reason}`;
 }
 
+function renderRunState(data, waitingForOpen) {
+  if (!els.edgeRunState) {
+    return;
+  }
+  const status = data?.edgewalker_status;
+  let label = "Stopped";
+  let tooltip = "The repeating EdgeWalker loop is stopped.";
+  let tone = "is-neutral";
+
+  if (state.busy) {
+    label = "Checking";
+    tooltip = "EdgeWalker is running a status check or command.";
+    tone = "data-warn";
+  } else if (state.running) {
+    if (status?.position_symbol) {
+      label = "Position Open";
+      tooltip = "EdgeWalker is online and managing an open position.";
+      tone = "data-live";
+    } else if (waitingForOpen) {
+      label = "Armed";
+      tooltip = "EdgeWalker is armed and waiting for the regular market open.";
+      tone = "data-warn";
+    } else if (status?.market_open === false) {
+      label = "Market Closed";
+      tooltip = "EdgeWalker is online, but Alpaca reports the market is closed.";
+      tone = "data-warn";
+    } else {
+      label = "Waiting";
+      tooltip = "EdgeWalker is online and waiting for a specialist lane to qualify.";
+      tone = "data-live";
+    }
+  }
+
+  els.edgeRunState.classList.remove("data-live", "data-warn", "data-danger", "is-neutral");
+  els.edgeRunState.textContent = label;
+  els.edgeRunState.dataset.tooltip = tooltip;
+  els.edgeRunState.classList.add(tone);
+}
+
+function compactReasonDetails(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => formatLabel(item.trim()))
+    .filter(Boolean)
+    .join(", ");
+}
+
+function decisionReason(status) {
+  if (!status) {
+    return {
+      label: "Awaiting Status",
+      tooltip: "EdgeWalker has not received a strategy status yet.",
+    };
+  }
+  if (status.position_symbol) {
+    return {
+      label: "Managing Risk",
+      tooltip: "An open position exists, so EdgeWalker is managing exits and risk.",
+    };
+  }
+  if (status.market_open === false) {
+    return {
+      label: "Market Closed",
+      tooltip: "Alpaca reports that the regular market is closed.",
+    };
+  }
+  const momentumReason =
+    status.v9_momentum_context?.activation_reason ||
+    status.v9_momentum_context?.invalidation_reason;
+  if (momentumReason) {
+    return {
+      label: "Gate Closed",
+      tooltip: `Detailed gate context: ${compactReasonDetails(momentumReason)}.`,
+    };
+  }
+  if (status.entry_signal === true) {
+    return {
+      label: "Signal Approved",
+      tooltip: "The active specialist reported an entry signal.",
+    };
+  }
+  if (status.action_taken === "no_entry_signal") {
+    return {
+      label: "Gates Closed",
+      tooltip: "No active specialist entry gate qualified on the latest check.",
+    };
+  }
+  if (!status.routed_symbol || status.routed_symbol === "NONE") {
+    return {
+      label: "No Route",
+      tooltip: "No specialist route is currently allowed to place an entry.",
+    };
+  }
+  return {
+    label: formatLabel(status.action_taken || "Waiting"),
+    tooltip: "Reason follows the latest strategy action.",
+  };
+}
+
 function setTone(element, value) {
+  if (!element) {
+    return;
+  }
   element.classList.remove("is-positive", "is-negative", "is-neutral");
   const parsed = numberOrNull(value);
   if (parsed === null || parsed === 0) {
@@ -5185,6 +5346,10 @@ function renderDecision(status, performance, presetAuthority = null) {
     els.activeBot.textContent = "Waiting";
     els.routedSymbol.textContent = "None";
     els.action.textContent = "Waiting";
+    if (els.actionReason) {
+      els.actionReason.textContent = "Awaiting Status";
+      els.actionReason.dataset.tooltip = "EdgeWalker has not received a strategy status yet.";
+    }
     renderPresetAuthority(presetAuthority);
     return;
   }
@@ -5197,6 +5362,11 @@ function renderDecision(status, performance, presetAuthority = null) {
     : "None";
   els.routedSymbol.textContent = status.routed_symbol || "None";
   els.action.textContent = formatLabel(status.action_taken);
+  if (els.actionReason) {
+    const reason = decisionReason(status);
+    els.actionReason.textContent = reason.label;
+    els.actionReason.dataset.tooltip = reason.tooltip;
+  }
   renderPresetAuthority(status.preset_authority || presetAuthority);
   els.portfolio.textContent = formatMoney(status.portfolio_value);
   els.buyingPower.textContent = formatMoney(status.buying_power);
@@ -5206,7 +5376,9 @@ function renderDecision(status, performance, presetAuthority = null) {
       status.inverse_price || status.symbol_prices?.SOXS,
     );
   }
-  els.gap.textContent = formatPercent(status.gap_percent);
+  if (els.gap) {
+    els.gap.textContent = formatPercent(status.gap_percent);
+  }
 
   const dayPl = strategyDayPl(status, performance);
   const dayPlText = `${formatMoney(dayPl.value)} ${formatPercent(dayPl.percent)}`;
@@ -5217,8 +5389,10 @@ function renderDecision(status, performance, presetAuthority = null) {
 
   if (status.position_symbol && status.position_qty) {
     const qty = formatPositionQty(status.position_qty) || status.position_qty;
-    els.position.textContent = `${status.position_symbol} ${qty}`;
-  } else {
+    if (els.position) {
+      els.position.textContent = `${status.position_symbol} ${qty}`;
+    }
+  } else if (els.position) {
     els.position.textContent = "Flat";
   }
 
@@ -5561,6 +5735,7 @@ function render(data) {
     : state.running
     ? "The repeating bot loop is running. It arms itself outside regular market hours."
     : "The repeating bot loop is stopped.";
+  renderRunState(data, waitingForOpen);
   els.toggle.textContent = state.running ? "Turn Off" : "Turn On";
   els.toggle.dataset.tooltip = state.running
     ? "Stop the repeating bot loop after the current cycle."
@@ -5569,12 +5744,15 @@ function render(data) {
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
   const settingsLocked = state.running || state.busy;
-  if (els.applyGoLiveRouter) {
-    els.applyGoLiveRouter.disabled = settingsLocked;
-  }
-  settingInputs.forEach((input) => {
+  lockedStrategyInputs.forEach((input) => {
+    input.disabled = true;
+    input.closest(".switch")?.classList.add("is-disabled");
+    input.closest(".field")?.classList.add("is-disabled");
+  });
+  sizingControlInputs.forEach((input) => {
     input.disabled = settingsLocked;
     input.closest(".switch")?.classList.toggle("is-disabled", settingsLocked);
+    input.closest(".field")?.classList.toggle("is-disabled", settingsLocked);
   });
   if (els.runBacktest) {
     els.runBacktest.disabled = state.running || state.busy || state.researchBusy;
@@ -5596,7 +5774,7 @@ function render(data) {
   );
   renderDataHealth(data.edgewalker_status || data.market_data_status);
   renderBrokerState(data.broker_state);
-  renderAdaptiveStatus(data.edgewalker_status);
+  renderPriorCloseStatus(data.edgewalker_status);
   renderPerformance(data.performance);
   renderOrderState(data.order_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
@@ -5607,6 +5785,7 @@ function render(data) {
     data.performance,
     data.edgewalker_status?.preset_authority || data.preset_authority,
   );
+  renderPositionSizeSummary(data.edgewalker_status);
   renderLog(data);
   handleRuntimeSounds(data, wasRunning);
 }
