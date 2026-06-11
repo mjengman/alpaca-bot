@@ -82,6 +82,7 @@ HOST = "127.0.0.1"
 PORT = 8765
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 OPERATOR_SPREADSHEET_POST_STATE_PATH = PROJECT_ROOT / ".operator_spreadsheet_posts.json"
+NOTIFICATION_STATE_PATH = PROJECT_ROOT / ".notification_events.json"
 NARRATIVE_CACHE_PATH = PROJECT_ROOT / ".narrative_cache.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
@@ -94,6 +95,9 @@ SPECIALIST_DISPLAY_NAMES = {
 }
 LOCKED_FULL_ROSTER_PROFILE = "FULL_ROSTER_LOCKED"
 UNKNOWN_MARKET_ENVIRONMENT = ""
+NOTIFICATION_PROVIDER_RESEND = "resend"
+NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
+NOTIFICATION_SENT_EVENT_LIMIT = 500
 NARRATIVE_GROUNDING_VERSION = "ledger-grounded-v2"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
@@ -360,6 +364,7 @@ class BotRunner:
         self._last_regime: str | None = None
         self._spreadsheet_auto_posted_dates = self._load_spreadsheet_posted_dates()
         self._spreadsheet_auto_post_attempted_dates: set[str] = set()
+        self._notification_state = _load_notification_state()
         self._preset_authority_plan: dict[str, Any] | None = None
         self._preset_authority_state: dict[str, Any] = {}
 
@@ -539,6 +544,7 @@ class BotRunner:
                 self._market_idle_logged_for = idle_key
 
         self._maybe_auto_post_operator_spreadsheet(next_open)
+        self._maybe_send_daily_summary_notification(next_open)
 
         wait_seconds = config.poll_seconds
         if next_open is not None:
@@ -561,6 +567,11 @@ class BotRunner:
             self._next_run_at = next_run.isoformat(timespec="seconds")
             self._next_run_reason = "poll"
             self._append_activity_locked(lines)
+        self._maybe_send_error_notification(
+            category="market_clock",
+            subject="Edgewalker market clock check failed",
+            body=f"Edgewalker could not check the market clock:\n\n{exc}",
+        )
 
     def _maybe_auto_post_operator_spreadsheet(
         self,
@@ -665,6 +676,322 @@ class BotRunner:
             json.dumps(payload, indent=2),
             encoding="utf-8",
         )
+
+    def _notification_state_locked(self) -> dict[str, Any]:
+        if not hasattr(self, "_notification_state"):
+            self._notification_state = _load_notification_state()
+        return self._notification_state
+
+    def _save_notification_state_locked(self) -> None:
+        _save_notification_state(self._notification_state_locked())
+
+    def _record_notification_activity(
+        self,
+        line: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        with self._lock:
+            if error:
+                self._last_error = error
+            self._last_output = [line, *self._last_output[:39]]
+            self._append_activity_locked([line])
+
+    def send_test_notification(self) -> dict[str, Any]:
+        try:
+            result = send_test_notification_email()
+        except BotError as exc:
+            self._record_notification_activity(
+                f"[NOTIFY] Test notification failed: {exc}",
+                error=str(exc),
+            )
+            raise
+        self._record_notification_activity("[NOTIFY] Sent test notification.")
+        return result
+
+    def _notification_cooldown_active_locked(
+        self,
+        category: str,
+        now_utc: datetime,
+    ) -> bool:
+        cooldowns = self._notification_state_locked().setdefault("cooldowns", {})
+        if not isinstance(cooldowns, dict):
+            return False
+        raw_until = cooldowns.get(category)
+        if not isinstance(raw_until, str):
+            return False
+        try:
+            until = datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return until > now_utc
+
+    def _set_notification_cooldown_locked(
+        self,
+        category: str,
+        now_utc: datetime,
+        minutes: int,
+    ) -> None:
+        cooldowns = self._notification_state_locked().setdefault("cooldowns", {})
+        if not isinstance(cooldowns, dict):
+            cooldowns = {}
+            self._notification_state_locked()["cooldowns"] = cooldowns
+        cooldowns[category] = _utc_timestamp(now_utc + timedelta(minutes=minutes))
+
+    def _deliver_notification_event(
+        self,
+        *,
+        event_id: str,
+        subject: str,
+        body: str,
+        html: str | None = None,
+        cooldown_category: str | None = None,
+        cooldown_minutes: int | None = None,
+    ) -> dict[str, Any]:
+        settings = notification_settings()
+        if not settings.get("enabled"):
+            return {"status": "disabled"}
+
+        now_utc = datetime.now(timezone.utc)
+        effective_cooldown_category = cooldown_category or f"delivery:{event_id}"
+        effective_cooldown_minutes = cooldown_minutes or int(
+            settings.get("error_cooldown_minutes") or 30
+        )
+        with self._lock:
+            state = self._notification_state_locked()
+            sent_ids = state.setdefault("sent_event_ids", [])
+            if not isinstance(sent_ids, list):
+                sent_ids = []
+                state["sent_event_ids"] = sent_ids
+            if event_id in sent_ids:
+                return {"status": "duplicate"}
+            if (
+                effective_cooldown_category
+                and effective_cooldown_minutes
+                and self._notification_cooldown_active_locked(
+                    effective_cooldown_category,
+                    now_utc,
+                )
+            ):
+                return {"status": "cooldown"}
+
+        try:
+            result = send_notification_email(subject=subject, text=body, html=html)
+        except BotError as exc:
+            with self._lock:
+                if effective_cooldown_category and effective_cooldown_minutes:
+                    self._set_notification_cooldown_locked(
+                        effective_cooldown_category,
+                        now_utc,
+                        effective_cooldown_minutes,
+                    )
+                    self._save_notification_state_locked()
+            self._record_notification_activity(
+                f"[NOTIFY] Failed: {subject}: {exc}",
+                error=str(exc),
+            )
+            return {"status": "failed", "error": str(exc)}
+
+        with self._lock:
+            state = self._notification_state_locked()
+            sent_ids = state.setdefault("sent_event_ids", [])
+            if not isinstance(sent_ids, list):
+                sent_ids = []
+                state["sent_event_ids"] = sent_ids
+            if event_id not in sent_ids:
+                sent_ids.append(event_id)
+            if cooldown_category and cooldown_minutes:
+                self._set_notification_cooldown_locked(
+                    cooldown_category,
+                    now_utc,
+                    cooldown_minutes,
+                )
+            self._save_notification_state_locked()
+
+        self._record_notification_activity(f"[NOTIFY] Sent: {subject}")
+        return result
+
+    def _maybe_send_error_notification(
+        self,
+        *,
+        category: str,
+        subject: str,
+        body: str,
+    ) -> None:
+        settings = notification_settings()
+        if not (
+            settings.get("enabled")
+            and settings.get("notify_data_errors")
+        ):
+            return
+        now_utc = datetime.now(timezone.utc)
+        event_id = f"error:{category}:{_utc_timestamp(now_utc)[:16]}"
+        self._deliver_notification_event(
+            event_id=event_id,
+            subject=subject,
+            body=body,
+            cooldown_category=f"error:{category}",
+            cooldown_minutes=int(settings.get("error_cooldown_minutes") or 30),
+        )
+
+    def _maybe_send_lifecycle_notifications(self, run_timestamp: datetime) -> None:
+        settings = notification_settings()
+        if not settings.get("enabled"):
+            return
+        records = LifecycleLedger().read_all()
+        session_date = _ny_date_text(run_timestamp)
+
+        if settings.get("notify_trade_entered"):
+            for record in records:
+                if record.get("event_type") not in {
+                    LIFECYCLE_PARTIAL_FILL,
+                    LIFECYCLE_FULL_FILL,
+                }:
+                    continue
+                if str(record.get("side") or "").lower() != "buy":
+                    continue
+                created_at = _record_created_at(record)
+                if created_at is None or _ny_date_text(created_at) != session_date:
+                    continue
+                self._send_trade_entry_notification(record, created_at)
+
+        if settings.get("notify_trade_exited"):
+            for trade in _realized_trades_for_date(records, session_date):
+                self._send_trade_exit_notification(trade)
+
+    def _send_trade_entry_notification(
+        self,
+        record: dict[str, Any],
+        created_at: datetime,
+    ) -> None:
+        symbol = _optional_text(record.get("symbol")) or "position"
+        bot = _optional_text(record.get("bot")) or "Unknown"
+        order_id = _optional_text(record.get("order_id")) or created_at.isoformat()
+        reason = _optional_text(record.get("reason")) or "entry"
+        qty = _optional_text(record.get("fill_delta_qty") or record.get("filled_qty"))
+        price = _optional_text(record.get("filled_avg_price"))
+        subject = f"Edgewalker entered {symbol} via {_specialist_display_name(bot)}"
+        lines = [
+            subject,
+            "",
+            f"Time: {created_at.astimezone(NY_TZ).isoformat(timespec='seconds')}",
+            f"Specialist: {_specialist_display_name(bot)}",
+            f"Reason: {reason}",
+        ]
+        if qty:
+            lines.append(f"Quantity: {qty}")
+        if price:
+            lines.append(f"Average fill: ${price}")
+        self._deliver_notification_event(
+            event_id=f"trade-entered:{order_id}:{symbol}",
+            subject=subject,
+            body="\n".join(lines),
+        )
+
+    def _send_trade_exit_notification(self, trade: dict[str, Any]) -> None:
+        symbol = _optional_text(trade.get("symbol")) or "position"
+        bot = _optional_text(trade.get("bot")) or "Unknown"
+        closed_at = _optional_text(trade.get("closed_at")) or now_iso()
+        order_id = _optional_text(trade.get("exit_order_id")) or closed_at
+        realized_pl = _narrative_money(trade.get("realized_pl"))
+        subject = (
+            f"Edgewalker closed {symbol}: {realized_pl} "
+            f"({_specialist_display_name(bot)})"
+        )
+        lines = [
+            subject,
+            "",
+            f"Opened: {_optional_text(trade.get('opened_at')) or '--'}",
+            f"Closed: {closed_at}",
+            f"Specialist: {_specialist_display_name(bot)}",
+            f"Exit reason: {_optional_text(trade.get('exit_reason')) or '--'}",
+            f"Quantity: {_optional_text(trade.get('qty')) or '--'}",
+            f"Entry price: ${_optional_text(trade.get('avg_entry_price')) or '--'}",
+            f"Exit price: ${_optional_text(trade.get('exit_price')) or '--'}",
+            f"Realized P/L: {realized_pl}",
+            f"MFE: {_optional_text(trade.get('mfe_percent')) or '--'}%",
+            f"MAE: {_optional_text(trade.get('mae_percent')) or '--'}%",
+            f"Capture: {_optional_text(trade.get('capture_ratio_percent')) or '--'}%",
+        ]
+        self._deliver_notification_event(
+            event_id=f"trade-exited:{order_id}:{symbol}",
+            subject=subject,
+            body="\n".join(lines),
+        )
+
+    def _maybe_send_daily_summary_notification(
+        self,
+        next_open: datetime | None,
+    ) -> None:
+        settings = notification_settings()
+        if not (
+            settings.get("enabled")
+            and settings.get("notify_daily_summary")
+        ):
+            return
+        target_date = self._daily_summary_notification_date(next_open)
+        if not target_date:
+            return
+        try:
+            payload = build_operator_spreadsheet_daily_row(
+                target_date,
+                include_daily_narrative=False,
+            )
+        except BotError as exc:
+            self._record_notification_activity(
+                f"[NOTIFY] Daily summary failed for {target_date}: {exc}",
+                error=str(exc),
+            )
+            return
+        row = payload.get("row") if isinstance(payload, dict) else {}
+        if not isinstance(row, dict):
+            row = {}
+        result = _optional_text(row.get("account_result_status")) or "SESSION"
+        realized = _narrative_money(row.get("realized_pl_dollars"))
+        trade_count = int(_float_from_value(row.get("closed_trades")) or 0)
+        next_open_text = (
+            next_open.astimezone(NY_TZ).isoformat(timespec="seconds")
+            if next_open
+            else "Unknown"
+        )
+        subject = f"Edgewalker EOD {target_date}: {realized} ({result})"
+        body = "\n".join(
+            [
+                subject,
+                "",
+                f"Closed trades: {trade_count}",
+                f"Account value: {_narrative_money(row.get('ending_account_value'))}",
+                f"Momentum: {_narrative_money(row.get('momentum_pl'))}",
+                f"Chop: {_narrative_money(row.get('chop_pl'))}",
+                f"Inverse: {_narrative_money(row.get('inverse_pl'))}",
+                f"Next market open: {next_open_text}",
+            ]
+        )
+        self._deliver_notification_event(
+            event_id=f"daily-summary:{target_date}",
+            subject=subject,
+            body=body,
+        )
+
+    def _daily_summary_notification_date(
+        self,
+        next_open: datetime | None,
+    ) -> str | None:
+        now_ny = datetime.now(NY_TZ)
+        today = now_ny.date().isoformat()
+        if next_open is not None:
+            next_open_day = next_open.astimezone(NY_TZ).date().isoformat()
+            if next_open_day == today:
+                return None
+        elif now_ny.hour < 16:
+            return None
+
+        latest_log_date = _most_recent_log_date(market_open_only=True)
+        if latest_log_date != today:
+            return None
+        return today
 
     def _preset_authority_effective_config(
         self,
@@ -1037,8 +1364,16 @@ class BotRunner:
             broker_state=broker_state,
             regime_transition=regime_transition,
             performance=performance,
-            order_state=order_state,
-        )
+                order_state=order_state,
+            )
+
+        self._maybe_send_lifecycle_notifications(run_timestamp)
+        if error:
+            self._maybe_send_error_notification(
+                category="cycle_error",
+                subject="Edgewalker cycle error",
+                body=f"Edgewalker hit a cycle error:\n\n{error}",
+            )
         try:
             _append_daily_jsonl(record, timestamp)
         except OSError as exc:
@@ -1460,6 +1795,18 @@ def _payload_bool(value: Any, *, default: bool = False) -> bool:
     return _env_bool_text(str(value))
 
 
+def _notification_cooldown_minutes(value: Any) -> int:
+    if value in (None, ""):
+        return NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES
+    try:
+        minutes = int(str(value).strip())
+    except ValueError as exc:
+        raise BotError("Notification error cooldown must be a whole number.") from exc
+    if minutes < 1:
+        raise BotError("Notification error cooldown must be at least 1 minute.")
+    return minutes
+
+
 def _is_secret_placeholder(value: str | None) -> bool:
     return value in (None, "", SECRET_PLACEHOLDER)
 
@@ -1604,6 +1951,48 @@ def operator_spreadsheet_settings(values: dict[str, str] | None = None) -> dict[
     }
 
 
+def notification_settings(values: dict[str, str] | None = None) -> dict[str, Any]:
+    values = values or _read_env_values()
+    provider = _env_first(
+        values,
+        "NOTIFICATION_PROVIDER",
+        default=NOTIFICATION_PROVIDER_RESEND,
+    ).strip().lower()
+    if provider != NOTIFICATION_PROVIDER_RESEND:
+        provider = NOTIFICATION_PROVIDER_RESEND
+    cooldown_minutes = _notification_cooldown_minutes(
+        _env_first(
+            values,
+            "NOTIFICATION_ERROR_COOLDOWN_MINUTES",
+            default=str(NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES),
+        )
+    )
+    resend_api_key = _env_first(values, "RESEND_API_KEY")
+    return {
+        "enabled": _env_bool_text(
+            _env_first(values, "NOTIFICATIONS_ENABLED", default="false")
+        ),
+        "email": _env_first(values, "NOTIFICATION_EMAIL"),
+        "from_email": _env_first(values, "NOTIFICATION_FROM_EMAIL"),
+        "provider": provider,
+        "resend_api_key_masked": _mask_secret(resend_api_key),
+        "has_resend_api_key": bool(resend_api_key),
+        "notify_trade_entered": _env_bool_text(
+            _env_first(values, "NOTIFY_TRADE_ENTERED", default="true")
+        ),
+        "notify_trade_exited": _env_bool_text(
+            _env_first(values, "NOTIFY_TRADE_EXITED", default="true")
+        ),
+        "notify_daily_summary": _env_bool_text(
+            _env_first(values, "NOTIFY_DAILY_SUMMARY", default="true")
+        ),
+        "notify_data_errors": _env_bool_text(
+            _env_first(values, "NOTIFY_DATA_ERRORS", default="true")
+        ),
+        "error_cooldown_minutes": cooldown_minutes,
+    }
+
+
 def alpaca_environment_settings() -> dict[str, Any]:
     values = _read_env_values()
     active_environment = current_alpaca_environment()
@@ -1621,6 +2010,7 @@ def alpaca_environment_settings() -> dict[str, Any]:
         "active_environment": active_environment,
         "live_trading_armed": live_trading_armed(),
         "operator_spreadsheet": operator_spreadsheet_settings(values),
+        "notifications": notification_settings(values),
         "data_base_url": normalize_alpaca_base_url(
             _env_first(
                 values,
@@ -1720,6 +2110,53 @@ def _settings_updates_from_payload(payload: dict[str, Any]) -> dict[str, str]:
         "true" if _payload_bool(include_daily_narrative, default=True) else "false"
     )
 
+    notifications = payload.get("notifications")
+    if not isinstance(notifications, dict):
+        notifications = {}
+    updates["NOTIFICATIONS_ENABLED"] = (
+        "true"
+        if _payload_bool(notifications.get("enabled"), default=False)
+        else "false"
+    )
+    updates["NOTIFICATION_EMAIL"] = _optional_text(
+        notifications.get("email")
+    ) or ""
+    updates["NOTIFICATION_FROM_EMAIL"] = _optional_text(
+        notifications.get("from_email") or notifications.get("fromEmail")
+    ) or ""
+    updates["NOTIFICATION_PROVIDER"] = NOTIFICATION_PROVIDER_RESEND
+    resend_api_key = _optional_text(
+        notifications.get("resend_api_key") or notifications.get("resendApiKey")
+    )
+    if not _is_secret_placeholder(resend_api_key):
+        updates["RESEND_API_KEY"] = resend_api_key.strip()
+    updates["NOTIFY_TRADE_ENTERED"] = (
+        "true"
+        if _payload_bool(notifications.get("notify_trade_entered"), default=True)
+        else "false"
+    )
+    updates["NOTIFY_TRADE_EXITED"] = (
+        "true"
+        if _payload_bool(notifications.get("notify_trade_exited"), default=True)
+        else "false"
+    )
+    updates["NOTIFY_DAILY_SUMMARY"] = (
+        "true"
+        if _payload_bool(notifications.get("notify_daily_summary"), default=True)
+        else "false"
+    )
+    updates["NOTIFY_DATA_ERRORS"] = (
+        "true"
+        if _payload_bool(notifications.get("notify_data_errors"), default=True)
+        else "false"
+    )
+    cooldown_raw = notifications.get("error_cooldown_minutes")
+    if cooldown_raw is None:
+        cooldown_raw = notifications.get("errorCooldownMinutes")
+    updates["NOTIFICATION_ERROR_COOLDOWN_MINUTES"] = str(
+        _notification_cooldown_minutes(cooldown_raw)
+    )
+
     for env_name, prefix in (("paper", "ALPACA_PAPER"), ("live", "ALPACA_LIVE")):
         section = payload.get(env_name)
         if not isinstance(section, dict):
@@ -1762,6 +2199,133 @@ def save_alpaca_environment_settings(payload: dict[str, Any]) -> dict[str, Any]:
         _write_env_updates({"LIVE_TRADING_ARMED": "false"})
         settings = alpaca_environment_settings()
     return settings
+
+
+def _load_notification_state() -> dict[str, Any]:
+    if not NOTIFICATION_STATE_PATH.exists():
+        return {"sent_event_ids": [], "cooldowns": {}}
+    try:
+        payload = json.loads(NOTIFICATION_STATE_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"sent_event_ids": [], "cooldowns": {}}
+    if not isinstance(payload, dict):
+        return {"sent_event_ids": [], "cooldowns": {}}
+    sent_ids = payload.get("sent_event_ids")
+    cooldowns = payload.get("cooldowns")
+    return {
+        "sent_event_ids": [
+            event_id for event_id in sent_ids if isinstance(event_id, str)
+        ]
+        if isinstance(sent_ids, list)
+        else [],
+        "cooldowns": {
+            key: value
+            for key, value in cooldowns.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if isinstance(cooldowns, dict)
+        else {},
+    }
+
+
+def _save_notification_state(state: dict[str, Any]) -> None:
+    sent_ids = state.get("sent_event_ids")
+    if not isinstance(sent_ids, list):
+        sent_ids = []
+    cooldowns = state.get("cooldowns")
+    if not isinstance(cooldowns, dict):
+        cooldowns = {}
+    payload = {
+        "sent_event_ids": sent_ids[-NOTIFICATION_SENT_EVENT_LIMIT:],
+        "cooldowns": cooldowns,
+    }
+    NOTIFICATION_STATE_PATH.write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _resend_error_message(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8")
+    except Exception:
+        body = ""
+    if body:
+        return f"Resend HTTP {exc.code}: {body[:240]}"
+    return f"Resend HTTP {exc.code}"
+
+
+def send_notification_email(
+    *,
+    subject: str,
+    text: str,
+    html: str | None = None,
+) -> dict[str, Any]:
+    values = _read_env_values()
+    settings = notification_settings(values)
+    if settings["provider"] != NOTIFICATION_PROVIDER_RESEND:
+        raise BotError("Only Resend notifications are supported.")
+    recipient = _optional_text(settings.get("email"))
+    sender = _optional_text(settings.get("from_email"))
+    api_key = _env_first(values, "RESEND_API_KEY")
+    if not recipient:
+        raise BotError("Add a notification email address first.")
+    if not sender:
+        raise BotError("Add a verified Resend sender email first.")
+    if not api_key:
+        raise BotError("Add a Resend API key first.")
+
+    payload = {
+        "from": sender,
+        "to": [recipient],
+        "subject": subject,
+        "text": text,
+    }
+    if html:
+        payload["html"] = html
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response_body = response.read().decode("utf-8")
+            try:
+                parsed = json.loads(response_body) if response_body else {}
+            except json.JSONDecodeError:
+                parsed = {"raw": response_body}
+            return {
+                "status": "sent",
+                "provider": settings["provider"],
+                "recipient": recipient,
+                "response": parsed,
+            }
+    except urllib.error.HTTPError as exc:
+        raise BotError(_resend_error_message(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise BotError(f"Notification send failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise BotError("Notification send timed out.") from exc
+
+
+def send_test_notification_email() -> dict[str, Any]:
+    now_text = datetime.now(NY_TZ).isoformat(timespec="seconds")
+    return send_notification_email(
+        subject="Edgewalker test notification",
+        text=(
+            "Edgewalker notification test succeeded.\n\n"
+            f"Sent at {now_text}."
+        ),
+        html=(
+            "<p><strong>Edgewalker notification test succeeded.</strong></p>"
+            f"<p>Sent at {now_text}.</p>"
+        ),
+    )
 
 
 def _config_for_alpaca_environment(environment: str) -> BotConfig:
@@ -1840,6 +2404,12 @@ def _record_decimal(record: dict[str, Any], key: str) -> Decimal | None:
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _specialist_display_name(bot: str | None) -> str:
+    if not bot:
+        return "Unknown"
+    return SPECIALIST_DISPLAY_NAMES.get(bot, bot)
 
 
 def _utc_timestamp(value: datetime) -> str:
@@ -7257,6 +7827,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.require_local_ui_request()
                 environment = str(payload.get("environment", "paper"))
                 self.send_json(test_alpaca_connection(environment))
+                return
+            if self.path == "/api/notifications/test":
+                self.require_local_ui_request("notification test requests")
+                self.send_json(self.runner.send_test_notification())
                 return
             if self.path == "/api/spreadsheet/row":
                 self.require_local_ui_request("operator spreadsheet requests")

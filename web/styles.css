@@ -457,7 +457,17 @@ h2 {
   margin: 6px 0 12px 140px;
 }
 
+.notification-switch {
+  margin: 6px 0 12px 140px;
+}
+
 .spreadsheet-modal .operator-spreadsheet-group {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.notifications-modal .notifications-group {
   margin-top: 0;
   padding-top: 0;
   border-top: 0;
@@ -2212,6 +2222,10 @@ body.live-paper .metric:first-child {
   }
 
   .spreadsheet-narrative-switch {
+    margin-left: 0;
+  }
+
+  .notification-switch {
     margin-left: 0;
   }
 

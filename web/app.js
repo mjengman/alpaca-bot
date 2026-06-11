@@ -92,6 +92,12 @@ const els = {
   operatorSpreadsheetClose: document.querySelector("#operatorSpreadsheetClose"),
   spreadsheetMessage: document.querySelector("#spreadsheetMessage"),
   spreadsheetSave: document.querySelector("#spreadsheetSave"),
+  notificationsOpen: document.querySelector("#notificationsOpen"),
+  notificationsDialog: document.querySelector("#notificationsDialog"),
+  notificationsClose: document.querySelector("#notificationsClose"),
+  notificationsMessage: document.querySelector("#notificationsMessage"),
+  notificationsSave: document.querySelector("#notificationsSave"),
+  notificationTest: document.querySelector("#notificationTest"),
   activeEnvironment: document.querySelector("#activeEnvironmentInput"),
   dataBaseUrl: document.querySelector("#dataBaseUrlInput"),
   dataFeed: document.querySelector("#dataFeedInput"),
@@ -118,6 +124,17 @@ const els = {
   ),
   spreadsheetAutoPost: document.querySelector("#spreadsheetAutoPostInput"),
   spreadsheetOperatorNotes: document.querySelector("#spreadsheetOperatorNotesInput"),
+  notificationsEnabled: document.querySelector("#notificationsEnabledInput"),
+  notificationEmail: document.querySelector("#notificationEmailInput"),
+  notificationFromEmail: document.querySelector("#notificationFromEmailInput"),
+  resendApiKey: document.querySelector("#resendApiKeyInput"),
+  notificationErrorCooldown: document.querySelector(
+    "#notificationErrorCooldownInput",
+  ),
+  notifyTradeEntered: document.querySelector("#notifyTradeEnteredInput"),
+  notifyTradeExited: document.querySelector("#notifyTradeExitedInput"),
+  notifyDailySummary: document.querySelector("#notifyDailySummaryInput"),
+  notifyDataErrors: document.querySelector("#notifyDataErrorsInput"),
   openOperatorSpreadsheet: document.querySelector("#openOperatorSpreadsheet"),
   openResearchSpreadsheet: document.querySelector("#openResearchSpreadsheet"),
   postSpreadsheetDailyRow: document.querySelector("#postSpreadsheetDailyRow"),
@@ -126,7 +143,6 @@ const els = {
   operatorGuideClose: document.querySelector("#operatorGuideClose"),
   themeToggle: document.querySelector("#themeToggle"),
   audioscapeToggle: document.querySelector("#audioscapeToggle"),
-  notificationsToggle: document.querySelector("#notificationsToggle"),
   researchMode: document.querySelector("#researchModeInput"),
   statusPill: document.querySelector("#statusPill"),
   statusText: document.querySelector("#statusText"),
@@ -2214,6 +2230,19 @@ function setSpreadsheetMessage(message, tone = "neutral") {
   }
 }
 
+function setNotificationsMessage(message, tone = "neutral") {
+  if (!els.notificationsMessage) return;
+  els.notificationsMessage.textContent = message || "";
+  els.notificationsMessage.classList.remove(
+    "is-success",
+    "is-danger",
+    "is-warning",
+  );
+  if (tone !== "neutral") {
+    els.notificationsMessage.classList.add(`is-${tone}`);
+  }
+}
+
 function setResearchMessage(message, tone = "neutral") {
   if (!els.researchMessage) return;
   els.researchMessage.textContent = message || "";
@@ -3896,12 +3925,39 @@ function applySettings(settings) {
       settings.operator_spreadsheet?.auto_post_enabled,
     );
   }
+  const notifications = settings.notifications || {};
+  if (els.notificationsEnabled) {
+    els.notificationsEnabled.checked = Boolean(notifications.enabled);
+  }
+  if (els.notificationEmail) {
+    els.notificationEmail.value = notifications.email || "";
+  }
+  if (els.notificationFromEmail) {
+    els.notificationFromEmail.value = notifications.from_email || "";
+  }
+  if (els.notificationErrorCooldown) {
+    els.notificationErrorCooldown.value =
+      notifications.error_cooldown_minutes || 30;
+  }
+  if (els.notifyTradeEntered) {
+    els.notifyTradeEntered.checked = notifications.notify_trade_entered !== false;
+  }
+  if (els.notifyTradeExited) {
+    els.notifyTradeExited.checked = notifications.notify_trade_exited !== false;
+  }
+  if (els.notifyDailySummary) {
+    els.notifyDailySummary.checked = notifications.notify_daily_summary !== false;
+  }
+  if (els.notifyDataErrors) {
+    els.notifyDataErrors.checked = notifications.notify_data_errors !== false;
+  }
 
   const secretFields = [
     [els.paperApiKey, settings.paper?.api_key_id_masked],
     [els.paperApiSecret, settings.paper?.api_secret_key_masked],
     [els.liveApiKey, settings.live?.api_key_id_masked],
     [els.liveApiSecret, settings.live?.api_secret_key_masked],
+    [els.resendApiKey, notifications.resend_api_key_masked],
   ];
   secretFields.forEach(([input, masked]) => {
     if (!input) return;
@@ -3951,6 +4007,17 @@ function settingsPayloadFromForm() {
       research_mode_enabled: Boolean(els.researchMode?.checked),
       auto_post_enabled: Boolean(els.spreadsheetAutoPost?.checked),
       include_daily_narrative: Boolean(els.spreadsheetIncludeNarrative?.checked),
+    },
+    notifications: {
+      enabled: Boolean(els.notificationsEnabled?.checked),
+      email: els.notificationEmail?.value || "",
+      from_email: els.notificationFromEmail?.value || "",
+      resend_api_key: els.resendApiKey?.value || "",
+      notify_trade_entered: Boolean(els.notifyTradeEntered?.checked),
+      notify_trade_exited: Boolean(els.notifyTradeExited?.checked),
+      notify_daily_summary: Boolean(els.notifyDailySummary?.checked),
+      notify_data_errors: Boolean(els.notifyDataErrors?.checked),
+      error_cooldown_minutes: els.notificationErrorCooldown?.value || "30",
     },
   };
 }
@@ -4066,6 +4133,39 @@ function saveSpreadsheetSettings() {
     messageSetter: setSpreadsheetMessage,
     button: els.spreadsheetSave,
   });
+}
+
+function saveNotificationSettings() {
+  return saveSettings({
+    messageSetter: setNotificationsMessage,
+    button: els.notificationsSave,
+  });
+}
+
+async function sendTestNotification() {
+  if (els.notificationTest) {
+    els.notificationTest.disabled = true;
+  }
+  setNotificationsMessage("Saving notification settings...");
+  try {
+    await saveSettings({
+      rethrow: true,
+      messageSetter: setNotificationsMessage,
+      button: els.notificationsSave,
+    });
+    setNotificationsMessage("Sending test email...");
+    await request("/api/notifications/test", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setNotificationsMessage("Test email sent.", "success");
+  } catch (error) {
+    setNotificationsMessage(error.message, "danger");
+  } finally {
+    if (els.notificationTest) {
+      els.notificationTest.disabled = false;
+    }
+  }
 }
 
 function defaultBacktestDate() {
@@ -4374,6 +4474,46 @@ function setupOperatorSpreadsheetModal() {
   }
   if (els.postSpreadsheetDailyRow) {
     els.postSpreadsheetDailyRow.addEventListener("click", postSpreadsheetDailyRow);
+  }
+}
+
+function setupNotificationsModal() {
+  if (!els.notificationsDialog || !els.notificationsOpen) return;
+  const closeNotifications = () => {
+    if (els.notificationsDialog.open) {
+      els.notificationsDialog.close();
+    }
+  };
+
+  els.notificationsOpen.addEventListener("click", async () => {
+    hideTooltip();
+    setNotificationsMessage("Loading notification settings...");
+    if (typeof els.notificationsDialog.showModal === "function") {
+      els.notificationsDialog.showModal();
+    } else {
+      els.notificationsDialog.setAttribute("open", "");
+    }
+    try {
+      await loadSettings();
+      setNotificationsMessage("");
+    } catch (error) {
+      setNotificationsMessage(error.message, "danger");
+    }
+  });
+
+  if (els.notificationsClose) {
+    els.notificationsClose.addEventListener("click", closeNotifications);
+  }
+  els.notificationsDialog.addEventListener("click", (event) => {
+    if (event.target === els.notificationsDialog) {
+      closeNotifications();
+    }
+  });
+  if (els.notificationsSave) {
+    els.notificationsSave.addEventListener("click", saveNotificationSettings);
+  }
+  if (els.notificationTest) {
+    els.notificationTest.addEventListener("click", sendTestNotification);
   }
 }
 
@@ -6023,6 +6163,7 @@ setupSettingsMenu();
 setupUiSounds();
 setupSettingsModal();
 setupOperatorSpreadsheetModal();
+setupNotificationsModal();
 setupOperatorGuide();
 setupCollapsibleSections();
 setupActivityLog();

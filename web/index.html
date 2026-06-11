@@ -83,17 +83,6 @@
                     >Research mode</span
                   >
                 </label>
-                <label class="switch menu-switch is-disabled">
-                  <input
-                    id="notificationsToggle"
-                    type="checkbox"
-                    aria-label="Notifications"
-                    disabled
-                  />
-                  <span class="track"></span>
-                  <span class="switch-label">Notifications</span>
-                  <span class="setting-state">Later</span>
-                </label>
               </div>
 
               <div class="settings-popover-section">
@@ -106,6 +95,9 @@
                   class="menu-action"
                 >
                   Operator Spreadsheet
+                </button>
+                <button id="notificationsOpen" type="button" class="menu-action">
+                  Notifications
                 </button>
                 <button id="operatorGuideOpen" type="button" class="menu-action">
                   Operator Guide
@@ -1572,6 +1564,120 @@
           <div class="settings-actions">
             <button id="spreadsheetSave" type="button" class="primary">
               Save Spreadsheet Settings
+            </button>
+          </div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="notificationsDialog"
+      class="settings-modal notifications-modal"
+      aria-labelledby="notificationsTitle"
+    >
+      <div class="settings-card">
+        <div class="guide-head">
+          <div>
+            <p class="eyebrow">REMOTE UPDATES</p>
+            <h2 id="notificationsTitle">Notifications</h2>
+          </div>
+          <button
+            id="notificationsClose"
+            type="button"
+            class="log-toggle"
+            aria-label="Close notifications"
+          >
+            Close
+          </button>
+        </div>
+
+        <div class="settings-body">
+          <p id="notificationsMessage" class="settings-message" role="status"></p>
+
+          <section class="settings-group notifications-group">
+            <div class="settings-group-head">
+              <h3>Email Delivery</h3>
+              <label class="switch compact-switch notification-switch">
+                <input id="notificationsEnabledInput" type="checkbox" />
+                <span class="track"></span>
+                <span class="switch-label">Enable notifications</span>
+              </label>
+            </div>
+            <label class="settings-field">
+              <span>Email</span>
+              <input
+                id="notificationEmailInput"
+                type="email"
+                autocomplete="email"
+                spellcheck="false"
+                aria-label="Notification email"
+              />
+            </label>
+            <label class="settings-field">
+              <span>From Email</span>
+              <input
+                id="notificationFromEmailInput"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Edgewalker <alerts@yourdomain.com>"
+                aria-label="Verified Resend sender"
+              />
+            </label>
+            <label class="settings-field">
+              <span>Resend API Key</span>
+              <input
+                id="resendApiKeyInput"
+                type="password"
+                autocomplete="off"
+                aria-label="Resend API key"
+              />
+            </label>
+            <label class="settings-field">
+              <span>Error Cooldown</span>
+              <input
+                id="notificationErrorCooldownInput"
+                type="number"
+                min="1"
+                step="1"
+                inputmode="numeric"
+                aria-label="Notification error cooldown minutes"
+              />
+            </label>
+          </section>
+
+          <section class="settings-group">
+            <div class="settings-group-head">
+              <h3>Events</h3>
+            </div>
+            <label class="switch compact-switch notification-switch">
+              <input id="notifyTradeEnteredInput" type="checkbox" />
+              <span class="track"></span>
+              <span class="switch-label">Trade entered</span>
+            </label>
+            <label class="switch compact-switch notification-switch">
+              <input id="notifyTradeExitedInput" type="checkbox" />
+              <span class="track"></span>
+              <span class="switch-label">P/L realized</span>
+            </label>
+            <label class="switch compact-switch notification-switch">
+              <input id="notifyDailySummaryInput" type="checkbox" />
+              <span class="track"></span>
+              <span class="switch-label">End-of-day summary</span>
+            </label>
+            <label class="switch compact-switch notification-switch">
+              <input id="notifyDataErrorsInput" type="checkbox" />
+              <span class="track"></span>
+              <span class="switch-label">Data and broker errors</span>
+            </label>
+          </section>
+
+          <div class="settings-actions">
+            <button id="notificationTest" type="button" class="log-toggle">
+              Send Test Email
+            </button>
+            <button id="notificationsSave" type="button" class="primary">
+              Save Notification Settings
             </button>
           </div>
         </div>

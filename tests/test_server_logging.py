@@ -2858,6 +2858,17 @@ class ServerLoggingTest(unittest.TestCase):
                     "auto_post_enabled": True,
                     "include_daily_narrative": True,
                 },
+                "notifications": {
+                    "enabled": True,
+                    "email": "operator@example.com",
+                    "from_email": "Edgewalker <alerts@example.com>",
+                    "resend_api_key": "re_test_123456789",
+                    "notify_trade_entered": True,
+                    "notify_trade_exited": True,
+                    "notify_daily_summary": True,
+                    "notify_data_errors": True,
+                    "error_cooldown_minutes": 17,
+                },
             }
 
             with patch("server.ENV_PATH", env_path), patch.dict(os.environ, {}, clear=True):
@@ -2870,9 +2881,16 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(settings["paper"]["api_key_id_masked"], "********1234")
         self.assertEqual(settings["live"]["api_secret_key_masked"], "********5678")
         self.assertTrue(settings["operator_spreadsheet"]["auto_post_enabled"])
+        self.assertTrue(settings["notifications"]["enabled"])
+        self.assertEqual(settings["notifications"]["email"], "operator@example.com")
+        self.assertEqual(settings["notifications"]["resend_api_key_masked"], "********6789")
+        self.assertEqual(settings["notifications"]["error_cooldown_minutes"], 17)
         self.assertNotIn("paper-secret-5678", json.dumps(settings))
+        self.assertNotIn("re_test_123456789", json.dumps(settings))
         self.assertIn("ALPACA_LIVE_API_KEY_ID=live-key-1234", env_text)
         self.assertIn("OPERATOR_SPREADSHEET_AUTO_POST=true", env_text)
+        self.assertIn("NOTIFICATIONS_ENABLED=true", env_text)
+        self.assertIn("RESEND_API_KEY=re_test_123456789", env_text)
 
     def test_environment_settings_normalizes_bare_alpaca_hosts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3088,6 +3106,98 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertIn("2026-06-02", runner._spreadsheet_auto_posted_dates)
         self.assertIn(
             "[SPREADSHEET] Auto-posted daily row for 2026-06-02.",
+            [line for _, line in runner._activity_log],
+        )
+
+    def test_notification_event_dedupes_and_records_activity(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._activity_log = []
+        runner._last_output = []
+        runner._last_error = None
+        runner._notification_state = {"sent_event_ids": [], "cooldowns": {}}
+        runner._save_activity_log = lambda: None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "notifications.json"
+            with (
+                patch("server.NOTIFICATION_STATE_PATH", state_path),
+                patch(
+                    "server.notification_settings",
+                    return_value={
+                        "enabled": True,
+                        "error_cooldown_minutes": 30,
+                    },
+                ),
+                patch(
+                    "server.send_notification_email",
+                    return_value={"status": "sent"},
+                ) as send_email,
+            ):
+                first = runner._deliver_notification_event(
+                    event_id="trade-entered:buy-1:SOXL",
+                    subject="Edgewalker entered SOXL",
+                    body="entry",
+                )
+                second = runner._deliver_notification_event(
+                    event_id="trade-entered:buy-1:SOXL",
+                    subject="Edgewalker entered SOXL",
+                    body="entry",
+                )
+
+        self.assertEqual(first["status"], "sent")
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(send_email.call_count, 1)
+        self.assertEqual(
+            runner._notification_state["sent_event_ids"],
+            ["trade-entered:buy-1:SOXL"],
+        )
+        self.assertIn(
+            "[NOTIFY] Sent: Edgewalker entered SOXL",
+            [line for _, line in runner._activity_log],
+        )
+
+    def test_notification_error_uses_cooldown_on_failure(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._activity_log = []
+        runner._last_output = []
+        runner._last_error = None
+        runner._notification_state = {"sent_event_ids": [], "cooldowns": {}}
+        runner._save_activity_log = lambda: None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "notifications.json"
+            with (
+                patch("server.NOTIFICATION_STATE_PATH", state_path),
+                patch(
+                    "server.notification_settings",
+                    return_value={
+                        "enabled": True,
+                        "notify_data_errors": True,
+                        "error_cooldown_minutes": 30,
+                    },
+                ),
+                patch(
+                    "server.send_notification_email",
+                    side_effect=BotError("missing key"),
+                ) as send_email,
+            ):
+                runner._maybe_send_error_notification(
+                    category="market_clock",
+                    subject="Clock failed",
+                    body="no clock",
+                )
+                runner._maybe_send_error_notification(
+                    category="market_clock",
+                    subject="Clock failed",
+                    body="no clock",
+                )
+
+        self.assertEqual(send_email.call_count, 1)
+        self.assertIn("error:market_clock", runner._notification_state["cooldowns"])
+        self.assertIn(
+            "[NOTIFY] Failed: Clock failed: missing key",
             [line for _, line in runner._activity_log],
         )
 
