@@ -584,6 +584,7 @@ h2 {
 
 .edge-status-grid {
   display: grid;
+  align-items: stretch;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
@@ -592,12 +593,14 @@ h2 {
 .status-sizing-card {
   display: grid;
   align-content: center;
+  justify-items: center;
   gap: 8px;
   min-height: 88px;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px 14px;
   background: var(--input);
+  text-align: center;
 }
 
 .status-card-wide {
@@ -632,6 +635,7 @@ h2 {
 
 .status-sizing-card {
   grid-column: span 2;
+  min-height: 116px;
 }
 
 .status-action-card {
@@ -639,18 +643,22 @@ h2 {
   grid-column: span 4;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  min-height: 88px;
+  gap: 24px;
+  min-height: 116px;
   margin-top: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px 14px;
   background: var(--input);
+  text-align: center;
 }
 
 .status-action-copy {
+  flex: 1 1 auto;
   display: grid;
+  justify-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .status-action-copy span {
@@ -669,6 +677,7 @@ h2 {
 
 .status-action-buttons {
   display: flex;
+  flex: 0 0 auto;
   gap: 10px;
 }
 
@@ -676,6 +685,7 @@ h2 {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(96px, 0.7fr);
   gap: 8px;
+  width: 100%;
 }
 
 .strategy-config-fields {
@@ -942,6 +952,11 @@ h2 {
   align-items: center;
   justify-content: flex-end;
   margin-top: 14px;
+}
+
+.status-action-card.controls-action-row {
+  justify-content: space-between;
+  margin-top: 0;
 }
 
 .research-controls {
@@ -1336,6 +1351,7 @@ button:disabled {
   justify-items: center;
   gap: 8px;
   min-width: 0;
+  width: 100%;
   padding: 12px 16px;
   text-align: center;
 }
@@ -1350,7 +1366,9 @@ button:disabled {
 }
 
 .decision-grid > div {
-  min-height: 70px;
+  min-height: 96px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .decision-panel strong {
@@ -1359,28 +1377,32 @@ button:disabled {
   font-size: 1.05rem;
 }
 
-.price-stack-cell {
-  align-content: center;
+.decision-grid > .price-stack-cell {
+  align-content: stretch;
+  gap: 0;
 }
 
 .price-stack {
   width: min(100%, 136px);
+  height: 100%;
+  align-self: stretch;
   display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 0;
 }
 
 .price-stack-row {
   display: grid;
+  align-content: center;
   gap: 4px;
   justify-items: center;
   min-width: 0;
-  padding: 5px 0 7px;
+  padding: 0;
   text-align: center;
 }
 
 .price-stack-row + .price-stack-row {
   border-top: 1px solid var(--line);
-  padding-top: 7px;
 }
 
 .price-stack-row span {
@@ -1398,27 +1420,30 @@ button:disabled {
   white-space: nowrap;
 }
 
-.position-risk-cell,
-.trail-compare-cell {
-  width: min(100%, 136px);
-  align-content: center;
-  justify-items: stretch;
+.decision-grid > .position-risk-cell,
+.decision-grid > .trail-compare-cell {
+  width: 100%;
+  align-content: stretch;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  justify-items: center;
+  gap: 0;
 }
 
 .position-risk-row,
 .trail-compare-row {
   display: grid;
+  align-content: center;
   gap: 4px;
   justify-items: center;
   min-width: 0;
-  padding: 5px 0 7px;
+  width: min(100%, 136px);
+  padding: 0;
   text-align: center;
 }
 
 .position-risk-row + .position-risk-row,
 .trail-compare-row + .trail-compare-row {
   border-top: 1px solid var(--line);
-  padding-top: 7px;
 }
 
 .position-risk-row span,

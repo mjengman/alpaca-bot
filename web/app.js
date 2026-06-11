@@ -5234,29 +5234,29 @@ function renderRunState(data, waitingForOpen) {
   }
   const status = data?.edgewalker_status;
   let label = "Stopped";
-  let tooltip = "The repeating EdgeWalker loop is stopped.";
+  let tooltip = "The repeating Edgewalker loop is stopped.";
   let tone = "is-neutral";
 
   if (state.busy) {
     label = "Checking";
-    tooltip = "EdgeWalker is running a status check or command.";
+    tooltip = "Edgewalker is running a status check or command.";
     tone = "data-warn";
   } else if (state.running) {
     if (status?.position_symbol) {
       label = "Position Open";
-      tooltip = "EdgeWalker is online and managing an open position.";
+      tooltip = "Edgewalker is online and managing an open position.";
       tone = "data-live";
     } else if (waitingForOpen) {
       label = "Armed";
-      tooltip = "EdgeWalker is armed and waiting for the regular market open.";
+      tooltip = "Edgewalker is armed and waiting for the regular market open.";
       tone = "data-warn";
     } else if (status?.market_open === false) {
       label = "Market Closed";
-      tooltip = "EdgeWalker is online, but Alpaca reports the market is closed.";
+      tooltip = "Edgewalker is online, but Alpaca reports the market is closed.";
       tone = "data-warn";
     } else {
       label = "Waiting";
-      tooltip = "EdgeWalker is online and waiting for a specialist lane to qualify.";
+      tooltip = "Edgewalker is online and waiting for a specialist lane to qualify.";
       tone = "data-live";
     }
   }
@@ -5279,13 +5279,13 @@ function decisionReason(status) {
   if (!status) {
     return {
       label: "Awaiting Status",
-      tooltip: "EdgeWalker has not received a strategy status yet.",
+      tooltip: "Edgewalker has not received a strategy status yet.",
     };
   }
   if (status.position_symbol) {
     return {
       label: "Managing Risk",
-      tooltip: "An open position exists, so EdgeWalker is managing exits and risk.",
+      tooltip: "An open position exists, so Edgewalker is managing exits and risk.",
     };
   }
   if (status.market_open === false) {
@@ -5348,7 +5348,7 @@ function renderDecision(status, performance, presetAuthority = null) {
     els.action.textContent = "Waiting";
     if (els.actionReason) {
       els.actionReason.textContent = "Awaiting Status";
-      els.actionReason.dataset.tooltip = "EdgeWalker has not received a strategy status yet.";
+      els.actionReason.dataset.tooltip = "Edgewalker has not received a strategy status yet.";
     }
     renderPresetAuthority(presetAuthority);
     return;
