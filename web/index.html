@@ -355,8 +355,8 @@
           <label class="field">
             <span
               class="has-tooltip"
-              data-tooltip="How often the bot wakes up to fetch data, evaluate the signal, and manage stops."
-              >Poll sec</span
+              data-tooltip="How often Edgewalker scans while flat. Open positions and pending orders are checked every 5 seconds."
+              >Scan cadence</span
             >
             <input
               id="pollInput"
@@ -364,7 +364,7 @@
               min="5"
               step="5"
               value="60"
-              aria-label="Poll seconds"
+              aria-label="Scan cadence seconds"
             />
           </label>
 

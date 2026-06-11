@@ -72,7 +72,8 @@ validated habitats.
 - Position size: fixed notional or dynamic allocation modes, clamped to the safe buying-power threshold and submitted through Alpaca notional orders
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
 - Regime flip guard: stale opposite exposure is sold first, with no same-cycle reversal
-- Poll interval: `POLL_SECONDS`, default 60 seconds
+- Scan cadence: `POLL_SECONDS`, default 60 seconds while flat; open positions
+  or pending orders are checked every 5 seconds for tighter bot-managed exits
 - Closeout guard: sell the full open position inside `CLOSE_LIQUIDATE_MINUTES`, default 5, before Alpaca's reported market close
 - Market data feed: `DATA_FEED=iex`, suitable for free Alpaca market data plans; use `sip` only if the account has SIP entitlement
 - Live data source: the local server keeps an Alpaca WebSocket stream warm for SOXL/SOXS trades, quotes, and one-minute bars

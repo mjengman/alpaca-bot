@@ -33,6 +33,7 @@ from bot import (
     broker_constraint_payload,
 )
 from server import (
+    ACTIVE_SCAN_SECONDS,
     BotRunner,
     NY_TZ,
     _append_daily_jsonl,
@@ -3038,6 +3039,44 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertTrue(config_value.dry_run)
         self.assertEqual(environment_after, "paper")
 
+    def test_runner_uses_normal_scan_cadence_when_flat(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._edgewalker_status = {"position_symbol": None, "position_qty": None}
+
+        with patch("server.BotStateStore") as store_class:
+            store_class.return_value.get_pending_orders.return_value = {}
+            self.assertEqual(runner._next_scan_seconds(config()), 60)
+
+    def test_runner_uses_active_scan_cadence_for_open_position(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._edgewalker_status = {
+            "position_symbol": "SOXL",
+            "position_qty": "1.520235955",
+        }
+
+        with patch("server.BotStateStore") as store_class:
+            store_class.return_value.get_pending_orders.return_value = {}
+            self.assertEqual(
+                runner._next_scan_seconds(config()),
+                ACTIVE_SCAN_SECONDS,
+            )
+
+    def test_runner_uses_active_scan_cadence_for_pending_order(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._edgewalker_status = {"position_symbol": None, "position_qty": None}
+
+        with patch("server.BotStateStore") as store_class:
+            store_class.return_value.get_pending_orders.return_value = {
+                "order-1": {"status": "new"}
+            }
+            self.assertEqual(
+                runner._next_scan_seconds(config()),
+                ACTIVE_SCAN_SECONDS,
+            )
+
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)
         stop_event = threading.Event()
@@ -3054,10 +3093,17 @@ class ServerLoggingTest(unittest.TestCase):
         runner._save_activity_log = lambda: None
         fast_config = replace(config(), poll_seconds=0)
 
-        with patch.object(
-            BotRunner,
-            "_operator_spreadsheet_auto_post_date",
-            return_value=None,
+        with (
+            patch.object(
+                BotRunner,
+                "_operator_spreadsheet_auto_post_date",
+                return_value=None,
+            ),
+            patch.object(
+                BotRunner,
+                "_maybe_send_daily_summary_notification",
+                return_value=None,
+            ),
         ):
             runner._arm_until_market_open(
                 fast_config,

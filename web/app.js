@@ -5557,13 +5557,13 @@ function renderDecision(status, performance, presetAuthority = null) {
   setTone(els.positionPl, status.position_unrealized_pl);
 
   const projectedExitPl = projectedTrailPl(status);
-  const riskLabel = projectedExitPl !== null && projectedExitPl >= 0 ? "Min gain" : "Max loss";
+  const riskLabel = projectedExitPl !== null ? "Trail P/L" : "Max loss";
   if (els.maxLossLabel) {
     els.maxLossLabel.textContent = riskLabel;
     els.maxLossLabel.dataset.tooltip =
-      projectedExitPl !== null && projectedExitPl >= 0
-        ? "Approximate minimum protected gain if the current bot-managed exit price fills as shown. Does not account for slippage."
-        : "Approximate worst-case P/L if the current bot-managed exit price fills as shown. Does not account for slippage.";
+      projectedExitPl !== null
+        ? "Approximate P/L if the current bot-managed trailing exit price fills as shown. Market orders can slip through that trigger."
+        : "Approximate worst-case P/L if the current bot-managed exit price fills as shown. Market orders can slip through that trigger.";
   }
   els.maxLoss.textContent =
     projectedExitPl === null ? "--" : formatMoney(projectedExitPl);

@@ -80,6 +80,7 @@ WEB_ROOT = PROJECT_ROOT / "web"
 ASSETS_ROOT = PROJECT_ROOT / "assets"
 HOST = "127.0.0.1"
 PORT = 8765
+ACTIVE_SCAN_SECONDS = 5
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 OPERATOR_SPREADSHEET_POST_STATE_PATH = PROJECT_ROOT / ".operator_spreadsheet_posts.json"
 NOTIFICATION_STATE_PATH = PROJECT_ROOT / ".notification_events.json"
@@ -478,12 +479,13 @@ class BotRunner:
                 continue
 
             self._run_cycle(config)
-            next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
+            scan_seconds = self._next_scan_seconds(config)
+            next_run = datetime.now() + timedelta(seconds=scan_seconds)
             with self._lock:
                 if self._stop_event is stop_event and self._running:
                     self._next_run_at = next_run.isoformat(timespec="seconds")
                     self._next_run_reason = "poll"
-            stop_event.wait(config.poll_seconds)
+            stop_event.wait(scan_seconds)
 
         with self._lock:
             if self._stop_event is stop_event:
@@ -491,6 +493,23 @@ class BotRunner:
                 self._next_run_at = None
                 self._next_run_reason = None
                 self._last_stopped_at = self._last_stopped_at or now_iso()
+
+    def _next_scan_seconds(self, config: BotConfig) -> int:
+        if config.poll_seconds <= 0:
+            return 0
+        if self._has_active_risk():
+            return min(config.poll_seconds, ACTIVE_SCAN_SECONDS)
+        return config.poll_seconds
+
+    def _has_active_risk(self) -> bool:
+        with self._lock:
+            status = self._edgewalker_status or {}
+            position_symbol = status.get("position_symbol")
+            position_qty = status.get("position_qty")
+
+        if position_symbol and _positive_decimal(position_qty):
+            return True
+        return bool(BotStateStore().get_pending_orders())
 
     def _idle_if_market_closed(
         self,
@@ -2495,6 +2514,15 @@ def _record_decimal(record: dict[str, Any], key: str) -> Decimal | None:
         return Decimal(str(raw))
     except InvalidOperation:
         return None
+
+
+def _positive_decimal(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        return Decimal(str(value)) > 0
+    except InvalidOperation:
+        return False
 
 
 def now_iso() -> str:
