@@ -4,7 +4,9 @@
 .market_data_state.json
 .operator_spreadsheet_posts.json
 .narrative_cache.json
+.notification_events.json
 logs/
+tmp/
 __pycache__/
 *.pyc
 .DS_Store
