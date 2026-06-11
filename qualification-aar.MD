@@ -1,6 +1,6 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-06-05
+Last updated: 2026-06-10
 
 This file captures qualification and early-live observations before they become
 tuning decisions. During the first full rotation through Conservative,
@@ -30,6 +30,50 @@ applies: prove lifecycle truth first, then tune from repeated evidence.
 - Which notable events should be remembered when reviewing the tape later?
 - Did Adaptive shadow reveal useful posture, confidence, or stability signals?
 - What should be watched in the next mode before changing anything?
+
+## 2026-06-10 Status Update: Specialist Go-Live Baseline
+
+The early mode-rotation AARs remain useful history, but the live system has
+graduated from mode-comparison qualification into full-roster specialist
+operation.
+
+Current production posture:
+
+- MomentumBot, ChopBot, and InverseBot are all enabled.
+- MomentumBot includes the promoted sustained surge lane for high-conviction
+  SOXL upside continuation.
+- ChopBot remains the mean-reversion specialist and fallback workhorse.
+- InverseBot includes the promoted sustained cascade lane for validated SOXL
+  downside / SOXS participation.
+- BalancedPure is observer/probe only.
+
+Current operator framing:
+
+- Treat the default live behavior as "PatienceBot."
+- Flat behavior is acceptable when no specialist earns authority.
+- Missing required data should fail specialist gates closed.
+- The operator-facing controls should stay simple during live use: sizing,
+  check status, and start/stop first.
+
+Latest research validation reference:
+
+- Rolling YTD from `$350`, current candidate at `25%`: about `$390.01`
+  ending equity, `+11.43%`, max drawdown about `1.72%`.
+- Rolling YTD from `$350`, current candidate at `95%`: about `$522.71`
+  ending equity, `+49.35%`, max drawdown about `6.51%`.
+- Active-day proxy from the same YTD run: `93/109` green-or-red days and
+  `16/109` flat days.
+
+Known watch items:
+
+- Previous-session close is available and gates fail closed if it is missing,
+  but it should be preloaded during startup/warmup instead of relying on lazy
+  retrieval at the first actionable evaluation.
+- Red days and residual edge cases are expected. Future AARs should classify
+  them by specialist lane and failure mode rather than treating all losses as
+  one generic issue.
+- Multi-specialist overlap days deserve special review because they can reveal
+  coordination/risk-stacking behavior.
 
 ## Emerging Themes
 

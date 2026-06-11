@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-06-07
+Last updated: 2026-06-10
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -100,6 +100,24 @@ foundation for future work.
 - First live-money lifecycle proof completed on 2026-06-04 with explicit live
   arming, real orders/fills/exits, closeout, spreadsheet export, and `HIGH`
   reconciliation
+- Full-roster production router with MomentumBot, ChopBot, and InverseBot
+  enabled as separate specialists instead of one blended generalist.
+- Momentum Surge lane enabled by default through `MOMENTUM_SURGE_MODE=SUSTAINED`
+  for high-conviction upside continuation days.
+- Inverse sustained cascade specialist enabled by default through
+  `INVERSE_CASCADE_MODE=SUSTAINED` for SOXS participation on validated SOXL
+  cascade days.
+- ChopBot remains the mean-reversion workhorse under
+  `CHOP_PERMISSION_MODE=FIREWALL`.
+- Previous-session close is available through the live market data path and is
+  used by Momentum Surge and Inverse Cascade gates. Missing prior-close context
+  fails those gates closed.
+- Strategy Controls are simplified for live operation: most strategy inputs are
+  locked, while position sizing, `Check now`, and the `Turn On` / `Turn Off`
+  control remain operator-facing.
+- Full-roster dress-rehearsal and rolling-balance scoreboards now report
+  per-date P/L, specialist attribution, activation rates, active-day counts,
+  trade count, and rolling equity/drawdown.
 
 ## Priority 0: Operational Truth
 
@@ -281,6 +299,25 @@ Notes:
   `09:30 ET`. That is a partially formed opinion, not a clean regular-session
   blank slate.
 - This is an observability and doctrine issue before it is a strategy issue.
+
+Previous-session close warmup integrity:
+
+- Current state: Momentum Surge and Inverse Cascade can lazily request the
+  previous regular-session close through the active market data source during
+  candidate evaluation.
+- Current safety behavior: if the prior-close value is unavailable, the
+  dependent gate fails closed with a prior-close-unavailable reason instead of
+  entering from incomplete context.
+- Desired hardening: preload required prior-close anchors during EdgeWalker
+  startup/warmup for all symbols used by active specialist gates.
+- Acceptance criteria:
+  - `SOXL` previous-session close is cached before the first actionable regular
+    session gate evaluation.
+  - The dashboard or activity log can distinguish "prior close loaded" from
+    "prior close unavailable, gate failed closed."
+  - Research replay, paper, and live paths all use the same semantic value:
+    previous regular-session close, not premarket marks or current-session
+    partial data.
 
 ### Foundational Replay / Timeline Reconstruction
 
@@ -802,36 +839,34 @@ Notes:
 
 ## Suggested Next Sprint
 
-During the eight paper-trading qualification days before planned go-live, limit
-code changes to fire-fixes and low-risk observability/documentation updates.
-The goal is to collect clean behavior data across Conservative, Balanced,
-Aggressive, and Adaptive qualification days without moving the target every
-session.
+The original eight-day mode-rotation qualification plan is now historical. The
+current live posture is a validated full-roster specialist router, so the next
+sprint should harden operator clarity and lifecycle truth without changing the
+production strategy stack casually.
 
-Qualification protocol:
+Recommended order:
 
-- Day 1: Conservative
-- Day 2: Balanced
-- Day 3: Aggressive
-- Day 4: Adaptive
-- Day 5: Conservative
-- Day 6: Balanced
-- Day 7: Aggressive
-- Day 8: Adaptive
+1. Documentation and operator guide refresh for the current full-roster
+   "PatienceBot" behavior.
+2. Previous-session close warmup preload for active specialist gates.
+3. Live Strategy Controls cleanup: keep sizing and start/stop obvious, move
+   advanced controls behind an intentional diagnostics surface.
+4. Persist richer realized-result lifecycle records per closed trade.
+5. Add average hold duration, best/worst trade, and specialist attribution
+   history to the dashboard/export path.
+6. Start Foundational Replay / Timeline Reconstruction once the event stream is
+   representative enough to design against.
+7. Keep Dynamic Controls and environment classifier authority in shadow until
+   they have replay and live evidence.
 
 Operating rules:
 
-1. Fire-fix only during market sessions.
-2. Keep non-critical strategy and UI changes parked until after the daily
-   session review.
-3. Capture daily logs, lifecycle files, screenshots, and operator notes.
-4. After enough clean logs exist, add realized trade detail/history from
-   lifecycle fill records.
-5. Persist realized-result lifecycle records per closed trade.
-6. Add average hold duration and best/worst trade metrics.
-7. Start Foundational Replay / Timeline Reconstruction once the event stream is
-   representative enough to design against.
-8. Add Trend Trust telemetry before changing Adaptive's posture rules.
+1. Do not change production strategy doctrine during a live session unless it is
+   a fire-fix.
+2. Keep live/router changes isolated from research branches until promotion
+   evidence is recorded.
+3. Preserve the current fail-closed behavior for missing data anchors.
+4. Treat no-trade days as successful behavior when no specialist earns its lane.
 
 ## Weekend Sprint Before Qualification Round 2
 
@@ -1288,3 +1323,28 @@ Authority boundary:
   first matrix had `30m Trans/hr = 0`.
 - Next roadmap item: broaden comparison batches and evaluate shadow selector
   hypotheses before any active routing.
+
+2026-06-10:
+
+- Full-roster specialist routing is the current production posture:
+  MomentumBot, ChopBot, and InverseBot are all enabled, each with narrower
+  execution rights.
+- InverseBot graduated from archaeology/research into the sustained cascade
+  specialist after iterative diagnostics on cascade confirmation, prior-close
+  context, route-invalidation state, proven-state exits, and entry pollution.
+- MomentumBot graduated from structural drag to a high-conviction surge lane.
+  The promoted surge path is intentionally low-frequency and uses prior-close
+  context to avoid poaching InverseBot's downside habitat.
+- ChopBot remains the steady mean-reversion lane and fallback workhorse.
+- Rolling YTD validation from a `$350` starting balance showed the current
+  candidate improving both return and drawdown versus the prior baseline:
+  - `25%` sizing: ending equity about `$390.01`, total `+$40.01`,
+    `+11.43%`, max drawdown about `1.72%`.
+  - `95%` sizing: ending equity about `$522.71`, total `+$172.71`,
+    `+49.35%`, max drawdown about `6.51%`.
+- Approximate active-day footprint from the YTD rolling test was `93/109`
+  green-or-red days, or about `85.3%`, with `16/109` flat days. This is a
+  research/backtest activation proxy, not a live-trading promise.
+- Known hardening item: previous-session close is available and fail-closed,
+  but it is lazy-loaded today. Preloading that anchor during startup/warmup is
+  the next market-data integrity upgrade.

@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-06-07
+Last updated: 2026-06-10
 
 Initial go-live: 2026-06-04
 
@@ -78,6 +78,43 @@ Validation standard:
   fills, and stream timing differ from bar replay.
 - Research evidence becomes stronger when replay, lifecycle logs, sheet rows,
   and operator AARs tell the same story.
+
+## Current Production Stack
+
+As of 2026-06-10, the live candidate is no longer a single generalist preset.
+It is a full-roster specialist stack:
+
+- MomentumBot: legacy StrictAuthority remains, with the promoted Momentum Surge
+  lane enabled through `MOMENTUM_SURGE_MODE=SUSTAINED`.
+- ChopBot: mean-reversion specialist, guarded by
+  `CHOP_PERMISSION_MODE=FIREWALL`.
+- InverseBot: sustained cascade specialist enabled through
+  `INVERSE_CASCADE_MODE=SUSTAINED`.
+- BalancedPure: observer/probe only, no execution rights.
+
+Working doctrine:
+
+- A specialist must earn its habitat before it can trade.
+- Failing closed is acceptable when a required data anchor is missing.
+- No-trade behavior is a success case when the tape does not match a validated
+  lane.
+- Specialist improvements should be judged by roster-level impact, not by
+  isolated bot P/L alone.
+
+Latest rolling YTD reference from a `$350` starting balance:
+
+- Candidate at `25%`: ending equity about `$390.01`, `+11.43%`, max drawdown
+  about `1.72%`.
+- Prior baseline at `25%`: ending equity about `$379.96`, `+8.56%`, max
+  drawdown about `2.35%`.
+- Candidate at `95%`: ending equity about `$522.71`, `+49.35%`, max drawdown
+  about `6.51%`.
+- Prior baseline at `95%`: ending equity about `$473.78`, `+35.37%`, max
+  drawdown about `8.77%`.
+
+Research caveat: these are replay results, not expected live returns. They are
+evidence that the specialist stack improved the historical fingerprint without
+raising drawdown in the tested YTD window.
 
 Current V1 assumptions:
 
@@ -288,6 +325,17 @@ notes, but have not yet become approved tuning decisions.
 - Candidate labels should remain role-based and provisional. The current
   research roles are Generalist, Momentum specialist, and Inverse specialist.
   A Chop/range specialist has not yet earned a slot.
+- InverseBot is no longer merely an archaeology subject. The sustained cascade
+  lane earned promotion by separating true SOXL cascade days from gap-down
+  recovery fakes and by fixing cascade-specific exit behavior.
+- MomentumBot was not fixed by simply loosening the old bot. It needed a new
+  surge lane with its own proof conditions, mutual isolation from InverseBot,
+  and YTD/rolling-equity validation.
+- Previous-session close has become a core specialist anchor. The current live
+  path fetches it lazily and fails closed when unavailable; preloading it during
+  startup/warmup is the next operational hardening item.
+- "PatienceBot" is the correct operator framing for the default system: the
+  roster should wait for qualified lanes rather than manufacture activity.
 - Specialist discovery and environment fingerprinting should inform each other.
   Do not force a four-lane taxonomy before same-date preset comparisons show
   that all four lanes are materially distinct.
@@ -1676,3 +1724,34 @@ Watch:
   invalidated, suppress directional fresh entries, let ChopBot run clean, and
   shadow-log suppressed MomentumBot/InverseBot entries with observer
   fingerprints.
+
+2026-06-10:
+
+- Promoted the full-roster specialist router after separate research cycles for
+  InverseBot and MomentumBot.
+- InverseBot research started from weak/negative downside participation and
+  graduated into `INVERSE_CASCADE_MODE=SUSTAINED`.
+- The Inverse research arc identified and fixed distinct failure modes:
+  cascade confirmation quality, gap-down recovery pollution, stale
+  route-invalidation timer state, proven-state route suppression, wider
+  proven-state trailing behavior, SOXS-down entry rejection, prior-close
+  gating, and second-entry/lockout discipline.
+- MomentumBot research confirmed that the old upside path was structurally too
+  late/selective for many SOXL surge days. The promoted response was not a
+  broad loosened bot, but a separate sustained surge lane with its own proof
+  conditions.
+- Momentum Surge validation showed low-frequency, high-conviction behavior:
+  `8` surge trades in the YTD reference, about `+$8.17` at `25%` sizing and
+  about `+$36.68` at `95%` sizing.
+- Roster validation showed the Momentum surge lane did not cannibalize
+  InverseBot's home turf; in fixed-notional comparison, Inverse P/L remained
+  unchanged while Momentum moved from drag to contributor.
+- Rolling YTD equity validation showed the current candidate improving both
+  return and max drawdown versus the prior baseline at `25%` and `95%` sizing.
+- Accepted residuals for now: occasional failed surge scratches such as
+  2025-04-30, residual Inverse/Chop edge cases, and the general reality that a
+  real trading system will have red days.
+- Added a live-ops follow-up: preload previous-session close during
+  startup/warmup. Today the value is available through the live data path and
+  gates fail closed if missing, but the first actionable evaluation should not
+  depend on just-in-time prior-close retrieval.
