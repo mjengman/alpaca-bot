@@ -20,6 +20,8 @@ const state = {
   narrativeDate: null,
   narrativeDisplayDate: null,
   narrativeCycles: null,
+  narrativeSignalCycles: null,
+  narrativeRiskScans: null,
   narrativeLoading: false,
   narrativeCacheLoading: false,
   activeEnvironment: "paper",
@@ -1675,19 +1677,104 @@ function renderPriorCloseStatus(status) {
   }
   els.priorClose.classList.remove("data-live", "data-warn", "data-danger");
 
-  const contextText = JSON.stringify(status?.v9_momentum_context || {});
-  if (contextText.includes("source_prior_close_unavailable")) {
-    els.priorClose.textContent = "Missing";
+  const backendStatus = String(status?.prior_close_status || "").toLowerCase();
+  const priorCloseValue = status?.prior_close_value;
+  if (backendStatus === "loaded") {
+    els.priorClose.textContent = "Loaded";
+    els.priorClose.dataset.tooltip = priorCloseValue
+      ? `SOXL prior close $${formatNumberMaybe(priorCloseValue)}`
+      : "Previous-session close is loaded and usable by surge/cascade gates.";
+    els.priorClose.classList.add("data-live");
+    return;
+  }
+  if (backendStatus === "unavailable") {
+    els.priorClose.textContent = "Unavailable";
     els.priorClose.dataset.tooltip =
-      "A specialist gate reported missing previous-session close context and failed closed.";
+      "Prior close fetch failed or returned nothing. Surge and cascade gates fail closed.";
+    els.priorClose.classList.add("data-danger");
+    return;
+  }
+  if (backendStatus === "not_needed") {
+    els.priorClose.textContent = "Not Needed";
+    els.priorClose.dataset.tooltip =
+      "Chop Reversion does not use previous-session close for entry gating.";
+    els.priorClose.classList.add("data-live");
+    return;
+  }
+  if (backendStatus === "pending") {
+    els.priorClose.textContent = "Pending";
+    els.priorClose.dataset.tooltip =
+      "Prior close has not loaded yet. Surge and cascade gates fail closed until resolved.";
+    els.priorClose.classList.add("data-warn");
+    return;
+  }
+
+  const specialistGates =
+    status?.specialist_gates && typeof status.specialist_gates === "object"
+      ? Object.values(status.specialist_gates)
+      : [];
+  const priorCloseGates = specialistGates
+    .flatMap((card) => (Array.isArray(card?.entry_gates) ? card.entry_gates : []))
+    .filter((gate) => String(gate?.id || "").toLowerCase() === "prior_close");
+  const activePriorCloseGates = priorCloseGates.filter(
+    (gate) => String(gate?.status || "").toLowerCase() !== "inactive",
+  );
+  const activeBot = String(status?.active_bot || "");
+  const contextText = JSON.stringify(status?.v9_momentum_context || {});
+  const hasUnavailableReason =
+    contextText.includes("source_prior_close_unavailable") ||
+    activePriorCloseGates.some((gate) =>
+      String(gate?.detail || "").toLowerCase().includes("unavailable"),
+    );
+  const hasLoadedContext = activePriorCloseGates.some((gate) => {
+    const gateStatus = String(gate?.status || "").toLowerCase();
+    const detail = String(gate?.detail || "").toLowerCase();
+    return (
+      gateStatus === "pass" ||
+      Boolean(gate?.value) ||
+      (gateStatus === "veto" && !detail.includes("unavailable"))
+    );
+  });
+  const hasPendingGate = activePriorCloseGates.some(
+    (gate) => String(gate?.status || "").toLowerCase() === "waiting",
+  );
+
+  if (hasUnavailableReason) {
+    els.priorClose.textContent = "Unavailable";
+    els.priorClose.dataset.tooltip =
+      "Prior close fetch failed or returned nothing. Surge and cascade gates fail closed.";
     els.priorClose.classList.add("data-danger");
     return;
   }
 
-  els.priorClose.textContent = "Guarded";
+  if (hasLoadedContext) {
+    els.priorClose.textContent = "Loaded";
+    els.priorClose.dataset.tooltip =
+      "Previous-session close is loaded and usable by the active surge/cascade gates.";
+    els.priorClose.classList.add("data-live");
+    return;
+  }
+
+  if (hasPendingGate) {
+    els.priorClose.textContent = "Pending";
+    els.priorClose.dataset.tooltip =
+      "Waiting for the active surge/cascade setup window to request previous-session close.";
+    els.priorClose.classList.add("data-warn");
+    return;
+  }
+
+  if (activeBot === "ChopBot") {
+    els.priorClose.textContent = "Not Needed";
+    els.priorClose.dataset.tooltip =
+      "Chop Reversion does not use previous-session close for entry gating.";
+    els.priorClose.classList.add("data-live");
+    return;
+  }
+
+  els.priorClose.textContent = "Pending";
   els.priorClose.dataset.tooltip =
-    "Previous-session close is fetched on demand by Momentum Surge and Inverse Cascade. If unavailable, those gates fail closed.";
-  els.priorClose.classList.add("data-live");
+    "No surge/cascade prior-close check has run yet. Those gates remain fail-closed if the anchor is unavailable.";
+  els.priorClose.classList.add("data-warn");
 }
 
 function renderAdaptiveStatus(status) {
@@ -5110,6 +5197,8 @@ function clearNarrativeState() {
   state.narrativeDate = null;
   state.narrativeDisplayDate = null;
   state.narrativeCycles = null;
+  state.narrativeSignalCycles = null;
+  state.narrativeRiskScans = null;
 }
 
 function applyNarrativeSnapshot(snapshot) {
@@ -5121,6 +5210,8 @@ function applyNarrativeSnapshot(snapshot) {
   state.narrativeDate = snapshot.date || null;
   state.narrativeDisplayDate = snapshot.displayDate || null;
   state.narrativeCycles = snapshot.cycles || null;
+  state.narrativeSignalCycles = snapshot.signalCycles || null;
+  state.narrativeRiskScans = snapshot.riskScans || null;
   state.narrativeText = state.narrativeSections
     ? narrativeCopyText()
     : legacyNarrativeText(snapshot.text);
@@ -5131,6 +5222,8 @@ function applyNarrativeData(data) {
   state.narrativeDate = data.date;
   state.narrativeDisplayDate = data.display_date;
   state.narrativeCycles = data.cycle_count;
+  state.narrativeSignalCycles = data.signal_cycle_count;
+  state.narrativeRiskScans = data.risk_scan_count;
   state.narrativeText = state.narrativeSections
     ? narrativeCopyText()
     : legacyNarrativeText(data.summary);
@@ -5143,6 +5236,8 @@ function currentNarrativeSnapshot() {
     date: state.narrativeDate,
     displayDate: state.narrativeDisplayDate,
     cycles: state.narrativeCycles,
+    signalCycles: state.narrativeSignalCycles,
+    riskScans: state.narrativeRiskScans,
     savedAt: new Date().toISOString(),
   };
 }
@@ -5233,8 +5328,9 @@ function renderNarrative() {
     return;
   }
   const metaLabel = state.narrativeDisplayDate || state.narrativeDate;
+  const scanLabel = narrativeScanLabel();
   const meta = metaLabel
-    ? `<p class="narrative-meta">${escapeHtml(metaLabel)} · ${state.narrativeCycles || "?"} cycles</p>`
+    ? `<p class="narrative-meta">${escapeHtml(metaLabel)} · ${escapeHtml(scanLabel)}</p>`
     : "";
   if (!state.narrativeSections) {
     const body = (state.narrativeText || "")
@@ -5285,8 +5381,9 @@ function renderNarrativeBotPerformance(botPerformance) {
 
 function narrativeCopyText() {
   const metaLabel = state.narrativeDisplayDate || state.narrativeDate;
+  const scanLabel = narrativeScanLabel();
   const meta = metaLabel
-    ? `${metaLabel} · ${state.narrativeCycles || "?"} cycles`
+    ? `${metaLabel} · ${scanLabel}`
     : "";
   if (!state.narrativeSections) {
     return [meta, state.narrativeText || ""].filter(Boolean).join("\n\n");
@@ -5310,6 +5407,15 @@ function narrativeCopyText() {
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function narrativeScanLabel() {
+  const total = state.narrativeCycles || "?";
+  let label = `${total} scans`;
+  if (state.narrativeSignalCycles != null && state.narrativeRiskScans != null) {
+    label += ` (${state.narrativeSignalCycles} signal / ${state.narrativeRiskScans} risk)`;
+  }
+  return label;
 }
 
 function normalizeNarrativeSections(sections) {

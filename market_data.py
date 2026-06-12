@@ -65,6 +65,7 @@ class StreamingMarketDataService:
         self._api_key_id = config.api_key_id
         self._api_secret_key = config.api_secret_key
         self._previous_session_closes: dict[tuple[str, str, str], Decimal] = {}
+        self._previous_session_close_failures: set[tuple[str, str, str]] = set()
         self._connected = False
         self._authenticated = False
         self._subscribed = False
@@ -87,6 +88,7 @@ class StreamingMarketDataService:
                 self._api_key_id = config.api_key_id
                 self._api_secret_key = config.api_secret_key
                 self._previous_session_closes.clear()
+                self._previous_session_close_failures.clear()
                 self._connected = False
                 self._authenticated = False
                 self._subscribed = False
@@ -155,7 +157,38 @@ class StreamingMarketDataService:
         if close is not None:
             with self._lock:
                 self._previous_session_closes[cache_key] = close
+                self._previous_session_close_failures.discard(cache_key)
+        else:
+            with self._lock:
+                self._previous_session_close_failures.add(cache_key)
         return close
+
+    def previous_session_close_status(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        target_date = datetime.now(NY_TZ).date()
+        cache_key = (symbol, self._feed, target_date.isoformat())
+        with self._lock:
+            cached = self._previous_session_closes.get(cache_key)
+            if cached is not None:
+                return {
+                    "status": "Loaded",
+                    "symbol": symbol,
+                    "value": str(cached),
+                    "feed": self._feed,
+                }
+            if cache_key in self._previous_session_close_failures:
+                return {
+                    "status": "Unavailable",
+                    "symbol": symbol,
+                    "value": None,
+                    "feed": self._feed,
+                }
+            return {
+                "status": "Pending",
+                "symbol": symbol,
+                "value": None,
+                "feed": self._feed,
+            }
 
     def status(self, symbol: str, required_bars: int | None = None) -> dict[str, Any]:
         with self._lock:

@@ -1404,6 +1404,8 @@ class EdgeWalkerStatus:
     trailing_exit_price: str | None
     entry_block_reason: str | None
     specialist_gates: dict[str, Any] | None
+    prior_close_status: str | None
+    prior_close_value: str | None
     data_source: str | None
     data_feed: str | None
     data_status: str | None
@@ -3305,6 +3307,7 @@ class EdgeWalkerBot:
         adaptive = self._adaptive_posture
         effective_directional_mode = self._current_effective_directional_mode()
         inverse_price = self._latest_status_price(SOXS)
+        prior_close_status = self._prior_close_status_payload()
         specialist_gates = self._specialist_gate_telemetry(
             signal,
             route,
@@ -3372,6 +3375,8 @@ class EdgeWalkerBot:
             trailing_exit_price=self._decimal_text(trailing_exit_price),
             entry_block_reason=entry_block_reason,
             specialist_gates=specialist_gates,
+            prior_close_status=prior_close_status.get("status"),
+            prior_close_value=prior_close_status.get("value"),
             data_source=data_status.get("data_source"),
             data_feed=data_status.get("data_feed"),
             data_status=data_status.get("data_status"),
@@ -3413,6 +3418,37 @@ class EdgeWalkerBot:
             ),
             v9_momentum_context=self._v9_momentum_context_for_status(),
         )
+
+    def _prior_close_status_payload(self) -> dict[str, str | None]:
+        data_source = self.market_data or self.client
+        status_getter = getattr(data_source, "previous_session_close_status", None)
+        if callable(status_getter):
+            try:
+                status = status_getter(SOXL)
+            except (BotError, KeyError):
+                status = None
+            if isinstance(status, dict):
+                raw_status = str(status.get("status") or "Pending")
+                value = status.get("value")
+                return {
+                    "status": raw_status,
+                    "value": str(value) if value is not None else None,
+                }
+
+        for context in (
+            self._momentum_surge_context or {},
+            self._inverse_cascade_context or {},
+        ):
+            reasons = self._context_reasons(context)
+            if "source_prior_close_unavailable" in reasons:
+                return {"status": "Unavailable", "value": None}
+            for key in (
+                "soxl_pct_vs_prior_close_at_momentum_window_start",
+                "soxl_pct_vs_prior_close_at_cascade_window_start",
+            ):
+                if key in context:
+                    return {"status": "Loaded", "value": None}
+        return {"status": "Pending", "value": None}
 
     def _current_effective_directional_mode(self) -> str | None:
         if self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE:

@@ -368,6 +368,7 @@ class BotRunner:
         self._notification_state = _load_notification_state()
         self._preset_authority_plan: dict[str, Any] | None = None
         self._preset_authority_state: dict[str, Any] = {}
+        self._prior_close_preload_keys: set[tuple[str, str, str]] = set()
 
     def _initial_config(self) -> tuple[BotConfig, str | None]:
         try:
@@ -402,6 +403,7 @@ class BotRunner:
             self._preset_authority_plan = preset_authority_plan
             self._preset_authority_state = {}
             self._market_data.ensure_running(launch_config)
+            self._prior_close_preload_keys = set()
             self._running = True
             self._last_started_at = now_iso()
             self._last_stopped_at = None
@@ -454,6 +456,8 @@ class BotRunner:
             self._preset_authority_plan = preset_authority_plan
             self._preset_authority_state = {}
             self._market_data.ensure_running(launch_config)
+            self._prior_close_preload_keys = set()
+        self._preload_previous_session_close(launch_config)
         self._run_cycle(launch_config)
         return self.snapshot()
 
@@ -475,6 +479,7 @@ class BotRunner:
 
     def _loop(self, config: BotConfig, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
+            self._preload_previous_session_close(config)
             if self._idle_if_market_closed(config, stop_event):
                 continue
 
@@ -493,6 +498,42 @@ class BotRunner:
                 self._next_run_at = None
                 self._next_run_reason = None
                 self._last_stopped_at = self._last_stopped_at or now_iso()
+
+    def _preload_previous_session_close(self, config: BotConfig) -> None:
+        session_date = datetime.now(NY_TZ).date().isoformat()
+        preload_key = (SOXL, config.data_feed, session_date)
+        with self._lock:
+            if not hasattr(self, "_prior_close_preload_keys"):
+                self._prior_close_preload_keys = set()
+            if preload_key in self._prior_close_preload_keys:
+                return
+            self._prior_close_preload_keys.add(preload_key)
+
+        try:
+            close = self._market_data.get_previous_session_close(SOXL)
+            status = self._market_data.previous_session_close_status(SOXL)
+        except Exception as exc:  # Telemetry hardening should never stop trading.
+            close = None
+            status = {"status": "Unavailable"}
+            with self._lock:
+                self._last_error = str(exc)
+
+        if close is not None:
+            line = f"[DATA] Prior close preloaded: {SOXL} ${format_decimal(close)}."
+        elif status.get("status") == "Unavailable":
+            line = (
+                f"[DATA] Prior close unavailable for {SOXL}; "
+                "surge/cascade gates remain fail-closed."
+            )
+        else:
+            line = (
+                f"[DATA] Prior close pending for {SOXL}; "
+                "surge/cascade gates remain fail-closed until loaded."
+            )
+
+        with self._lock:
+            self._last_output = [line, *self._last_output[:39]]
+            self._append_activity_locked([line])
 
     def _next_scan_seconds(self, config: BotConfig) -> int:
         if config.poll_seconds <= 0:
@@ -3613,6 +3654,53 @@ def _record_has_stale_bars(record: dict[str, Any]) -> bool:
     )
 
 
+def _record_is_active_risk_scan(record: dict[str, Any]) -> bool:
+    action = _optional_text(record.get("action_taken"))
+    if action in {
+        "manage_open_position",
+        "manage_open_position_stale_bars",
+    }:
+        return True
+    if record.get("position_symbol") and _positive_decimal(record.get("position_qty")):
+        return True
+    pending_count = _decimal_from_value(record.get("pending_order_count"))
+    if pending_count is not None and pending_count > 0:
+        return True
+    order_state = record.get("order_state")
+    if isinstance(order_state, dict):
+        pending_count = _decimal_from_value(order_state.get("pending_count"))
+        if pending_count is not None and pending_count > 0:
+            return True
+    return False
+
+
+def _record_span_hours(records: list[dict[str, Any]]) -> float | None:
+    timestamps = [
+        timestamp
+        for timestamp in (_record_datetime(record) for record in records)
+        if timestamp is not None
+    ]
+    if len(timestamps) < 2:
+        return None
+    seconds = max((timestamps[-1] - timestamps[0]).total_seconds(), 0)
+    if seconds <= 0:
+        return None
+    return seconds / 3600
+
+
+def _cycle_accounting(records: list[dict[str, Any]]) -> dict[str, Any]:
+    total_scans = len(records)
+    risk_scans = sum(1 for record in records if _record_is_active_risk_scan(record))
+    signal_cycles = max(total_scans - risk_scans, 0)
+    duration_hours = _record_span_hours(records)
+    return {
+        "total_scans": total_scans,
+        "signal_cycles": signal_cycles,
+        "risk_scans": risk_scans,
+        "duration_hours": round(duration_hours, 2) if duration_hours is not None else None,
+    }
+
+
 def _session_metrics_summary(
     records: list[dict[str, Any]],
     lifecycle_records: list[dict[str, Any]],
@@ -3709,10 +3797,19 @@ def _session_metrics_summary(
             return None
         return f"{sum(values) / len(values):.1f}"
 
+    transition_count = sum(1 for record in records if record.get("regime_transition"))
+    cycle_accounting = _cycle_accounting(records)
+    duration_hours = cycle_accounting.get("duration_hours")
+    transition_rate_per_hour = (
+        round(transition_count / duration_hours, 2)
+        if isinstance(duration_hours, (int, float)) and duration_hours > 0
+        else None
+    )
+
     return {
-        "regime_transition_count": sum(
-            1 for record in records if record.get("regime_transition")
-        ),
+        "regime_transition_count": transition_count,
+        "transition_rate_per_hour": transition_rate_per_hour,
+        "cycle_accounting": cycle_accounting,
         "stale_bar_cycles": stale_bar_cycles,
         "backfill_repair_cycles": backfill_repair_cycles,
         "backfill_unchanged_cycles": backfill_unchanged_cycles,
@@ -3964,19 +4061,50 @@ def _narrative_trust_tier(score: float | None) -> str:
 
 def _narrative_transition_character(
     transitions: int,
-    cycles: int,
+    signal_cycles: int,
+    total_scans: int,
+    risk_scans: int,
+    transition_rate_per_hour: float | None,
 ) -> tuple[str, str]:
-    if cycles <= 0 or transitions <= 0:
+    if transitions <= 0:
         return "stable", "no confirmed regime transitions"
-    rate = transitions / cycles
-    cycle_gap = max(1, round(cycles / transitions))
-    if rate >= 0.08 or transitions >= 30:
-        label = "churn-heavy"
-    elif rate >= 0.03 or transitions >= 10:
-        label = "active"
+
+    if transition_rate_per_hour is not None:
+        if transition_rate_per_hour >= 5 or transitions >= 30:
+            label = "churn-heavy"
+        elif transition_rate_per_hour >= 2.5 or transitions >= 10:
+            label = "active"
+        else:
+            label = "mostly stable"
     else:
-        label = "mostly stable"
-    return label, f"{transitions} transitions across {cycles} cycles, about one every {cycle_gap} cycles"
+        denominator = signal_cycles or total_scans
+        rate = transitions / denominator if denominator > 0 else 0
+        if rate >= 0.08 or transitions >= 30:
+            label = "churn-heavy"
+        elif rate >= 0.03 or transitions >= 10:
+            label = "active"
+        else:
+            label = "mostly stable"
+
+    if transition_rate_per_hour is not None:
+        pressure = f"about {transition_rate_per_hour:g} transitions/hour"
+    elif signal_cycles > 0:
+        gap = max(1, round(signal_cycles / transitions))
+        pressure = f"about one every {gap} signal cycles"
+    else:
+        pressure = "transition density unavailable"
+
+    if total_scans > 0 and risk_scans > 0:
+        scan_clause = (
+            f"{total_scans} total scans: {signal_cycles} signal cycles, "
+            f"{risk_scans} active risk scans"
+        )
+    elif total_scans > 0:
+        scan_clause = f"{signal_cycles or total_scans} signal cycles"
+    else:
+        scan_clause = "scan accounting unavailable"
+
+    return label, f"{transitions} transitions ({pressure}); {scan_clause}"
 
 
 def _narrative_result_status(value: Any) -> str:
@@ -4136,7 +4264,21 @@ def _deterministic_daily_narrative_sections(
     )
 
     date_text = _optional_text(session.get("date"))
-    cycles = int(session.get("total_cycles") or 0)
+    total_scans = int(session.get("total_cycles") or 0)
+    cycle_accounting = (
+        metrics.get("cycle_accounting")
+        if isinstance(metrics.get("cycle_accounting"), dict)
+        else {}
+    )
+    raw_signal_cycles = cycle_accounting.get("signal_cycles")
+    raw_risk_scans = cycle_accounting.get("risk_scans")
+    signal_cycles = (
+        int(raw_signal_cycles) if raw_signal_cycles is not None else total_scans
+    )
+    risk_scans = int(raw_risk_scans) if raw_risk_scans is not None else 0
+    transition_rate_per_hour = _float_from_value(
+        metrics.get("transition_rate_per_hour")
+    )
     transitions = int(
         metrics.get("regime_transition_count")
         or len(context.get("regime_transitions") or [])
@@ -4147,7 +4289,13 @@ def _deterministic_daily_narrative_sections(
     )
     trust_score = _float_from_value(trend_metrics.get("average_score"))
     trust_tier = _narrative_trust_tier(trust_score)
-    character, transition_text = _narrative_transition_character(transitions, cycles)
+    character, transition_text = _narrative_transition_character(
+        transitions,
+        signal_cycles,
+        total_scans,
+        risk_scans,
+        transition_rate_per_hour,
+    )
     symbol = _optional_text(market.get("symbol")) or "primary symbol"
     realized_pl = _decimal_from_value(performance.get("session_realized_pl")) or Decimal("0")
     result_status = _narrative_result_status(realized_pl)
@@ -4285,7 +4433,10 @@ def _build_daily_polish_prompt(
             "You are polishing Edgewalker's daily operator narrative.",
             "Use only the verified story beats below. Do not add facts, advice, or parameter changes.",
             "Keep the tone calm, causal, and operator-grade: no alarm, no hype, no premature tuning.",
-            f"SESSION: {session.get('date')} | CYCLES: {session.get('total_cycles')}",
+            (
+                f"SESSION: {session.get('date')} | SCANS: {session.get('total_scans') or session.get('total_cycles')} "
+                f"| SIGNAL CYCLES: {session.get('signal_cycles')} | RISK SCANS: {session.get('risk_scans')}"
+            ),
             "",
             json.dumps(payload, indent=2, sort_keys=True),
             "",
@@ -4313,12 +4464,16 @@ def _narrative_for_spreadsheet(summary: dict[str, Any]) -> str:
     parts: list[str] = []
     display_date = _narrative_text(summary.get("display_date") or summary.get("date"))
     cycles = summary.get("cycle_count")
+    signal_cycles = summary.get("signal_cycle_count")
+    risk_scans = summary.get("risk_scan_count")
     if display_date:
-        parts.append(
-            f"{display_date} · {cycles or '?'} cycles"
-            if cycles is not None
-            else display_date
-        )
+        if cycles is not None:
+            scan_label = f"{cycles} scans"
+            if signal_cycles is not None and risk_scans is not None:
+                scan_label += f" ({signal_cycles} signal / {risk_scans} risk)"
+            parts.append(f"{display_date} · {scan_label}")
+        else:
+            parts.append(display_date)
 
     if sections.get("tldr"):
         parts.append(f"TL;DR: {_narrative_text(sections.get('tldr'))}")
@@ -4427,10 +4582,30 @@ def _record_contains_text(record: dict[str, Any], needle: str) -> bool:
         return False
 
 
-def _prior_close_status(record: dict[str, Any]) -> str:
-    if _record_contains_text(record, "source_prior_close_unavailable"):
-        return "MISSING"
-    return "GUARDED"
+def _prior_close_status(records: list[dict[str, Any]]) -> str:
+    if not records:
+        return "PENDING"
+    for record in records:
+        status = (_optional_text(record.get("prior_close_status")) or "").upper()
+        if status in {"LOADED", "UNAVAILABLE", "PENDING"}:
+            if status == "LOADED":
+                return "LOADED"
+            if status == "UNAVAILABLE":
+                return "UNAVAILABLE"
+    if any(_record_contains_text(record, "source_prior_close_unavailable") for record in records):
+        return "UNAVAILABLE"
+    loaded_markers = (
+        "soxl_pct_vs_prior_close_at_momentum_window_start",
+        "soxl_pct_vs_prior_close_at_cascade_window_start",
+        "Previous-session close is available and accepted.",
+        "The setup started too high versus the previous-session close.",
+    )
+    if any(
+        any(_record_contains_text(record, marker) for marker in loaded_markers)
+        for record in records
+    ):
+        return "LOADED"
+    return "PENDING"
 
 
 def _primary_no_trade_reason(record: dict[str, Any]) -> str:
@@ -4754,7 +4929,7 @@ def build_operator_spreadsheet_daily_row(
         "market_environment": UNKNOWN_MARKET_ENVIRONMENT,
         "primary_no_trade_reason": _primary_no_trade_reason(last),
         "route_reason_summary": _route_reason_summary(last),
-        "prior_close_status": _prior_close_status(last),
+        "prior_close_status": _prior_close_status(export_records),
         "data_feed": _config_snapshot_text(last_config, "data_feed"),
         "operator_notes": operator_notes,
         "daily_narrative": daily_narrative,
@@ -7383,6 +7558,11 @@ def _extract_session_context(
         lifecycle_records or [],
         log_date,
     )
+    cycle_accounting = (
+        session_metrics.get("cycle_accounting")
+        if isinstance(session_metrics.get("cycle_accounting"), dict)
+        else _cycle_accounting(records)
+    )
     trend_trust = next(
         (r.get("trend_trust") for r in reversed(records) if r.get("trend_trust")),
         None,
@@ -7396,6 +7576,9 @@ def _extract_session_context(
             "start": _to_ny_time(first["timestamp"]),
             "end": _to_ny_time(last["timestamp"]),
             "total_cycles": len(records),
+            "total_scans": cycle_accounting.get("total_scans", len(records)),
+            "signal_cycles": cycle_accounting.get("signal_cycles", len(records)),
+            "risk_scans": cycle_accounting.get("risk_scans", 0),
         },
         "config": {
             "directional_mode": last_config.get("directional_mode"),
@@ -7598,7 +7781,10 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
         "",
         f"SESSION: {session.get('date')} | {session.get('start')} – {session.get('end')} ET",
         f"MARKET: {market_status}",
-        f"CYCLES: {session.get('total_cycles')} | MODE: {mode}",
+        (
+            f"SCANS: {session.get('total_scans') or session.get('total_cycles')} "
+            f"({session.get('signal_cycles')} signal / {session.get('risk_scans')} risk) | MODE: {mode}"
+        ),
         f"POSITION SIZE: {config.get('position_notional')} | DIRECTIONAL MODE: {config.get('directional_mode')}",
         f"SOXL PRICE RANGE: {market.get('price_range')} | OPENING REGIME: {market.get('initial_regime')}",
         "",
@@ -7607,7 +7793,19 @@ def _build_summary_prompt(context: dict[str, Any]) -> str:
     if isinstance(metrics, dict):
         trend_metrics = metrics.get("trend_trust")
         trend_metrics = trend_metrics if isinstance(trend_metrics, dict) else {}
+        cycle_accounting = (
+            metrics.get("cycle_accounting")
+            if isinstance(metrics.get("cycle_accounting"), dict)
+            else {}
+        )
         parts.append("SESSION METRICS:")
+        parts.append(
+            "  Scan accounting: "
+            f"total={cycle_accounting.get('total_scans')} | "
+            f"signal={cycle_accounting.get('signal_cycles')} | "
+            f"risk={cycle_accounting.get('risk_scans')} | "
+            f"transition_rate/hr={metrics.get('transition_rate_per_hour')}"
+        )
         parts.append(
             f"  Regime transitions: {metrics.get('regime_transition_count')} | "
             f"Stale bar cycles: {metrics.get('stale_bar_cycles')} | "
@@ -7807,6 +8005,11 @@ def _one_day_summary_signature(
         {
             "grounding_version": NARRATIVE_GROUNDING_VERSION,
             "cycle_count": len(records),
+            "cycle_accounting": (
+                context.get("session_metrics", {}).get("cycle_accounting")
+                if isinstance(context.get("session_metrics"), dict)
+                else None
+            ),
             "first_timestamp": first.get("timestamp"),
             "last_timestamp": last.get("timestamp"),
             "last_cycle_id": last.get("cycle_id"),
@@ -7903,6 +8106,8 @@ def _summary_cache_miss_payload(
     date_label: str,
     display_date: str,
     cycle_count: int,
+    signal_cycle_count: int | None = None,
+    risk_scan_count: int | None = None,
 ) -> dict[str, Any]:
     return {
         "available": False,
@@ -7911,6 +8116,8 @@ def _summary_cache_miss_payload(
         "date": date_label,
         "display_date": display_date,
         "cycle_count": cycle_count,
+        "signal_cycle_count": signal_cycle_count,
+        "risk_scan_count": risk_scan_count,
     }
 
 
@@ -8107,14 +8314,18 @@ def generate_session_summary(
             if cached is not None:
                 return cached
         if cache_only:
+            cycle_accounting = context.get("session", {})
             return _summary_cache_miss_payload(
                 timeframe="1D",
                 date_label=target_date,
                 display_date=_display_date_label(target_date),
                 cycle_count=len(records),
+                signal_cycle_count=cycle_accounting.get("signal_cycles"),
+                risk_scan_count=cycle_accounting.get("risk_scans"),
             )
 
         narrative_sections = _deterministic_daily_narrative_sections(context)
+        session_context = context.get("session") if isinstance(context.get("session"), dict) else {}
         summary = {
             "available": True,
             "cached": False,
@@ -8124,12 +8335,16 @@ def generate_session_summary(
                     "narrative": narrative_sections,
                     "display_date": _display_date_label(target_date),
                     "cycle_count": len(records),
+                    "signal_cycle_count": session_context.get("signal_cycles"),
+                    "risk_scan_count": session_context.get("risk_scans"),
                 }
             ),
             "narrative": narrative_sections,
             "date": target_date,
             "display_date": _display_date_label(target_date),
             "cycle_count": len(records),
+            "signal_cycle_count": session_context.get("signal_cycles"),
+            "risk_scan_count": session_context.get("risk_scans"),
             "generated_at": now_iso(),
         }
         _store_narrative_summary(cache_key, signature, summary)

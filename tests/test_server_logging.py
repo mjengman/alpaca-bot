@@ -28,6 +28,7 @@ from bot import (
     POSITION_LIFECYCLE_CLOSING,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
+    SOXL,
     V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
     broker_constraint_ok,
     broker_constraint_payload,
@@ -50,6 +51,7 @@ from server import (
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
+    _prior_close_status,
     _research_chop_specialist_summary,
     _research_compare_date_summary,
     _research_compare_preset_summaries,
@@ -2052,9 +2054,52 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["order_mode"], "paper")
         self.assertEqual(row["active_environment"], "paper")
         self.assertEqual(row["market_environment"], "")
-        self.assertEqual(row["prior_close_status"], "GUARDED")
+        self.assertEqual(row["prior_close_status"], "PENDING")
         self.assertEqual(row["data_feed"], "iex")
         self.assertEqual(row["operator_notes"], "round 2 conservative")
+
+    def test_prior_close_status_labels_loaded_and_fail_closed(self) -> None:
+        self.assertEqual(_prior_close_status([]), "PENDING")
+        self.assertEqual(_prior_close_status([{"active_bot": CHOP_BOT}]), "PENDING")
+        self.assertEqual(
+            _prior_close_status([{"prior_close_status": "Loaded"}]),
+            "LOADED",
+        )
+        self.assertEqual(
+            _prior_close_status([{"prior_close_status": "Unavailable"}]),
+            "UNAVAILABLE",
+        )
+        self.assertEqual(
+            _prior_close_status(
+                [
+                    {
+                        "specialist_gates": {
+                            MOMENTUM_BOT: {
+                                "entry_gates": [
+                                    {
+                                        "id": "prior_close",
+                                        "detail": "Previous-session close is available and accepted.",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                ]
+            ),
+            "LOADED",
+        )
+        self.assertEqual(
+            _prior_close_status(
+                [
+                    {
+                        "v9_momentum_context": {
+                            "reasons": ["source_prior_close_unavailable"]
+                        }
+                    }
+                ]
+            ),
+            "UNAVAILABLE",
+        )
 
     def test_operator_spreadsheet_daily_row_uses_final_environment(self) -> None:
         lifecycle_records = [
@@ -2639,6 +2684,16 @@ class ServerLoggingTest(unittest.TestCase):
                 ],
                 "config": {"dry_run": False},
             },
+            {
+                "timestamp": "2026-05-22T14:31:05Z",
+                "market_open": True,
+                "regime": "UPTREND",
+                "action_taken": "manage_open_position",
+                "position_symbol": "SOXL",
+                "position_qty": "1.5",
+                "console_lines": [],
+                "config": {"dry_run": False},
+            },
         ]
         lifecycle_records = [
             {
@@ -2663,6 +2718,9 @@ class ServerLoggingTest(unittest.TestCase):
         metrics = context["session_metrics"]
 
         self.assertEqual(metrics["regime_transition_count"], 1)
+        self.assertEqual(metrics["cycle_accounting"]["total_scans"], 3)
+        self.assertEqual(metrics["cycle_accounting"]["signal_cycles"], 2)
+        self.assertEqual(metrics["cycle_accounting"]["risk_scans"], 1)
         self.assertEqual(metrics["stale_bar_cycles"], 1)
         self.assertEqual(metrics["backfill_repair_cycles"], 1)
         self.assertEqual(metrics["route_invalidation_exit_count"], 1)
@@ -2790,6 +2848,13 @@ class ServerLoggingTest(unittest.TestCase):
             },
             "session_metrics": {
                 "regime_transition_count": 41,
+                "transition_rate_per_hour": 6.31,
+                "cycle_accounting": {
+                    "total_scans": 432,
+                    "signal_cycles": 360,
+                    "risk_scans": 72,
+                    "duration_hours": 6.5,
+                },
                 "stale_bar_cycles": 11,
                 "route_invalidation_exit_count": 3,
                 "trailing_stop_exit_count": 1,
@@ -2861,8 +2926,10 @@ class ServerLoggingTest(unittest.TestCase):
 
         self.assertIn("slightly red", sections["tldr"])
         self.assertIn("-$1.21", sections["tldr"])
-        self.assertIn("41 transitions across 432 cycles", sections["highlight"])
+        self.assertIn("41 transitions (about 6.31 transitions/hour)", sections["highlight"])
+        self.assertIn("432 total scans: 360 signal cycles, 72 active risk scans", sections["highlight"])
         self.assertIn("37.3 (LOW)", sections["highlight"])
+        self.assertNotIn("one every", sections["highlight"])
         self.assertIn("Every exit was route invalidation", sections["bot_performance"][CHOP_BOT])
         self.assertIn("gate discipline", sections["bot_performance"][INVERSE_BOT])
         self.assertIn("No parameter conclusions", sections["analysis"])
@@ -3166,6 +3233,67 @@ class ServerLoggingTest(unittest.TestCase):
                 runner._next_scan_seconds(config()),
                 ACTIVE_SCAN_SECONDS,
             )
+
+    def test_runner_preloads_previous_session_close_once(self) -> None:
+        class FakeMarketData:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get_previous_session_close(self, symbol: str) -> Decimal:
+                self.calls += 1
+                self.symbol = symbol
+                return Decimal("197.43")
+
+            def previous_session_close_status(self, symbol: str) -> dict[str, object]:
+                return {
+                    "status": "Loaded",
+                    "symbol": symbol,
+                    "value": "197.43",
+                    "feed": "iex",
+                }
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._market_data = FakeMarketData()
+        runner._prior_close_preload_keys = set()
+        runner._last_output = []
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+
+        runner._preload_previous_session_close(config())
+        runner._preload_previous_session_close(config())
+
+        self.assertEqual(runner._market_data.calls, 1)
+        self.assertEqual(runner._market_data.symbol, SOXL)
+        self.assertEqual(
+            [line for _, line in runner._activity_log],
+            [f"[DATA] Prior close preloaded: {SOXL} $197.43."],
+        )
+
+    def test_runner_preload_records_unavailable_prior_close(self) -> None:
+        class FakeMarketData:
+            def get_previous_session_close(self, symbol: str) -> None:
+                del symbol
+                return None
+
+            def previous_session_close_status(self, symbol: str) -> dict[str, object]:
+                return {"status": "Unavailable", "symbol": symbol, "value": None}
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._market_data = FakeMarketData()
+        runner._prior_close_preload_keys = set()
+        runner._last_output = []
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+
+        runner._preload_previous_session_close(config())
+
+        self.assertEqual(
+            runner._last_output[0],
+            f"[DATA] Prior close unavailable for {SOXL}; "
+            "surge/cascade gates remain fail-closed.",
+        )
 
     def test_runner_arms_until_market_open_when_market_is_closed(self) -> None:
         runner = BotRunner.__new__(BotRunner)

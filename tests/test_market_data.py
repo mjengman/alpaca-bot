@@ -350,6 +350,77 @@ class StreamingMarketDataServiceTest(unittest.TestCase):
         self.assertIn("timeframe=1Day", calls[0])
         self.assertIn("feed=iex", calls[0])
 
+    def test_previous_session_close_status_reports_cache_state(self) -> None:
+        today = datetime.now(NY_TZ).date()
+        prior_day = today - timedelta(days=1)
+        prior_timestamp = datetime.combine(
+            prior_day,
+            datetime.min.time(),
+            NY_TZ,
+        ).astimezone(timezone.utc)
+
+        def fake_urlopen(request: object, timeout: int) -> FakeHTTPResponse:
+            del request, timeout
+            return FakeHTTPResponse(
+                {
+                    "bars": [
+                        {
+                            "t": prior_timestamp.isoformat().replace("+00:00", "Z"),
+                            "c": "101.25",
+                        }
+                    ],
+                    "symbol": "SOXL",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+
+            self.assertEqual(
+                service.previous_session_close_status("SOXL")["status"],
+                "Pending",
+            )
+            with patch("market_data.urllib.request.urlopen", fake_urlopen):
+                self.assertEqual(
+                    service.get_previous_session_close("SOXL"),
+                    Decimal("101.25"),
+                )
+            self.assertEqual(
+                service.previous_session_close_status("SOXL"),
+                {
+                    "status": "Loaded",
+                    "symbol": "SOXL",
+                    "value": "101.25",
+                    "feed": "iex",
+                },
+            )
+
+    def test_previous_session_close_status_reports_unavailable_after_failed_fetch(
+        self,
+    ) -> None:
+        def fake_urlopen(request: object, timeout: int) -> FakeHTTPResponse:
+            del request, timeout
+            return FakeHTTPResponse({"bars": [], "symbol": "SOXL"})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = StreamingMarketDataService(
+                config(),
+                symbols=("SOXL",),
+                state_path=Path(tmpdir) / "stream-state.json",
+            )
+
+            with patch("market_data.urllib.request.urlopen", fake_urlopen):
+                self.assertIsNone(service.get_previous_session_close("SOXL"))
+
+            self.assertEqual(
+                service.previous_session_close_status("SOXL")["status"],
+                "Unavailable",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
