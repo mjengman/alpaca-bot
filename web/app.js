@@ -223,6 +223,10 @@ const els = {
   sessionTrades: document.querySelector("#sessionTradesValue"),
   botPerformanceSummary: document.querySelector("#botPerformanceSummaryValue"),
   botPerformanceGrid: document.querySelector("#botPerformanceGrid"),
+  specialistReadinessSummary: document.querySelector(
+    "#specialistReadinessSummaryValue",
+  ),
+  specialistReadinessBody: document.querySelector("#specialistReadinessBody"),
   lastRun: document.querySelector("#lastRunValue"),
   nextRun: document.querySelector("#nextRunValue"),
   regime: document.querySelector("#regimeValue"),
@@ -1828,6 +1832,264 @@ function renderBotPerformanceCard(row) {
       <small>${escapeHtml(lastTrade)}</small>
     </div>
   `;
+}
+
+function renderSpecialistReadiness(gates) {
+  if (!els.specialistReadinessBody || !els.specialistReadinessSummary) {
+    return;
+  }
+  const rows = gates && typeof gates === "object" ? Object.entries(gates) : [];
+  if (!rows.length) {
+    const fallback = fallbackSpecialistReadiness();
+    els.specialistReadinessSummary.textContent = "Awaiting status";
+    els.specialistReadinessSummary.className = "is-neutral";
+    els.specialistReadinessBody.innerHTML = fallback
+      .map(renderSpecialistReadinessCard)
+      .join("");
+    return;
+  }
+
+  const specialists = rows
+    .map(([bot, payload]) => ({ bot, ...(payload || {}) }))
+    .sort(
+      (a, b) =>
+        (numberOrNull(a.state_rank) || 99) - (numberOrNull(b.state_rank) || 99),
+    );
+  const lead = specialists[0];
+  els.specialistReadinessSummary.textContent =
+    lead?.state === "Inactive" ? "Standing by" : lead?.state || "Waiting";
+  els.specialistReadinessSummary.className = readinessToneClass(lead?.state);
+  els.specialistReadinessBody.innerHTML = specialists
+    .map(renderSpecialistReadinessCard)
+    .join("");
+}
+
+function fallbackSpecialistReadiness() {
+  return [
+    fallbackSpecialistReadinessCard("MomentumBot", "Momentum Surge"),
+    fallbackSpecialistReadinessCard("ChopBot", "Chop Reversion"),
+    fallbackSpecialistReadinessCard("InverseBot", "Inverse Cascade"),
+  ];
+}
+
+function fallbackSpecialistReadinessCard(bot, displayName) {
+  return {
+    bot,
+    display_name: displayName,
+    state: "Inactive",
+    state_rank: 5,
+    route_relevant: false,
+    primary_message: "Awaiting first strategy check",
+    position: null,
+    entry_gates: [
+      fallbackGate(bot, "route", "Route"),
+      fallbackGate(bot, "authority", bot === "ChopBot" ? "Permission" : "Authority"),
+      fallbackGate(bot, "prior_close", "Prior Close"),
+      fallbackGate(bot, "setup", "Setup"),
+      fallbackGate(bot, "path", "Path"),
+      fallbackGate(bot, "entry_bar", "Entry Bar"),
+      fallbackGate(bot, "cooldown", "Cooldown"),
+      fallbackGate(bot, "position", "Position"),
+    ],
+    exit_gates: [],
+  };
+}
+
+function fallbackGate(bot, id, label) {
+  return {
+    id,
+    label,
+    status: "inactive",
+    tier: "quality",
+    detail: gateRequirementDetail(bot, id, label),
+  };
+}
+
+function renderSpecialistReadinessCard(row) {
+  const stateValue = row.state || "Inactive";
+  const stateClass = readinessStateClass(stateValue);
+  const displayName = row.display_name || formatLabel(row.bot || "Specialist");
+  const strategyDescription = strategyGateDescription(row.bot, displayName);
+  const message = row.primary_message || "No gate message reported.";
+  const messageMarkup =
+    stateValue === "Inactive" || message === "Not the current route"
+      ? ""
+      : `<strong>${escapeHtml(message)}</strong>`;
+  const content =
+    stateValue === "Managing"
+      ? renderManagingReadiness(row)
+      : renderEntryGateReadiness(row);
+  return `
+    <article class="specialist-gate-card ${stateClass}">
+      <div class="specialist-gate-head">
+        <div>
+          <span
+            class="has-tooltip"
+            tabindex="0"
+            data-tooltip="${escapeHtml(strategyDescription)}"
+          >${escapeHtml(displayName)}</span>
+          ${messageMarkup}
+        </div>
+        <b>${escapeHtml(stateValue)}</b>
+      </div>
+      ${content}
+    </article>
+  `;
+}
+
+function renderEntryGateReadiness(row) {
+  const gates = Array.isArray(row.entry_gates) ? row.entry_gates : [];
+  if (!gates.length) {
+    return '<div class="gate-empty">Entry gates are not active.</div>';
+  }
+  return `
+    <div class="gate-strip">
+      ${gates.map((gate) => renderGateSegment(gate, row.bot)).join("")}
+    </div>
+  `;
+}
+
+function renderManagingReadiness(row) {
+  const position = row.position || {};
+  const exitGates = Array.isArray(row.exit_gates) ? row.exit_gates : [];
+  return `
+    <div class="managing-readiness">
+      <div class="managing-metrics">
+        ${renderManagingMetric("P/L", formatManagingPl(position))}
+        ${renderManagingMetric("MFE", formatPercentMaybe(position.mfe_percent))}
+        ${renderManagingMetric("Trail", formatPrice(position.trail_price))}
+        ${renderManagingMetric("Trail P/L", formatMoney(position.trail_pl_dollars))}
+      </div>
+      <div class="gate-strip is-exit">
+        ${exitGates.map((gate) => renderGateSegment(gate, row.bot)).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderManagingMetric(label, value) {
+  return `
+    <div class="managing-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || "--")}</strong>
+    </div>
+  `;
+}
+
+function formatManagingPl(position) {
+  const dollars = formatMoney(position.pl_dollars);
+  const percent = formatPercentMaybe(position.pl_percent);
+  if (dollars === "--" && percent === "--") {
+    return "--";
+  }
+  return `${dollars} ${percent}`.trim();
+}
+
+function renderGateSegment(gate, bot = "") {
+  const status = String(gate.status || "inactive").toLowerCase();
+  const tier = String(gate.tier || "quality").toLowerCase();
+  const label = gate.label || formatLabel(gate.id || "Gate");
+  const value = gate.value ? ` · ${gate.value}` : "";
+  const requirement = gateRequirementDetail(bot, gate.id, label);
+  const rawDetail = gate.detail || "";
+  const staleInactiveDetail =
+    rawDetail === "This specialist is not the current route." ||
+    rawDetail === "Edgewalker has not completed a strategy check yet.";
+  const detail =
+    status === "inactive" || !rawDetail || staleInactiveDetail
+      ? requirement
+      : `${requirement} Current status: ${rawDetail}${value}`;
+  return `
+    <span
+      class="gate-segment is-${escapeHtml(status)} tier-${escapeHtml(tier)} has-tooltip"
+      tabindex="0"
+      data-tooltip="${escapeHtml(detail)}"
+    >
+      <span>${escapeHtml(label)}</span>
+      <b>${escapeHtml(gateStatusGlyph(status))}</b>
+    </span>
+  `;
+}
+
+function gateRequirementDetail(bot, gateId, label) {
+  const botName = String(bot || "");
+  const id = String(gateId || "").toLowerCase();
+  const details = {
+    MomentumBot: {
+      route: "SOXL must route to Momentum Surge from UPTREND or a confirmed Surge override.",
+      authority: "Momentum authority must be active, or Surge must independently confirm.",
+      prior_close: "The setup must pass its previous-session-close guard before entry.",
+      setup: "A sustained momentum setup window must qualify.",
+      path: "SOXL path quality must show clean upside pressure instead of dirty tape.",
+      entry_bar: "The latest entry bar must confirm upside direction.",
+      cooldown: "No directional cooldown or session lockout can be active.",
+      position: "No open position or pending entry order can already occupy the slot.",
+    },
+    ChopBot: {
+      route: "SOXL must route to Chop Reversion from a SIDEWAYS regime.",
+      authority: "Chop Reversion permission must allow mean-reversion entries in this tape.",
+      permission: "Chop Reversion permission must allow mean-reversion entries in this tape.",
+      prior_close: "Chop Reversion does not use the previous-session-close gate.",
+      setup: "SOXL must trade at the configured discount below its slow SMA.",
+      path: "The active discount setup must remain compatible with chop behavior.",
+      entry_bar: "Chop entries do not require directional entry-bar confirmation.",
+      cooldown: "No cooldown or session lockout can be active.",
+      position: "No open position or pending entry order can already occupy the slot.",
+    },
+    InverseBot: {
+      route: "SOXS must route to Inverse Cascade from DOWNTREND or a confirmed Cascade override.",
+      authority: "Momentum authority must not be suppressing inverse entries.",
+      prior_close: "The cascade window must pass its previous-session-close guard before SOXS can enter.",
+      setup: "A sustained SOXL selloff and SOXS strength window must qualify.",
+      path: "SOXL path quality must show clean downside pressure instead of recovery noise.",
+      entry_bar: "The latest entry bar must not contradict the cascade direction.",
+      cooldown: "No cascade cooldown, re-entry lockout, or loss breaker can be active.",
+      position: "No open position or pending entry order can already occupy the slot.",
+    },
+  };
+  return (
+    details[botName]?.[id] ||
+    `The ${formatLabel(label || id || "gate")} gate must pass before entry.`
+  );
+}
+
+function strategyGateDescription(bot, displayName) {
+  const descriptions = {
+    MomentumBot:
+      "Momentum Surge is the SOXL upside lane. It waits for clean trend authority or a confirmed surge setup before joining strength.",
+    ChopBot:
+      "Chop Reversion is the SOXL mean-reversion lane. It looks for validated discounts in sideways tape while trend authority is absent.",
+    InverseBot:
+      "Inverse Cascade is the SOXS downside lane. It waits for a confirmed SOXL selloff cascade with prior-close and proven-state safeguards.",
+  };
+  return (
+    descriptions[String(bot || "")] ||
+    `${displayName || "This strategy"} describes one of Edgewalker's trade lanes.`
+  );
+}
+
+function gateStatusGlyph(status) {
+  return {
+    pass: "Pass",
+    armed: "Armed",
+    waiting: "Wait",
+    veto: "Veto",
+    inactive: "Idle",
+  }[status] || formatLabel(status);
+}
+
+function readinessStateClass(stateValue) {
+  return `is-${String(stateValue || "inactive").toLowerCase()}`;
+}
+
+function readinessToneClass(stateValue) {
+  if (stateValue === "Managing" || stateValue === "Ready") {
+    return "is-positive";
+  }
+  if (stateValue === "Blocked") {
+    return "is-negative";
+  }
+  return "is-neutral";
 }
 
 function savedTheme() {
@@ -5447,6 +5709,7 @@ function decisionReason(status) {
     };
   }
   const momentumReason =
+    status.entry_block_reason ||
     status.v9_momentum_context?.activation_reason ||
     status.v9_momentum_context?.invalidation_reason;
   if (momentumReason) {
@@ -5928,6 +6191,7 @@ function render(data) {
   renderBrokerState(data.broker_state);
   renderPriorCloseStatus(data.edgewalker_status);
   renderPerformance(data.performance);
+  renderSpecialistReadiness(data.edgewalker_status?.specialist_gates);
   renderOrderState(data.order_state);
   els.lastRun.textContent = formatTime(data.last_run_at, "Never");
   els.nextRun.textContent = formatNextCheck(data);

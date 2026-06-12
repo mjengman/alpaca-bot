@@ -166,8 +166,8 @@
                 <span class="specialist-build-separator" aria-hidden="true">·</span>
                 <span
                   class="has-tooltip"
-                  data-tooltip="SOXL chop specialist. Trades validated mean-reversion setups when momentum authority is absent."
-                  >Chop Firewall</span
+                  data-tooltip="SOXL mean-reversion specialist. Trades validated chop discounts when momentum authority is absent."
+                  >Chop Reversion</span
                 >
                 <span class="specialist-build-separator" aria-hidden="true">·</span>
                 <span
@@ -787,6 +787,35 @@
         </div>
       </section>
 
+      <section class="panel bot-performance-panel collapsible-panel">
+        <div class="section-head">
+          <h2
+            class="has-tooltip"
+            data-tooltip="Realized same-session performance split by Edgewalker specialist bot."
+          >
+            Specialist Performance
+          </h2>
+          <div class="section-actions">
+            <strong id="botPerformanceSummaryValue">No closed trades</strong>
+            <button
+              type="button"
+              class="log-toggle panel-collapse-toggle has-tooltip"
+              aria-expanded="true"
+              aria-controls="botPerformanceGrid"
+              data-collapse-target="#botPerformanceGrid"
+              data-collapse-key="bot-performance"
+              data-collapse-label="Specialist Performance"
+              data-tooltip="Hide Specialist Performance."
+            >
+              Hide
+            </button>
+          </div>
+        </div>
+        <div id="botPerformanceGrid" class="bot-performance-grid">
+          <div class="bot-performance-empty">No closed trades yet.</div>
+        </div>
+      </section>
+
       <section class="panel decision-panel collapsible-panel">
         <div class="section-head">
           <h2
@@ -922,32 +951,32 @@
         </div>
       </section>
 
-      <section class="panel bot-performance-panel collapsible-panel">
+      <section class="panel specialist-readiness-panel collapsible-panel">
         <div class="section-head">
           <h2
             class="has-tooltip"
-            data-tooltip="Realized same-session performance split by Edgewalker specialist bot."
+            data-tooltip="Structured gate telemetry for each strategy lane. Shows why a lane is managing, blocked, waiting, ready, or inactive."
           >
-            Specialist Performance
+            Strategy Gates
           </h2>
           <div class="section-actions">
-            <strong id="botPerformanceSummaryValue">No closed trades</strong>
+            <strong id="specialistReadinessSummaryValue">Waiting</strong>
             <button
               type="button"
               class="log-toggle panel-collapse-toggle has-tooltip"
               aria-expanded="true"
-              aria-controls="botPerformanceGrid"
-              data-collapse-target="#botPerformanceGrid"
-              data-collapse-key="bot-performance"
-              data-collapse-label="Specialist Performance"
-              data-tooltip="Hide Specialist Performance."
+              aria-controls="specialistReadinessBody"
+              data-collapse-target="#specialistReadinessBody"
+              data-collapse-key="strategy-gates"
+              data-collapse-label="Strategy Gates"
+              data-tooltip="Hide Strategy Gates."
             >
               Hide
             </button>
           </div>
         </div>
-        <div id="botPerformanceGrid" class="bot-performance-grid">
-          <div class="bot-performance-empty">No closed trades yet.</div>
+        <div id="specialistReadinessBody" class="specialist-readiness-grid">
+          <div class="specialist-readiness-empty">Waiting for strategy gate telemetry.</div>
         </div>
       </section>
 

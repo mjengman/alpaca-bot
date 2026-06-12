@@ -1910,6 +1910,68 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "no_entry_signal")
 
+    def test_status_reports_structured_specialist_gate_blocker(self) -> None:
+        client = FakeClient({"SOXL": bars("100", "101", "102")})
+
+        _output, status = self.run_bot(
+            client,
+            setup_state=self.survived_regime("UPTREND", minutes=12),
+            bot_config=replace(
+                config(),
+                momentum_authority_required=True,
+                momentum_surge_mode=bot_module.MOMENTUM_SURGE_MODE_OFF,
+            ),
+        )
+
+        momentum = status.specialist_gates[MOMENTUM_BOT]
+        authority_gate = {
+            gate["id"]: gate for gate in momentum["entry_gates"]
+        }["authority"]
+        self.assertEqual(status.entry_block_reason, V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON)
+        self.assertEqual(momentum["state"], "Blocked")
+        self.assertEqual(momentum["primary_message"], "Blocked by Authority")
+        self.assertEqual(authority_gate["status"], "veto")
+        self.assertEqual(authority_gate["tier"], "hard_veto")
+
+    def test_status_reports_managing_specialist_gate_state(self) -> None:
+        def setup_state(state_store: BotStateStore) -> None:
+            self.survived_regime("UPTREND", minutes=12)(state_store)
+            state_store.set_position_owner(SOXL, MOMENTUM_BOT)
+            state_store.set_high_water_mark(SOXL, Decimal("103"))
+
+        client = FakeClient(
+            {"SOXL": bars("100", "101", "102")},
+            positions={
+                SOXL: {
+                    "symbol": SOXL,
+                    "qty": "1.000000000",
+                    "avg_entry_price": "100",
+                    "current_price": "102",
+                    "market_value": "102",
+                    "unrealized_pl": "2",
+                    "unrealized_plpc": "0.02",
+                }
+            },
+        )
+
+        _output, status = self.run_bot(
+            client,
+            setup_state=setup_state,
+            bot_config=replace(
+                config(),
+                momentum_surge_mode=bot_module.MOMENTUM_SURGE_MODE_OFF,
+            ),
+        )
+
+        momentum = status.specialist_gates[MOMENTUM_BOT]
+        trail_gate = {gate["id"]: gate for gate in momentum["exit_gates"]}["trail"]
+        self.assertEqual(momentum["state"], "Managing")
+        self.assertEqual(momentum["primary_message"], "Managing SOXL position")
+        self.assertEqual(momentum["entry_gates"], [])
+        self.assertEqual(trail_gate["status"], "armed")
+        self.assertEqual(momentum["position"]["symbol"], SOXL)
+        self.assertEqual(momentum["position"]["trail_price"], "101.455")
+
     def test_v9_active_momentum_context_suppresses_inverse_entry(self) -> None:
         def setup_state(state_store: BotStateStore) -> None:
             self.survived_regime("DOWNTREND")(state_store)

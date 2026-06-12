@@ -1402,6 +1402,8 @@ class EdgeWalkerStatus:
     position_owner: str | None
     high_water_mark: str | None
     trailing_exit_price: str | None
+    entry_block_reason: str | None
+    specialist_gates: dict[str, Any] | None
     data_source: str | None
     data_feed: str | None
     data_status: str | None
@@ -2671,6 +2673,7 @@ class EdgeWalkerBot:
         self._latest_freshness = None
         self._adaptive_posture = None
         self._trend_trust = None
+        self._momentum_surge_context = None
         self._inverse_cascade_context = None
         clock = self.client.get_clock()
         account = self.client.get_account()
@@ -3117,6 +3120,7 @@ class EdgeWalkerBot:
                 positions,
                 False,
                 "no_entry_signal",
+                entry_block_reason=entry_decision.reason,
             )
 
         asset = self.client.get_asset(route.routed_symbol)
@@ -3163,6 +3167,7 @@ class EdgeWalkerBot:
                 positions,
                 False,
                 "insufficient_buying_power",
+                entry_block_reason="insufficient_buying_power",
             )
 
         allocation_text = (
@@ -3277,6 +3282,7 @@ class EdgeWalkerBot:
         positions: dict[str, dict[str, Any] | None],
         entry_signal: bool | None,
         action_taken: str,
+        entry_block_reason: str | None = None,
         regime_override: str | None = None,
     ) -> EdgeWalkerStatus:
         position_symbol, position = self._active_position(positions)
@@ -3299,6 +3305,18 @@ class EdgeWalkerBot:
         adaptive = self._adaptive_posture
         effective_directional_mode = self._current_effective_directional_mode()
         inverse_price = self._latest_status_price(SOXS)
+        specialist_gates = self._specialist_gate_telemetry(
+            signal,
+            route,
+            position_symbol,
+            position,
+            position_owner,
+            high_water_mark,
+            trailing_exit_price,
+            entry_signal,
+            action_taken,
+            entry_block_reason,
+        )
 
         return EdgeWalkerStatus(
             checked_at=checked_at,
@@ -3352,6 +3370,8 @@ class EdgeWalkerBot:
             position_owner=position_owner,
             high_water_mark=self._decimal_text(high_water_mark),
             trailing_exit_price=self._decimal_text(trailing_exit_price),
+            entry_block_reason=entry_block_reason,
+            specialist_gates=specialist_gates,
             data_source=data_status.get("data_source"),
             data_feed=data_status.get("data_feed"),
             data_status=data_status.get("data_status"),
@@ -3400,6 +3420,809 @@ class EdgeWalkerBot:
                 return None
             return self._adaptive_posture.selected_mode
         return self.config.directional_mode
+
+    def _specialist_gate_telemetry(
+        self,
+        signal: RegimeSignal | None,
+        route: BotRoute | None,
+        position_symbol: str | None,
+        position: dict[str, Any] | None,
+        position_owner: str | None,
+        high_water_mark: Decimal | None,
+        trailing_exit_price: Decimal | None,
+        entry_signal: bool | None,
+        action_taken: str,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        del signal
+        return {
+            bot_name: self._specialist_gate_card(
+                bot_name,
+                route,
+                position_symbol,
+                position,
+                position_owner,
+                high_water_mark,
+                trailing_exit_price,
+                entry_signal,
+                action_taken,
+                entry_block_reason,
+            )
+            for bot_name in (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
+        }
+
+    def _specialist_gate_card(
+        self,
+        bot_name: str,
+        route: BotRoute | None,
+        position_symbol: str | None,
+        position: dict[str, Any] | None,
+        position_owner: str | None,
+        high_water_mark: Decimal | None,
+        trailing_exit_price: Decimal | None,
+        entry_signal: bool | None,
+        action_taken: str,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        managing = self._specialist_manages_position(
+            bot_name,
+            position_symbol,
+            position_owner,
+        )
+        route_relevant = bool(route and route.active_bot == bot_name)
+        if managing:
+            exit_gates = self._specialist_exit_gates(
+                bot_name,
+                route,
+                position_symbol,
+                position,
+                high_water_mark,
+                trailing_exit_price,
+            )
+            return {
+                "display_name": self._specialist_display_name(bot_name),
+                "state": "Managing",
+                "state_rank": 1,
+                "route_relevant": route_relevant,
+                "primary_message": f"Managing {position_symbol or 'position'} position",
+                "position": self._specialist_position_payload(
+                    position_symbol,
+                    position,
+                    high_water_mark,
+                    trailing_exit_price,
+                ),
+                "entry_gates": [],
+                "exit_gates": exit_gates,
+            }
+
+        entry_gates = self._specialist_entry_gates(
+            bot_name,
+            route,
+            position_symbol,
+            entry_signal,
+            action_taken,
+            entry_block_reason,
+        )
+        if not route_relevant:
+            state = "Inactive"
+        elif entry_signal is True:
+            state = "Ready"
+        elif any(gate.get("status") == "veto" for gate in entry_gates):
+            state = "Blocked"
+        else:
+            state = "Waiting"
+
+        return {
+            "display_name": self._specialist_display_name(bot_name),
+            "state": state,
+            "state_rank": self._specialist_state_rank(state),
+            "route_relevant": route_relevant,
+            "primary_message": self._specialist_primary_message(state, entry_gates),
+            "position": None,
+            "entry_gates": entry_gates,
+            "exit_gates": [],
+        }
+
+    def _specialist_entry_gates(
+        self,
+        bot_name: str,
+        route: BotRoute | None,
+        position_symbol: str | None,
+        entry_signal: bool | None,
+        action_taken: str,
+        entry_block_reason: str | None,
+    ) -> list[dict[str, Any]]:
+        route_relevant = bool(route and route.active_bot == bot_name)
+        if not route_relevant:
+            return [
+                self._specialist_gate(
+                    gate_id,
+                    label,
+                    "inactive",
+                    tier,
+                    self._specialist_gate_requirement_detail(bot_name, gate_id),
+                )
+                for gate_id, label, tier in self._specialist_gate_template(bot_name)
+            ]
+
+        return [
+            self._route_gate(bot_name, route),
+            self._authority_gate(bot_name, entry_block_reason),
+            self._prior_close_gate(bot_name),
+            self._setup_window_gate(bot_name, entry_signal, entry_block_reason),
+            self._path_quality_gate(bot_name, entry_block_reason),
+            self._entry_bar_gate(bot_name),
+            self._cooldown_gate(entry_block_reason),
+            self._position_clear_gate(position_symbol, action_taken, entry_block_reason),
+        ]
+
+    def _specialist_gate_template(
+        self,
+        bot_name: str,
+    ) -> tuple[tuple[str, str, str], ...]:
+        if bot_name == CHOP_BOT:
+            return (
+                ("route", "Route", "required"),
+                ("permission", "Permission", "hard_veto"),
+                ("prior_close", "Prior Close", "quality"),
+                ("setup", "Setup", "required"),
+                ("path", "Path", "quality"),
+                ("entry_bar", "Entry Bar", "quality"),
+                ("cooldown", "Cooldown", "required"),
+                ("position", "Position", "required"),
+            )
+        return (
+            ("route", "Route", "required"),
+            ("authority", "Authority", "hard_veto"),
+            ("prior_close", "Prior Close", "hard_veto"),
+            ("setup", "Setup", "required"),
+            ("path", "Path", "quality"),
+            ("entry_bar", "Entry Bar", "quality"),
+            ("cooldown", "Cooldown", "required"),
+            ("position", "Position", "required"),
+        )
+
+    def _route_gate(self, bot_name: str, route: BotRoute | None) -> dict[str, Any]:
+        routed_symbol = route.routed_symbol if route else None
+        expected_symbol = SOXS if bot_name == INVERSE_BOT else SOXL
+        if route and route.active_bot == bot_name and routed_symbol == expected_symbol:
+            return self._specialist_gate(
+                "route",
+                "Route",
+                "pass",
+                "required",
+                f"{self._specialist_display_name(bot_name)} owns the live route.",
+                expected_symbol,
+            )
+        return self._specialist_gate(
+            "route",
+            "Route",
+            "veto",
+            "required",
+            "The live route does not point at this specialist.",
+            routed_symbol or "NONE",
+        )
+
+    def _authority_gate(
+        self,
+        bot_name: str,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        if bot_name == MOMENTUM_BOT:
+            if self._momentum_surge_context and not self._momentum_surge_context.get(
+                "reasons"
+            ):
+                return self._specialist_gate(
+                    "authority",
+                    "Authority",
+                    "pass",
+                    "hard_veto",
+                    "Momentum Surge context is confirmed.",
+                )
+            if not self.config.momentum_authority_required:
+                return self._specialist_gate(
+                    "authority",
+                    "Authority",
+                    "pass",
+                    "hard_veto",
+                    "Momentum authority is not required by this build.",
+                )
+            context = self._v9_momentum_context_for_status() or {}
+            if context.get("active") and not context.get("invalidated"):
+                return self._specialist_gate(
+                    "authority",
+                    "Authority",
+                    "pass",
+                    "hard_veto",
+                    "Momentum authority is active.",
+                    context.get("trend_trust_score"),
+                )
+            reason = (
+                context.get("invalidation_reason")
+                or context.get("activation_reason")
+                or entry_block_reason
+                or MOMENTUM_AUTHORITY_REQUIRED_REASON
+            )
+            return self._specialist_gate(
+                "authority",
+                "Authority",
+                "veto",
+                "hard_veto",
+                f"Momentum authority is closed: {self._gate_reason_label(reason)}.",
+            )
+
+        if bot_name == CHOP_BOT:
+            if entry_block_reason == CHOP_PERMISSION_SUPPRESSION_REASON:
+                return self._specialist_gate(
+                    "permission",
+                    "Permission",
+                    "veto",
+                    "hard_veto",
+                    "Chop Reversion permission gate is blocking this entry.",
+                    self.config.chop_permission_mode,
+                )
+            return self._specialist_gate(
+                "permission",
+                "Permission",
+                "pass",
+                "hard_veto",
+                "Chop Reversion permission is clear.",
+                self.config.chop_permission_mode,
+            )
+
+        if entry_block_reason == V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON:
+            return self._specialist_gate(
+                "authority",
+                "Authority",
+                "veto",
+                "hard_veto",
+                "Momentum authority is suppressing inverse entries.",
+            )
+        return self._specialist_gate(
+            "authority",
+            "Authority",
+            "pass",
+            "hard_veto",
+            "No opposing authority is suppressing Inverse Cascade.",
+        )
+
+    def _prior_close_gate(self, bot_name: str) -> dict[str, Any]:
+        if bot_name == CHOP_BOT:
+            return self._specialist_gate(
+                "prior_close",
+                "Prior Close",
+                "inactive",
+                "quality",
+                "Chop Reversion does not use the prior-close gate.",
+            )
+        context = self._specialist_setup_context(bot_name) or {}
+        reasons = self._context_reasons(context)
+        if "source_prior_close_unavailable" in reasons:
+            return self._specialist_gate(
+                "prior_close",
+                "Prior Close",
+                "veto",
+                "hard_veto",
+                "Previous-session close is unavailable, so this gate fails closed.",
+            )
+        if any(reason.endswith("_prior_close_above_surge_max") for reason in reasons) or (
+            "source_prior_close_above_cascade_max" in reasons
+        ):
+            return self._specialist_gate(
+                "prior_close",
+                "Prior Close",
+                "veto",
+                "hard_veto",
+                "The setup started too high versus the previous-session close.",
+                self._prior_close_context_value(bot_name, context),
+            )
+        if context:
+            return self._specialist_gate(
+                "prior_close",
+                "Prior Close",
+                "pass",
+                "hard_veto",
+                "Previous-session close is available and accepted.",
+                self._prior_close_context_value(bot_name, context),
+            )
+        return self._specialist_gate(
+            "prior_close",
+            "Prior Close",
+            "waiting",
+            "hard_veto",
+            "This gate is checked when the specialist setup window evaluates.",
+        )
+
+    def _setup_window_gate(
+        self,
+        bot_name: str,
+        entry_signal: bool | None,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        if bot_name == CHOP_BOT:
+            if entry_signal is True:
+                return self._specialist_gate(
+                    "setup",
+                    "Setup",
+                    "pass",
+                    "required",
+                    "Chop discount setup is confirmed.",
+                )
+            if entry_block_reason in {"price_above_mean", "discount_insufficient"}:
+                return self._specialist_gate(
+                    "setup",
+                    "Setup",
+                    "waiting",
+                    "required",
+                    f"Chop setup is waiting: {self._gate_reason_label(entry_block_reason)}.",
+                )
+            return self._specialist_gate(
+                "setup",
+                "Setup",
+                "pass",
+                "required",
+                "SIDEWAYS route is active; Chop setup can evaluate.",
+            )
+
+        context = self._specialist_setup_context(bot_name) or {}
+        reasons = self._context_reasons(context)
+        if "sustained_window_insufficient_bars" in reasons:
+            return self._specialist_gate(
+                "setup",
+                "Setup",
+                "waiting",
+                "required",
+                "Waiting for enough one-minute bars in the sustained setup window.",
+                context.get("sustained_window_minutes"),
+            )
+        after_window_reason = (
+            "momentum_surge_after_entry_window"
+            if bot_name == MOMENTUM_BOT
+            else "inverse_cascade_after_entry_window"
+        )
+        if after_window_reason in reasons:
+            return self._specialist_gate(
+                "setup",
+                "Setup",
+                "veto",
+                "required",
+                "The specialist entry window has closed.",
+            )
+        if context and not reasons:
+            return self._specialist_gate(
+                "setup",
+                "Setup",
+                "pass",
+                "required",
+                "Sustained setup window is confirmed.",
+                context.get("sustained_window_minutes"),
+            )
+        if context and reasons:
+            return self._specialist_gate(
+                "setup",
+                "Setup",
+                "waiting",
+                "required",
+                f"Setup is not confirmed: {self._gate_reason_label(reasons[0])}.",
+            )
+        return self._specialist_gate(
+            "setup",
+            "Setup",
+            "waiting",
+            "required",
+            "Waiting for a qualified setup window.",
+        )
+
+    def _path_quality_gate(
+        self,
+        bot_name: str,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        if bot_name == CHOP_BOT:
+            return self._specialist_gate(
+                "path",
+                "Path",
+                "pass",
+                "quality",
+                "Chop path quality is governed by the active discount setup.",
+            )
+
+        context = self._specialist_setup_context(bot_name) or {}
+        reasons = self._context_reasons(context)
+        path_reasons = [
+            reason
+            for reason in reasons
+            if any(
+                token in reason
+                for token in (
+                    "drawdown",
+                    "recovery",
+                    "velocity",
+                    "deepening",
+                    "path_ratio",
+                    "direction_changes",
+                    "new_high_pressure",
+                    "new_low_pressure",
+                    "current_below",
+                    "current_above",
+                    "not_sustained",
+                    "window_start",
+                )
+            )
+        ]
+        if entry_block_reason in {
+            "v8_noisy_water_filter",
+            "trend_strength_weakening",
+            "directional_strength_below_minimum",
+            "already_extended_above_fast_sma",
+            "momentum_drawdown_with_dirty_tape",
+        }:
+            path_reasons.append(entry_block_reason)
+        if path_reasons:
+            return self._specialist_gate(
+                "path",
+                "Path",
+                "veto",
+                "quality",
+                f"Path quality is not clean: {self._gate_reason_label(path_reasons[0])}.",
+            )
+        if context:
+            return self._specialist_gate(
+                "path",
+                "Path",
+                "pass",
+                "quality",
+                "Path quality checks are passing.",
+            )
+        return self._specialist_gate(
+            "path",
+            "Path",
+            "waiting",
+            "quality",
+            "Waiting for path quality evidence.",
+        )
+
+    def _entry_bar_gate(self, bot_name: str) -> dict[str, Any]:
+        if bot_name == CHOP_BOT:
+            return self._specialist_gate(
+                "entry_bar",
+                "Entry Bar",
+                "pass",
+                "quality",
+                "Chop entries do not require a directional entry-bar check.",
+            )
+
+        context = self._specialist_setup_context(bot_name) or {}
+        reasons = self._context_reasons(context)
+        entry_bar_reasons = [
+            reason
+            for reason in reasons
+            if "entry_bar" in reason or reason.endswith("_not_up") or reason.endswith("_not_down")
+        ]
+        if entry_bar_reasons:
+            return self._specialist_gate(
+                "entry_bar",
+                "Entry Bar",
+                "veto",
+                "quality",
+                f"Entry bar confirmation failed: {self._gate_reason_label(entry_bar_reasons[0])}.",
+            )
+        if context:
+            return self._specialist_gate(
+                "entry_bar",
+                "Entry Bar",
+                "pass",
+                "quality",
+                "Entry bar confirms the specialist direction.",
+            )
+        return self._specialist_gate(
+            "entry_bar",
+            "Entry Bar",
+            "waiting",
+            "quality",
+            "Waiting for entry-bar confirmation.",
+        )
+
+    def _cooldown_gate(self, entry_block_reason: str | None) -> dict[str, Any]:
+        if entry_block_reason and entry_block_reason.startswith(
+            "directional_cooldown_active_"
+        ):
+            return self._specialist_gate(
+                "cooldown",
+                "Cooldown",
+                "waiting",
+                "required",
+                f"Directional cooldown is active: {self._gate_reason_label(entry_block_reason)}.",
+            )
+        if entry_block_reason in {
+            "inverse_cascade_reentry_locked",
+            "inverse_cascade_stopped_out_session_locked",
+            "v7_route_invalidation_breaker",
+            "v7_inverse_loss_breaker",
+            "v7_bot_loss_breaker",
+        }:
+            return self._specialist_gate(
+                "cooldown",
+                "Cooldown",
+                "veto",
+                "required",
+                f"Session lockout is active: {self._gate_reason_label(entry_block_reason)}.",
+            )
+        return self._specialist_gate(
+            "cooldown",
+            "Cooldown",
+            "pass",
+            "required",
+            "No cooldown or session lockout is blocking this specialist.",
+        )
+
+    def _position_clear_gate(
+        self,
+        position_symbol: str | None,
+        action_taken: str,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        if position_symbol:
+            return self._specialist_gate(
+                "position",
+                "Position",
+                "veto",
+                "required",
+                f"A {position_symbol} position is already open.",
+                position_symbol,
+            )
+        if action_taken == "wait_for_open_order":
+            return self._specialist_gate(
+                "position",
+                "Position",
+                "waiting",
+                "required",
+                "A buy order is already pending.",
+            )
+        if entry_block_reason == "insufficient_buying_power":
+            return self._specialist_gate(
+                "position",
+                "Position",
+                "veto",
+                "required",
+                "Buying power is insufficient for the configured position size.",
+            )
+        return self._specialist_gate(
+            "position",
+            "Position",
+            "pass",
+            "required",
+            "No open position or pending order blocks entry.",
+        )
+
+    def _specialist_exit_gates(
+        self,
+        bot_name: str,
+        route: BotRoute | None,
+        position_symbol: str | None,
+        position: dict[str, Any] | None,
+        high_water_mark: Decimal | None,
+        trailing_exit_price: Decimal | None,
+    ) -> list[dict[str, Any]]:
+        del high_water_mark
+        route_valid = bool(
+            route
+            and route.active_bot == bot_name
+            and route.routed_symbol == position_symbol
+        )
+        gates = [
+            self._specialist_gate(
+                "trail",
+                "Trail",
+                "armed" if trailing_exit_price is not None else "waiting",
+                "required",
+                (
+                    f"Trailing stop is active at ${self._decimal_text(trailing_exit_price)}."
+                    if trailing_exit_price is not None
+                    else "Waiting for a high-water mark before showing trail protection."
+                ),
+                self._decimal_text(trailing_exit_price),
+            ),
+            self._specialist_gate(
+                "route",
+                "Route",
+                "pass" if route_valid else "waiting",
+                "required",
+                (
+                    "Route remains valid for the current position owner."
+                    if route_valid
+                    else "Route currently points elsewhere; exit logic decides whether to hold or close."
+                ),
+                route.active_bot if route else "NONE",
+            ),
+            self._specialist_gate(
+                "position",
+                "Position",
+                "armed",
+                "required",
+                "Open position is under active risk management.",
+                position_symbol or (position.get("symbol") if position else None),
+            ),
+        ]
+        return gates
+
+    def _specialist_position_payload(
+        self,
+        position_symbol: str | None,
+        position: dict[str, Any] | None,
+        high_water_mark: Decimal | None,
+        trailing_exit_price: Decimal | None,
+    ) -> dict[str, Any] | None:
+        if not position_symbol or not position:
+            return None
+        qty = self._position_qty(position)
+        entry_price = self._position_optional_decimal(position, "avg_entry_price")
+        current_price = self._position_optional_decimal(position, "current_price")
+        pl_dollars = self._position_optional_decimal(position, "unrealized_pl")
+        pl_fraction = self._position_optional_decimal(position, "unrealized_plpc")
+        pl_percent = pl_fraction * Decimal("100") if pl_fraction is not None else None
+        trail_pl = None
+        if (
+            trailing_exit_price is not None
+            and entry_price is not None
+            and qty is not None
+        ):
+            trail_pl = (trailing_exit_price - entry_price) * qty
+        mfe_percent = None
+        if (
+            high_water_mark is not None
+            and entry_price is not None
+            and entry_price > 0
+        ):
+            mfe_percent = (high_water_mark - entry_price) / entry_price * Decimal("100")
+        return {
+            "symbol": position_symbol,
+            "qty": self._decimal_text(qty),
+            "pl_dollars": self._decimal_text(pl_dollars),
+            "pl_percent": self._decimal_text(pl_percent),
+            "entry_price": self._decimal_text(entry_price),
+            "current_price": self._decimal_text(current_price),
+            "high_water_mark": self._decimal_text(high_water_mark),
+            "trail_price": self._decimal_text(trailing_exit_price),
+            "trail_pl_dollars": self._decimal_text(trail_pl),
+            "mfe_percent": self._decimal_text(mfe_percent),
+        }
+
+    def _specialist_manages_position(
+        self,
+        bot_name: str,
+        position_symbol: str | None,
+        position_owner: str | None,
+    ) -> bool:
+        if not position_symbol:
+            return False
+        if position_owner:
+            return position_owner == bot_name
+        if position_symbol == SOXS:
+            return bot_name == INVERSE_BOT
+        return False
+
+    def _specialist_setup_context(self, bot_name: str) -> dict[str, Any] | None:
+        if bot_name == MOMENTUM_BOT:
+            return self._momentum_surge_context
+        if bot_name == INVERSE_BOT:
+            return self._inverse_cascade_context
+        return None
+
+    def _context_reasons(self, context: dict[str, Any]) -> list[str]:
+        reasons = context.get("reasons")
+        if not isinstance(reasons, list):
+            return []
+        return [str(reason) for reason in reasons]
+
+    def _prior_close_context_value(
+        self,
+        bot_name: str,
+        context: dict[str, Any],
+    ) -> str | None:
+        key = (
+            "soxl_pct_vs_prior_close_at_momentum_window_start"
+            if bot_name == MOMENTUM_BOT
+            else "soxl_pct_vs_prior_close_at_cascade_window_start"
+        )
+        value = context.get(key)
+        return f"{self._decimal_text(value)}%" if isinstance(value, Decimal) else None
+
+    def _specialist_primary_message(
+        self,
+        state: str,
+        gates: list[dict[str, Any]],
+    ) -> str:
+        if state == "Ready":
+            return "All core gates are passing"
+        if state == "Inactive":
+            return "Not the current route"
+        if state == "Blocked":
+            gate = next((item for item in gates if item.get("status") == "veto"), None)
+            if gate:
+                return f"Blocked by {gate.get('label')}"
+            return "Blocked"
+        gate = next((item for item in gates if item.get("status") == "waiting"), None)
+        if gate:
+            return f"Waiting on {gate.get('label')}"
+        return "Evaluating gates"
+
+    def _specialist_state_rank(self, state: str) -> int:
+        return {
+            "Managing": 1,
+            "Blocked": 2,
+            "Ready": 3,
+            "Waiting": 4,
+            "Inactive": 5,
+        }.get(state, 5)
+
+    def _specialist_display_name(self, bot_name: str) -> str:
+        return {
+            MOMENTUM_BOT: "Momentum Surge",
+            CHOP_BOT: "Chop Reversion",
+            INVERSE_BOT: "Inverse Cascade",
+        }.get(bot_name, bot_name)
+
+    def _specialist_gate_requirement_detail(self, bot_name: str, gate_id: str) -> str:
+        gate_details = {
+            MOMENTUM_BOT: {
+                "route": "SOXL must be routed to Momentum Surge from an UPTREND or qualified surge override.",
+                "authority": "Momentum authority must be active, or the Surge lane must independently confirm.",
+                "prior_close": "The setup must pass its previous-session-close guard before a surge entry is allowed.",
+                "setup": "A sustained momentum setup window must qualify before the specialist can fire.",
+                "path": "SOXL path quality must show clean upside pressure instead of dirty tape.",
+                "entry_bar": "The latest entry bar must confirm the upside direction.",
+                "cooldown": "No directional cooldown or session lockout may be active.",
+                "position": "No open position or pending entry order may already be using the slot.",
+            },
+            CHOP_BOT: {
+                "route": "SOXL must be routed to Chop Reversion from a SIDEWAYS regime.",
+                "permission": "Chop Reversion permission must allow mean-reversion entries in the current tape.",
+                "prior_close": "Chop Reversion does not use the previous-session-close gate.",
+                "setup": "SOXL must trade at the configured discount below its slow SMA.",
+                "path": "The active discount setup must remain compatible with chop behavior.",
+                "entry_bar": "Chop entries do not require a directional entry-bar confirmation.",
+                "cooldown": "No cooldown or session lockout may be active.",
+                "position": "No open position or pending entry order may already be using the slot.",
+            },
+            INVERSE_BOT: {
+                "route": "SOXS must be routed to Inverse Cascade from a DOWNTREND or qualified cascade override.",
+                "authority": "No active Momentum authority may be suppressing inverse entries.",
+                "prior_close": "The cascade window must pass its previous-session-close guard before SOXS can enter.",
+                "setup": "A sustained SOXL selloff / SOXS strength window must qualify.",
+                "path": "SOXL path quality must show clean downside pressure instead of recovery noise.",
+                "entry_bar": "The latest entry bar must not contradict the cascade direction.",
+                "cooldown": "No cascade cooldown, re-entry lockout, or loss breaker may be active.",
+                "position": "No open position or pending entry order may already be using the slot.",
+            },
+        }
+        return gate_details.get(bot_name, {}).get(
+            gate_id,
+            "This gate must pass before the specialist can enter.",
+        )
+
+    def _specialist_gate(
+        self,
+        gate_id: str,
+        label: str,
+        status: str,
+        tier: str,
+        detail: str,
+        value: Any = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "id": gate_id,
+            "label": label,
+            "status": status,
+            "tier": tier,
+            "detail": detail,
+        }
+        if value not in (None, ""):
+            payload["value"] = str(value)
+        return payload
+
+    def _gate_reason_label(self, reason: Any) -> str:
+        return str(reason or "not qualified").replace("_", " ")
 
     def _active_position(
         self,
@@ -4059,6 +4882,7 @@ class EdgeWalkerBot:
         context = self._momentum_surge_context_for_mode()
         context["base_route_bot"] = route.active_bot
         context["base_route_symbol"] = route.routed_symbol
+        self._momentum_surge_context = context
         reasons = context.get("reasons") or []
         if reasons:
             print(
@@ -4073,7 +4897,6 @@ class EdgeWalkerBot:
             )
             return route
 
-        self._momentum_surge_context = context
         print(
             "[MOMENTUM] Surge candidate qualified: "
             f"mode={context.get('mode')} "
@@ -4399,6 +5222,7 @@ class EdgeWalkerBot:
         self._inverse_cascade_maybe_reset_state(context)
         context["base_route_bot"] = route.active_bot
         context["base_route_symbol"] = route.routed_symbol
+        self._inverse_cascade_context = context
         reasons = context.get("reasons") or []
         thresholds = context.get("thresholds") or {}
         if (
@@ -4424,7 +5248,6 @@ class EdgeWalkerBot:
             )
             return route
 
-        self._inverse_cascade_context = context
         self._inverse_cascade_clear_invalidation_state()
         print(
             "[INVERSE] Cascade candidate qualified: "

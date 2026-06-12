@@ -1635,6 +1635,7 @@ button:disabled {
 }
 
 .bot-performance-panel,
+.specialist-readiness-panel,
 .order-panel,
 .telemetry-panel {
   margin: 10px 0;
@@ -1721,6 +1722,196 @@ button:disabled {
 
 .bot-performance-empty {
   padding: 16px;
+}
+
+.specialist-readiness-grid {
+  display: grid;
+  gap: 0;
+}
+
+.specialist-gate-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.specialist-gate-card:first-child {
+  border-top: 0;
+}
+
+.specialist-gate-head {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr) minmax(120px, auto);
+  gap: 14px;
+  align-items: center;
+}
+
+.specialist-gate-head > div {
+  display: grid;
+  gap: 4px;
+  grid-column: 2;
+  justify-items: center;
+  min-width: 0;
+  text-align: center;
+}
+
+.specialist-gate-head > b {
+  grid-column: 3;
+  justify-self: end;
+}
+
+.specialist-gate-head span,
+.managing-metric span,
+.gate-segment span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.specialist-gate-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.02rem;
+}
+
+.specialist-gate-head b {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.specialist-gate-card.is-managing .specialist-gate-head b,
+.specialist-gate-card.is-ready .specialist-gate-head b {
+  border-color: color-mix(in srgb, var(--green) 42%, var(--line));
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.specialist-gate-card.is-blocked .specialist-gate-head b {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.specialist-gate-card.is-waiting .specialist-gate-head b {
+  border-color: color-mix(in srgb, var(--amber) 42%, var(--line));
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.gate-strip {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(96px, 1fr));
+  gap: 5px;
+  width: 100%;
+}
+
+.gate-strip.is-exit {
+  grid-template-columns: repeat(3, minmax(96px, 1fr));
+}
+
+.gate-segment {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 52px;
+  padding: 7px 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input);
+  text-align: center;
+}
+
+.gate-segment b {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.gate-segment.is-pass,
+.gate-segment.is-armed {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--line));
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.gate-segment.is-pass b,
+.gate-segment.is-armed b {
+  color: var(--green-deep);
+}
+
+.gate-segment.is-waiting {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--line));
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.gate-segment.is-waiting b {
+  color: var(--amber);
+}
+
+.gate-segment.is-veto {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.gate-segment.is-veto b {
+  color: var(--danger);
+}
+
+.gate-segment.is-inactive {
+  color: var(--muted);
+  opacity: 0.62;
+}
+
+.gate-segment.tier-hard_veto:not(.is-inactive) {
+  box-shadow: inset 0 3px 0 currentColor;
+}
+
+.managing-readiness {
+  display: grid;
+  gap: 10px;
+}
+
+.managing-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.managing-metric {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input);
+  text-align: center;
+}
+
+.managing-metric strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.specialist-readiness-empty,
+.gate-empty {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 .order-grid {
@@ -2150,9 +2341,19 @@ body.live-paper .metric:first-child {
   .decision-lead,
   .decision-grid,
   .bot-performance-grid,
+  .gate-strip,
+  .managing-metrics,
   .research-bot-grid,
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gate-strip.is-exit {
+    grid-template-columns: repeat(3, minmax(96px, 1fr));
+  }
+
+  .gate-strip {
+    grid-template-columns: repeat(4, minmax(96px, 1fr));
   }
 
   .order-grid {
@@ -2296,9 +2497,16 @@ body.live-paper .metric:first-child {
   .decision-lead,
   .decision-grid,
   .bot-performance-grid,
+  .gate-strip,
+  .gate-strip.is-exit,
+  .managing-metrics,
   .research-bot-grid,
   .metrics {
     grid-template-columns: 1fr;
+  }
+
+  .gate-segment {
+    width: 100%;
   }
 
   .order-row {

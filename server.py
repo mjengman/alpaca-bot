@@ -91,7 +91,7 @@ NY_TZ = ZoneInfo("America/New_York")
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 SPECIALIST_DISPLAY_NAMES = {
     MOMENTUM_BOT: "Momentum Surge",
-    CHOP_BOT: "Chop Firewall",
+    CHOP_BOT: "Chop Reversion",
     INVERSE_BOT: "Inverse Cascade",
 }
 LOCKED_FULL_ROSTER_PROFILE = "FULL_ROSTER_LOCKED"

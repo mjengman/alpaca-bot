@@ -1978,7 +1978,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(row["build_profile"], "FULL_ROSTER_LOCKED")
         self.assertEqual(
             row["enabled_specialists"],
-            "Momentum Surge | Chop Firewall | Inverse Cascade",
+            "Momentum Surge | Chop Reversion | Inverse Cascade",
         )
         self.assertEqual(row["starting_account_value"], 1000.0)
         self.assertEqual(row["ending_account_value"], 1140.0)
