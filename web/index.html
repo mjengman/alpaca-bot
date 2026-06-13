@@ -1706,9 +1706,32 @@
             </label>
           </section>
 
+          <section class="settings-group notification-delivery-group">
+            <div class="settings-group-head">
+              <h3>Delivery State</h3>
+            </div>
+            <div class="notification-delivery-grid">
+              <div class="notification-delivery-card">
+                <span>Last sent</span>
+                <strong id="notificationLastSentValue">None</strong>
+              </div>
+              <div class="notification-delivery-card">
+                <span>Last failure</span>
+                <strong id="notificationLastFailureValue">None</strong>
+              </div>
+              <div class="notification-delivery-card">
+                <span>Cooldown</span>
+                <strong id="notificationCooldownValue">Clear</strong>
+              </div>
+            </div>
+          </section>
+
           <div class="settings-actions">
             <button id="notificationTest" type="button" class="log-toggle">
               Send Test Email
+            </button>
+            <button id="notificationEodNow" type="button" class="log-toggle">
+              Send EOD Summary
             </button>
             <button id="notificationsSave" type="button" class="primary">
               Save Notification Settings

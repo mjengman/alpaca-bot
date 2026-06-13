@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-06-10
+Last updated: 2026-06-13
 
 Initial go-live: 2026-06-04
 
@@ -128,6 +128,30 @@ Current V1 assumptions:
   remains one-minute bars.
 - Research rows should capture an explicit starting account so P/L, bot P/L,
   and exit-reason P/L can be scaled consistently against live rows.
+
+## Current Instrumentation Baseline
+
+As of 2026-06-13, the live app has several operator-trust upgrades that should
+be treated as the new baseline before further tuning:
+
+- Strategy Gates expose structured gate telemetry for Momentum Surge, Chop
+  Reversion, and Inverse Cascade. This makes "why did it not trade?" visible
+  without reading logs.
+- Prior-close anchors preload during startup/warmup, and telemetry distinguishes
+  `Loaded`, `Pending`, and `Unavailable` instead of the older ambiguous
+  `Guarded` label.
+- Session accounting separates signal cycles from faster active-position risk
+  scans, so regime-churn narratives do not get diluted by 5-second risk
+  management loops.
+- Deterministic local narratives generate 1D and multi-day AARs from structured
+  session rows. They are readable enough for operator use while remaining
+  fact-bound and avoiding one-session tuning advice.
+- EOD notification emails reuse the deterministic narrative sections, and the
+  notification settings surface shows last sent event, last failure, active
+  cooldown, and manual EOD-summary recovery.
+
+These are transparency upgrades, not strategy promotions. They should make live
+evidence easier to interpret without changing the locked production doctrine.
 
 ## Environmental Classification Research
 
@@ -1050,31 +1074,33 @@ Acceptance criteria:
 
 ### 2. Upgrade Daily Narrative V2
 
-Status: strongly consider
+Status: deterministic foundation implemented; continue enriching
 
 Impact: high
 
 Why:
 
-The 1D narrative is useful, but it is still mostly descriptive. Before live
-trading, the debrief should assess whether the system behaved correctly, not
-only whether it made money.
+The narrative should assess whether the system behaved correctly, not only
+whether it made money. The current implementation now uses deterministic story
+beats instead of asking a model to infer causality from raw numbers.
 
-Add sections:
+Implemented sections:
 
-- `Session Identity`
-- `Scorecard`
-- `What The Logs Support`
-- `Bot Behavior`
+- `TL;DR`
+- `Highlight`
+- `Bot/Strategy Performance`
+- `Market Conditions`
 - `Operational Health`
-- `Behavioral Assessment`
-- `Interpretation`
-- `Watchlist`
+- `Analysis`
 - `Bottom Line`
-- `Narrative Confidence`
+
+Future optional sections:
+
 - `Key Policy Decisions`
 - `Top Constraints`
-- `Tuning Candidates`
+- `Watchlist`
+- `Narrative Confidence`
+- `Tuning Candidates`, only when supported by multi-session evidence
 
 Example behavioral assessment:
 
@@ -1086,15 +1112,18 @@ closed stale exposure when regime ownership no longer matched the open position.
 
 Acceptance criteria:
 
-- Narrative separates facts, interpretation, operational health, watchlist, and
-  confidence instead of blending them into a generic prose recap.
-- Narrative explicitly states the active mode and whether Adaptive was active or
-  shadow-only.
-- Narrative distinguishes execution health from data health, especially when
-  stale bars were observed but safely handled.
-- Narrative distinguishes market opportunity from system authorization.
-- Narrative identifies intentional inactivity.
-- Narrative confidence explains uncertainty, especially on low-trade days.
+- [x] Narrative separates facts, interpretation, operational health, and bottom
+  line instead of blending them into a generic prose recap.
+- [x] Narrative distinguishes execution health from data health, especially
+  when stale bars were observed but safely handled.
+- [x] Narrative distinguishes market opportunity from system authorization.
+- [x] Narrative identifies intentional inactivity.
+- [x] Narrative avoids parameter-change advice from one session.
+- [x] Narrative headers expose the source (`Local`, `OpenAI`, or `Cached`).
+- [x] Multi-day narratives aggregate structured rows without sending raw logs to
+  OpenAI.
+- [ ] Future enrichment: explicit confidence scoring and watchlist language
+  gated by multi-session evidence.
 
 ### 3. Make Fresh-Cross Doctrine Explicit
 
@@ -1152,6 +1181,8 @@ Acceptance criteria:
 
 - [x] End-of-day summary shows whether stale-bar cycles occurred.
 - [x] Stale data is reported as a handled guardrail, not as silent non-trading.
+- [x] Dashboard data-health tooltip separates bars, quotes, trades, feed, and
+  stream state.
 - [ ] Future enrichment: total stale duration, max bar age, and average bar age.
 
 ### 5. Add Regime Churn Metrics
@@ -1178,6 +1209,7 @@ Metrics:
 Acceptance criteria:
 
 - [x] Daily summary includes regime-transition count and Trend Trust averages.
+- [x] Daily summary separates signal cycles from active-position risk scans.
 - [ ] Future enrichment: average regime hold time, short-lived regime count,
   hysteresis hold count, and route changes per hour.
 - [ ] Threshold changes are based on measured churn, not vibes.

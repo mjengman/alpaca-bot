@@ -101,6 +101,7 @@ const els = {
   notificationsMessage: document.querySelector("#notificationsMessage"),
   notificationsSave: document.querySelector("#notificationsSave"),
   notificationTest: document.querySelector("#notificationTest"),
+  notificationEodNow: document.querySelector("#notificationEodNow"),
   activeEnvironment: document.querySelector("#activeEnvironmentInput"),
   dataBaseUrl: document.querySelector("#dataBaseUrlInput"),
   dataFeed: document.querySelector("#dataFeedInput"),
@@ -143,6 +144,9 @@ const els = {
   notifyDailySummary: document.querySelector("#notifyDailySummaryInput"),
   notifyWarmup: document.querySelector("#notifyWarmupInput"),
   notifyDataErrors: document.querySelector("#notifyDataErrorsInput"),
+  notificationLastSent: document.querySelector("#notificationLastSentValue"),
+  notificationLastFailure: document.querySelector("#notificationLastFailureValue"),
+  notificationCooldown: document.querySelector("#notificationCooldownValue"),
   openOperatorSpreadsheet: document.querySelector("#openOperatorSpreadsheet"),
   openResearchSpreadsheet: document.querySelector("#openResearchSpreadsheet"),
   postSpreadsheetDailyRow: document.querySelector("#postSpreadsheetDailyRow"),
@@ -1656,6 +1660,22 @@ function renderDataHealth(status) {
   const label = labels[rawStatus] || formatLabel(rawStatus);
   const feed = status.data_feed ? status.data_feed.toUpperCase() : null;
   const age = formatAgeSeconds(status.bar_age_seconds);
+  const quoteAge = formatAgeSeconds(status.quote_age_seconds);
+  const tradeAge = formatAgeSeconds(status.trade_age_seconds);
+  const streamState = status.stream_error
+    ? `Error: ${status.stream_error}`
+    : status.stream_connected
+      ? "Connected"
+      : rawStatus === "REST"
+        ? "REST fallback"
+        : "Waiting";
+  const streamDetails = [
+    status.stream_bar_count || status.stream_bar_count === 0
+      ? `${status.stream_bar_count} bars cached`
+      : null,
+    status.stream_authenticated === false ? "not authenticated" : null,
+    status.stream_subscribed === false ? "not subscribed" : null,
+  ].filter(Boolean).join(", ");
   const pieces = [label];
   if (age) {
     pieces.push(age);
@@ -1664,7 +1684,10 @@ function renderDataHealth(status) {
   els.dataStatus.dataset.tooltip = [
     `Status: ${label}`,
     feed ? `Feed: ${feed}` : null,
-    age ? `Latest completed bar age: ${age}` : null,
+    `Bars: ${age ? `latest completed bar ${age}` : "waiting for completed bars"}`,
+    `Quotes: ${quoteAge || "waiting"}`,
+    `Trades: ${tradeAge || "waiting"}`,
+    `Stream: ${streamState}${streamDetails ? ` (${streamDetails})` : ""}`,
   ].filter(Boolean).join(" · ");
 
   if (rawStatus === "LIVE") {
@@ -2654,6 +2677,57 @@ function setNotificationsMessage(message, tone = "neutral") {
   );
   if (tone !== "neutral") {
     els.notificationsMessage.classList.add(`is-${tone}`);
+  }
+}
+
+function formatNotificationTime(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function notificationEntryLabel(entry, fallback) {
+  if (!entry) return fallback;
+  const subject = entry.subject || entry.event_id || fallback;
+  const time = formatNotificationTime(entry.at);
+  return time ? `${subject} · ${time}` : subject;
+}
+
+function renderNotificationDeliveryStatus(status) {
+  const delivery = status || {};
+  if (els.notificationLastSent) {
+    els.notificationLastSent.textContent = notificationEntryLabel(
+      delivery.last_sent,
+      "None",
+    );
+  }
+  if (els.notificationLastFailure) {
+    const failure = delivery.last_failure;
+    const label = notificationEntryLabel(failure, "None");
+    els.notificationLastFailure.textContent =
+      failure && failure.error ? `${label} · ${failure.error}` : label;
+  }
+  if (els.notificationCooldown) {
+    const cooldowns = Array.isArray(delivery.cooldowns) ? delivery.cooldowns : [];
+    if (!cooldowns.length) {
+      els.notificationCooldown.textContent = "Clear";
+    } else {
+      const first = cooldowns[0];
+      const minutes = Math.max(
+        1,
+        Math.ceil((Number(first.remaining_seconds) || 0) / 60),
+      );
+      const extra = cooldowns.length > 1 ? ` +${cooldowns.length - 1}` : "";
+      els.notificationCooldown.textContent = `${first.category || "Cooldown"} · ${minutes}m${extra}`;
+    }
   }
 }
 
@@ -4368,6 +4442,7 @@ function applySettings(settings) {
   if (els.notifyDataErrors) {
     els.notifyDataErrors.checked = notifications.notify_data_errors !== false;
   }
+  renderNotificationDeliveryStatus(notifications.delivery_status);
 
   const secretFields = [
     [els.paperApiKey, settings.paper?.api_key_id_masked],
@@ -4585,6 +4660,37 @@ async function sendTestNotification() {
   } finally {
     if (els.notificationTest) {
       els.notificationTest.disabled = false;
+    }
+  }
+}
+
+async function sendDailySummaryNotification() {
+  if (els.notificationEodNow) {
+    els.notificationEodNow.disabled = true;
+  }
+  setNotificationsMessage("Saving notification settings...");
+  try {
+    await saveSettings({
+      rethrow: true,
+      messageSetter: setNotificationsMessage,
+      button: els.notificationsSave,
+    });
+    setNotificationsMessage("Sending end-of-day summary...");
+    const result = await request("/api/notifications/daily-summary", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (result.status === "duplicate") {
+      setNotificationsMessage("End-of-day summary was already sent.", "warning");
+    } else {
+      setNotificationsMessage("End-of-day summary sent.", "success");
+    }
+    await loadSettings();
+  } catch (error) {
+    setNotificationsMessage(error.message, "danger");
+  } finally {
+    if (els.notificationEodNow) {
+      els.notificationEodNow.disabled = false;
     }
   }
 }
@@ -4935,6 +5041,9 @@ function setupNotificationsModal() {
   }
   if (els.notificationTest) {
     els.notificationTest.addEventListener("click", sendTestNotification);
+  }
+  if (els.notificationEodNow) {
+    els.notificationEodNow.addEventListener("click", sendDailySummaryNotification);
   }
 }
 

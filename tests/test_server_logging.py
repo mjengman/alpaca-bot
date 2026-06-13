@@ -75,6 +75,7 @@ from server import (
     config_from_payload,
     generate_session_summary,
     lifecycle_performance_summary,
+    notification_delivery_status,
     OPERATOR_SPREADSHEET_COLUMNS,
     order_visibility_summary,
     run_roster_dress_rehearsal_from_payload,
@@ -2955,10 +2956,10 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertIn("432 total scans: 360 signal cycles, 72 active risk scans", sections["highlight"])
         self.assertIn("37.3 (LOW)", sections["highlight"])
         self.assertNotIn("one every", sections["highlight"])
-        self.assertIn("Every exit was route invalidation", sections["bot_performance"][CHOP_BOT])
-        self.assertIn("gate discipline", sections["bot_performance"][INVERSE_BOT])
-        self.assertIn("No parameter conclusions", sections["analysis"])
-        self.assertIn("Early live observation is data collection", sections["analysis"])
+        self.assertIn("route invalidation", sections["bot_performance"][CHOP_BOT])
+        self.assertIn("cascade gate", sections["bot_performance"][INVERSE_BOT])
+        self.assertIn("single session", sections["analysis"])
+        self.assertIn("early live", sections["analysis"].lower())
         self.assertNotIn("consider adjusting", json.dumps(sections).lower())
 
     def test_generate_session_summary_reuses_matching_cache(self) -> None:
@@ -3616,6 +3617,45 @@ class ServerLoggingTest(unittest.TestCase):
             "[NOTIFY] Sent: Edgewalker entered SOXL",
             [line for _, line in runner._activity_log],
         )
+        self.assertEqual(
+            runner._notification_state["last_sent"]["event_id"],
+            "trade-entered:buy-1:SOXL",
+        )
+        status = notification_delivery_status(
+            runner._notification_state,
+            now=datetime(2026, 6, 11, 14, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(status["last_sent"]["subject"], "Edgewalker entered SOXL")
+        self.assertFalse(status["cooldown_active"])
+
+    def test_notification_delivery_status_filters_active_cooldowns(self) -> None:
+        state = {
+            "sent_event_ids": [],
+            "cooldowns": {
+                "error:expired": "2026-06-11T13:00:00+00:00",
+                "error:active": "2026-06-11T14:30:00+00:00",
+            },
+            "last_failure": {
+                "event_id": "error:active",
+                "subject": "Clock failed",
+                "category": "error:active",
+                "at": "2026-06-11T14:00:00+00:00",
+                "error": "missing key",
+                "cooldown_until": "2026-06-11T14:30:00+00:00",
+            },
+        }
+
+        status = notification_delivery_status(
+            state,
+            now=datetime(2026, 6, 11, 14, 5, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(status["cooldown_active"])
+        self.assertEqual(
+            [cooldown["category"] for cooldown in status["cooldowns"]],
+            ["error:active"],
+        )
+        self.assertEqual(status["last_failure"]["error"], "missing key")
 
     def test_notification_email_posts_to_apps_script_endpoint(self) -> None:
         class FakeResponse:

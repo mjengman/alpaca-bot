@@ -34,7 +34,9 @@ Omit `--edgewalker` to run the original single-symbol trailing stop bot.
 For live EdgeWalker testing, prefer the browser server because it owns the WebSocket stream and warmup cache. The CLI path is still useful for manual order tests and diagnostics.
 
 The checked-in `.env.example` shows the settings. The local `.env` file is ignored by git.
-The browser UI also has a Settings modal for paper/live Alpaca credentials, connection tests, active environment selection, and live-trading arming/disarming.
+The browser UI also has a Settings modal for paper/live Alpaca credentials,
+connection tests, active environment selection, live-trading
+arming/disarming, notification settings, and operator spreadsheet settings.
 The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
 
 ## Strategy
@@ -55,9 +57,14 @@ Current production posture: full-roster EdgeWalker Router.
 - BalancedPure is a runtime observer/probe only. It supplies authority context
   through `BALANCEDPURE_RUNTIME_OBSERVER_ENABLED=true` and has no execution
   rights in the live router.
-- The browser Strategy Controls are intentionally simplified for live operation:
-  most strategy inputs are locked, while position sizing, `Check now`, and
-  `Turn On` / `Turn Off` remain operator-facing.
+- The browser live-control surface is intentionally simplified for live
+  operation. The former strategy-control block is now an Edgewalker Status
+  panel with the locked build, account vitals, position sizing, `Check now`,
+  and `Turn On` / `Turn Off`.
+- Strategy Gates show the live state of Momentum Surge, Chop Reversion, and
+  Inverse Cascade. Gate tiles are structured telemetry, not console-log
+  scraping, and remain visible for all strategies so the operator can see what
+  is passing, waiting, or vetoing before a strategy fires.
 
 The live philosophy is "PatienceBot": no specialist is expected to trade every
 day. EdgeWalker should stay flat until the tape rotates into one of the
@@ -73,13 +80,16 @@ validated habitats.
 - Exit protection: track the high-water mark locally and submit a fractional market sell if price falls by `TRAIL_PERCENT`
 - Regime flip guard: stale opposite exposure is sold first, with no same-cycle reversal
 - Scan cadence: `POLL_SECONDS`, default 60 seconds while flat; open positions
-  or pending orders are checked every 5 seconds for tighter bot-managed exits
+  or pending orders are checked every 5 seconds for tighter bot-managed exits.
+  Daily accounting separates signal cycles from faster active-position risk
+  scans so reports do not dilute regime-transition math.
 - Closeout guard: sell the full open position inside `CLOSE_LIQUIDATE_MINUTES`, default 5, before Alpaca's reported market close
 - Market data feed: `DATA_FEED=iex`, suitable for free Alpaca market data plans; use `sip` only if the account has SIP entitlement
 - Live data source: the local server keeps an Alpaca WebSocket stream warm for SOXL/SOXS trades, quotes, and one-minute bars
-- Prior-close context: Momentum Surge and Inverse Cascade gates lazily request
-  the previous regular-session close through the active market data source. If
-  that value is unavailable, those gates fail closed rather than guessing.
+- Prior-close context: Momentum Surge and Inverse Cascade gates require the
+  previous regular-session close. Edgewalker preloads the value during
+  startup/warmup, reports explicit telemetry states (`Loaded`, `Pending`, or
+  `Unavailable`), and fails the dependent gates closed rather than guessing.
 - Trading block: EdgeWalker will not enter trades unless the stream is live and the latest completed one-minute bar is fresh
 - Market-hours guard: no fresh entry orders are submitted while Alpaca reports the market is closed
 - Market-close behavior: the repeating browser runner switches itself off after Alpaca reports the regular market is closed
@@ -107,10 +117,9 @@ full specialist roster. A few concepts are now part of the project vocabulary:
   neutral exits, or profitable handoffs.
 - Dynamic Controls are a future shadow-first idea for bounded runtime
   adaptation inside operator-approved rails, not autonomous strategy mutation.
-- Previous-session close is currently fetched lazily during gate evaluation.
-  A planned hardening item is to preload the required prior-close anchors during
-  EdgeWalker startup/warmup so the first actionable evaluation does not depend
-  on a just-in-time fetch.
+- Previous-session close is preloaded during startup/warmup for the specialist
+  gates that require it. The UI reports whether that anchor is loaded, pending,
+  or unavailable.
 - Recent rolling YTD research on the current production candidate showed the
   specialist stack improving return and drawdown versus the prior baseline:
   25% sizing ended at about `$390.01` from `$350` (`+11.43%`, max drawdown
@@ -120,7 +129,7 @@ full specialist roster. A few concepts are now part of the project vocabulary:
 ## Research Mode
 
 Research Mode is the in-app backtest lab. It replays historical one-minute
-SOXL/SOXS bars against the current Strategy Controls configuration while using a
+SOXL/SOXS bars against the current EdgeWalker configuration while using a
 simulated broker instead of the live or paper Alpaca trading path.
 
 Use it for evidence, not doctrine:
@@ -164,10 +173,36 @@ Use the Notifications modal to configure:
 - Optional shared secret
 - Trade, P/L, warmup, daily-summary, and error-notification toggles
 - Error-notification cooldown
+- Delivery-state visibility for last sent event, last failure, and active
+  cooldown
+- Manual `Send EOD Summary` recovery action
 
 The notification sender keeps a local dedupe/cooldown ledger in
 `.notification_events.json`, so restarts do not repeatedly resend the same trade
-or error event.
+or error event. Daily-summary emails use the deterministic narrative sections
+already computed for the in-app Narrative tab rather than recomputing a separate
+interpretation.
+
+## Narratives And Reports
+
+The Narrative tab uses deterministic, locally generated story beats by default.
+No trading logs are sent to OpenAI for the current local narrative path.
+
+Current report behavior:
+
+- 1D, 1W, 1M, YTD, and MAX summaries can be generated from structured session
+  rows.
+- The narrative header includes a source indicator such as `Source: Local`.
+- Daily summaries distinguish signal cycles from active-position risk scans.
+- Partial-week and partial-period language is included when a selected range is
+  incomplete.
+- Narrative phrasing varies deterministically so repeated reports do not become
+  completely canned, while the underlying facts and anti-overfitting guardrails
+  remain stable.
+
+Narratives are operator debriefs, not strategy doctrine. They should explain
+what the data supports, preserve no-trade days as valid behavior, and avoid
+parameter-change recommendations from one session.
 
 ## Useful Commands
 

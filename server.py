@@ -101,7 +101,7 @@ UNKNOWN_MARKET_ENVIRONMENT = ""
 NOTIFICATION_PROVIDER_APPS_SCRIPT = "apps_script"
 NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
 NOTIFICATION_SENT_EVENT_LIMIT = 500
-NARRATIVE_GROUNDING_VERSION = "deterministic-daily-v3"
+NARRATIVE_GROUNDING_VERSION = "deterministic-daily-v4"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
@@ -349,6 +349,7 @@ class RunnerSnapshot:
     performance: dict[str, Any]
     order_state: dict[str, Any]
     preset_authority: dict[str, Any] | None
+    notification_status: dict[str, Any]
     last_error: str | None
 
 
@@ -759,6 +760,32 @@ class BotRunner:
     def _save_notification_state_locked(self) -> None:
         _save_notification_state(self._notification_state_locked())
 
+    def _set_notification_state_entry_locked(
+        self,
+        key: str,
+        *,
+        event_id: str,
+        subject: str,
+        category: str | None,
+        occurred_at: datetime,
+        error: str | None = None,
+        cooldown_until: datetime | None = None,
+    ) -> None:
+        entry: dict[str, Any] = {
+            "event_id": event_id,
+            "subject": subject,
+            "category": category or "",
+            "at": _utc_timestamp(occurred_at),
+        }
+        if error:
+            entry["error"] = error
+        if cooldown_until:
+            entry["cooldown_until"] = _utc_timestamp(cooldown_until)
+        self._notification_state_locked()[key] = entry
+
+    def _notification_delivery_status_locked(self) -> dict[str, Any]:
+        return notification_delivery_status(self._notification_state_locked())
+
     def _record_notification_activity(
         self,
         line: str,
@@ -772,35 +799,62 @@ class BotRunner:
             self._append_activity_locked([line])
 
     def send_test_notification(self) -> dict[str, Any]:
+        now_utc = datetime.now(timezone.utc)
         try:
             result = send_test_notification_email()
         except BotError as exc:
+            with self._lock:
+                self._set_notification_state_entry_locked(
+                    "last_failure",
+                    event_id=f"test:{_utc_timestamp(now_utc)}",
+                    subject="Edgewalker test notification",
+                    category="test",
+                    occurred_at=now_utc,
+                    error=str(exc),
+                )
+                self._save_notification_state_locked()
             self._record_notification_activity(
                 f"[NOTIFY] Test notification failed: {exc}",
                 error=str(exc),
             )
             raise
+        with self._lock:
+            self._set_notification_state_entry_locked(
+                "last_sent",
+                event_id=f"test:{_utc_timestamp(now_utc)}",
+                subject="Edgewalker test notification",
+                category="test",
+                occurred_at=now_utc,
+            )
+            self._save_notification_state_locked()
         self._record_notification_activity("[NOTIFY] Sent test notification.")
         return result
+
+    def _notification_cooldown_until_locked(
+        self,
+        category: str,
+        now_utc: datetime,
+    ) -> datetime | None:
+        cooldowns = self._notification_state_locked().setdefault("cooldowns", {})
+        if not isinstance(cooldowns, dict):
+            return None
+        raw_until = cooldowns.get(category)
+        if not isinstance(raw_until, str):
+            return None
+        try:
+            until = datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return until if until > now_utc else None
 
     def _notification_cooldown_active_locked(
         self,
         category: str,
         now_utc: datetime,
     ) -> bool:
-        cooldowns = self._notification_state_locked().setdefault("cooldowns", {})
-        if not isinstance(cooldowns, dict):
-            return False
-        raw_until = cooldowns.get(category)
-        if not isinstance(raw_until, str):
-            return False
-        try:
-            until = datetime.fromisoformat(raw_until.replace("Z", "+00:00"))
-        except ValueError:
-            return False
-        if until.tzinfo is None:
-            until = until.replace(tzinfo=timezone.utc)
-        return until > now_utc
+        return self._notification_cooldown_until_locked(category, now_utc) is not None
 
     def _set_notification_cooldown_locked(
         self,
@@ -844,24 +898,53 @@ class BotRunner:
             if (
                 effective_cooldown_category
                 and effective_cooldown_minutes
-                and self._notification_cooldown_active_locked(
-                    effective_cooldown_category,
-                    now_utc,
+                and (
+                    cooldown_until := self._notification_cooldown_until_locked(
+                        effective_cooldown_category,
+                        now_utc,
+                    )
                 )
             ):
-                return {"status": "cooldown"}
+                self._set_notification_state_entry_locked(
+                    "last_cooldown",
+                    event_id=event_id,
+                    subject=subject,
+                    category=effective_cooldown_category,
+                    occurred_at=now_utc,
+                    cooldown_until=cooldown_until,
+                )
+                self._save_notification_state_locked()
+                return {
+                    "status": "cooldown",
+                    "category": effective_cooldown_category,
+                    "cooldown_until": _utc_timestamp(cooldown_until),
+                }
 
         try:
             result = send_notification_email(subject=subject, text=body, html=html)
         except BotError as exc:
             with self._lock:
+                cooldown_until = None
                 if effective_cooldown_category and effective_cooldown_minutes:
                     self._set_notification_cooldown_locked(
                         effective_cooldown_category,
                         now_utc,
                         effective_cooldown_minutes,
                     )
-                    self._save_notification_state_locked()
+                    cooldown_until = self._notification_cooldown_until_locked(
+                        effective_cooldown_category,
+                        now_utc,
+                    )
+                self._set_notification_state_entry_locked(
+                    "last_failure",
+                    event_id=event_id,
+                    subject=subject,
+                    category=effective_cooldown_category,
+                    occurred_at=now_utc,
+                    error=str(exc),
+                    cooldown_until=cooldown_until,
+                )
+                self._save_notification_state_locked()
             self._record_notification_activity(
                 f"[NOTIFY] Failed: {subject}: {exc}",
                 error=str(exc),
@@ -882,6 +965,13 @@ class BotRunner:
                     now_utc,
                     cooldown_minutes,
                 )
+            self._set_notification_state_entry_locked(
+                "last_sent",
+                event_id=event_id,
+                subject=subject,
+                category=cooldown_category,
+                occurred_at=now_utc,
+            )
             self._save_notification_state_locked()
 
         self._record_notification_activity(f"[NOTIFY] Sent: {subject}")
@@ -1065,6 +1155,47 @@ class BotRunner:
             body="\n".join(lines),
         )
 
+    def _send_daily_summary_notification_for_date(
+        self,
+        *,
+        target_date: str,
+        next_open_text: str,
+    ) -> dict[str, Any]:
+        try:
+            payload = build_operator_spreadsheet_daily_row(
+                target_date,
+                include_daily_narrative=False,
+            )
+        except BotError as exc:
+            self._record_notification_activity(
+                f"[NOTIFY] Daily summary failed for {target_date}: {exc}",
+                error=str(exc),
+            )
+            return {"status": "failed", "error": str(exc)}
+        row = payload.get("row") if isinstance(payload, dict) else {}
+        if not isinstance(row, dict):
+            row = {}
+        try:
+            narrative_summary = generate_session_summary(target_date, "1D")
+        except BotError as exc:
+            narrative_summary = {}
+            self._record_notification_activity(
+                f"[NOTIFY] Daily narrative unavailable for {target_date}: {exc}",
+                error=str(exc),
+            )
+        subject, body, html = _daily_summary_email_content(
+            target_date=target_date,
+            row=row,
+            narrative_summary=narrative_summary,
+            next_open_text=next_open_text,
+        )
+        return self._deliver_notification_event(
+            event_id=f"daily-summary:{target_date}",
+            subject=subject,
+            body=body,
+            html=html,
+        )
+
     def _maybe_send_daily_summary_notification(
         self,
         next_open: datetime | None,
@@ -1078,45 +1209,53 @@ class BotRunner:
         target_date = self._daily_summary_notification_date(next_open)
         if not target_date:
             return
-        try:
-            payload = build_operator_spreadsheet_daily_row(
-                target_date,
-                include_daily_narrative=False,
-            )
-        except BotError as exc:
-            self._record_notification_activity(
-                f"[NOTIFY] Daily summary failed for {target_date}: {exc}",
-                error=str(exc),
-            )
-            return
-        row = payload.get("row") if isinstance(payload, dict) else {}
-        if not isinstance(row, dict):
-            row = {}
-        try:
-            narrative_summary = generate_session_summary(target_date, "1D")
-        except BotError as exc:
-            narrative_summary = {}
-            self._record_notification_activity(
-                f"[NOTIFY] Daily narrative unavailable for {target_date}: {exc}",
-                error=str(exc),
-            )
         next_open_text = (
             next_open.astimezone(NY_TZ).isoformat(timespec="seconds")
             if next_open
             else "Unknown"
         )
-        subject, body, html = _daily_summary_email_content(
+        self._send_daily_summary_notification_for_date(
             target_date=target_date,
-            row=row,
-            narrative_summary=narrative_summary,
             next_open_text=next_open_text,
         )
-        self._deliver_notification_event(
-            event_id=f"daily-summary:{target_date}",
-            subject=subject,
-            body=body,
-            html=html,
+
+    def send_daily_summary_notification(self) -> dict[str, Any]:
+        settings = notification_settings()
+        if not settings.get("enabled"):
+            raise BotError("Enable notifications before sending an EOD summary.")
+        if not settings.get("notify_daily_summary"):
+            raise BotError("Turn on end-of-day summary notifications first.")
+
+        now_ny = datetime.now(NY_TZ)
+        latest_log_date = _most_recent_log_date(market_open_only=True)
+        if not latest_log_date:
+            raise BotError("No live session log found for an EOD summary.")
+        today = now_ny.date().isoformat()
+        if latest_log_date == today and not _regular_session_close_elapsed(now_ny):
+            raise BotError("End-of-day summary is available after the regular close.")
+        target_date = latest_log_date
+
+        next_open_text = "Unknown"
+        try:
+            clock = AlpacaClient(self._config).get_clock()
+            next_open = parse_clock_time(clock.get("next_open"), "next_open")
+            next_open_text = next_open.astimezone(NY_TZ).isoformat(timespec="seconds")
+        except BotError as exc:
+            self._record_notification_activity(
+                f"[NOTIFY] Next open unavailable for manual EOD summary: {exc}",
+                error=str(exc),
+            )
+
+        result = self._send_daily_summary_notification_for_date(
+            target_date=target_date,
+            next_open_text=next_open_text,
         )
+        status = _optional_text(result.get("status")) if isinstance(result, dict) else ""
+        if status == "duplicate":
+            self._record_notification_activity(
+                f"[NOTIFY] Daily summary already sent for {target_date}."
+            )
+        return result
 
     def _daily_summary_notification_date(
         self,
@@ -1639,6 +1778,7 @@ class BotRunner:
                 BotStateStore().get_pending_orders(),
             ),
             preset_authority=self._preset_authority_snapshot_locked(),
+            notification_status=self._notification_delivery_status_locked(),
             last_error=self._last_error,
         )
 
@@ -2348,12 +2488,14 @@ def alpaca_environment_settings() -> dict[str, Any]:
     )
     live_key = _env_first(values, "ALPACA_LIVE_API_KEY_ID")
     live_secret = _env_first(values, "ALPACA_LIVE_API_SECRET_KEY")
+    notifications = notification_settings(values)
+    notifications["delivery_status"] = notification_delivery_status()
 
     return {
         "active_environment": active_environment,
         "live_trading_armed": live_trading_armed(),
         "operator_spreadsheet": operator_spreadsheet_settings(values),
-        "notifications": notification_settings(values),
+        "notifications": notifications,
         "data_base_url": normalize_alpaca_base_url(
             _env_first(
                 values,
@@ -2554,29 +2696,109 @@ def save_alpaca_environment_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_notification_state() -> dict[str, Any]:
+    empty_state: dict[str, Any] = {
+        "sent_event_ids": [],
+        "cooldowns": {},
+        "last_sent": None,
+        "last_failure": None,
+        "last_cooldown": None,
+    }
     if not NOTIFICATION_STATE_PATH.exists():
-        return {"sent_event_ids": [], "cooldowns": {}}
+        return dict(empty_state)
     try:
         payload = json.loads(NOTIFICATION_STATE_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"sent_event_ids": [], "cooldowns": {}}
+        return dict(empty_state)
     if not isinstance(payload, dict):
-        return {"sent_event_ids": [], "cooldowns": {}}
+        return dict(empty_state)
     sent_ids = payload.get("sent_event_ids")
     cooldowns = payload.get("cooldowns")
-    return {
-        "sent_event_ids": [
-            event_id for event_id in sent_ids if isinstance(event_id, str)
-        ]
-        if isinstance(sent_ids, list)
-        else [],
-        "cooldowns": {
-            key: value
-            for key, value in cooldowns.items()
-            if isinstance(key, str) and isinstance(value, str)
+    state = dict(empty_state)
+    for key in ("last_sent", "last_failure", "last_cooldown"):
+        if isinstance(payload.get(key), dict):
+            state[key] = payload[key]
+    state.update(
+        {
+            "sent_event_ids": [
+                event_id for event_id in sent_ids if isinstance(event_id, str)
+            ]
+            if isinstance(sent_ids, list)
+            else [],
+            "cooldowns": {
+                key: value
+                for key, value in cooldowns.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(cooldowns, dict)
+            else {},
         }
-        if isinstance(cooldowns, dict)
-        else {},
+    )
+    return state
+
+
+def _notification_state_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    event_id = _optional_text(value.get("event_id"))
+    subject = _optional_text(value.get("subject"))
+    timestamp = _optional_text(value.get("at"))
+    if not (event_id or subject or timestamp):
+        return None
+    entry = {
+        "event_id": event_id,
+        "subject": subject,
+        "category": _optional_text(value.get("category")),
+        "at": timestamp,
+    }
+    error = _optional_text(value.get("error"))
+    if error:
+        entry["error"] = error
+    cooldown_until = _optional_text(value.get("cooldown_until"))
+    if cooldown_until:
+        entry["cooldown_until"] = cooldown_until
+    return entry
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def notification_delivery_status(
+    state: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    state = state if isinstance(state, dict) else _load_notification_state()
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cooldowns = state.get("cooldowns")
+    active_cooldowns = []
+    if isinstance(cooldowns, dict):
+        for category, raw_until in sorted(cooldowns.items()):
+            if not isinstance(category, str) or not isinstance(raw_until, str):
+                continue
+            until = _parse_utc_timestamp(raw_until)
+            if until is None or until <= now_utc:
+                continue
+            remaining = max(0, int((until - now_utc).total_seconds()))
+            active_cooldowns.append(
+                {
+                    "category": category,
+                    "until": _utc_timestamp(until),
+                    "remaining_seconds": remaining,
+                }
+            )
+    return {
+        "last_sent": _notification_state_entry(state.get("last_sent")),
+        "last_failure": _notification_state_entry(state.get("last_failure")),
+        "last_cooldown": _notification_state_entry(state.get("last_cooldown")),
+        "cooldowns": active_cooldowns,
+        "cooldown_active": bool(active_cooldowns),
     }
 
 
@@ -2591,6 +2813,10 @@ def _save_notification_state(state: dict[str, Any]) -> None:
         "sent_event_ids": sent_ids[-NOTIFICATION_SENT_EVENT_LIMIT:],
         "cooldowns": cooldowns,
     }
+    for key in ("last_sent", "last_failure", "last_cooldown"):
+        entry = _notification_state_entry(state.get(key))
+        if entry:
+            payload[key] = entry
     NOTIFICATION_STATE_PATH.write_text(
         json.dumps(payload, indent=2),
         encoding="utf-8",
@@ -4307,6 +4533,16 @@ def _narrative_transition_character(
     return label, f"{transitions} transitions ({pressure}); {scan_clause}"
 
 
+def _narrative_variant(parts: list[Any], options: list[str]) -> str:
+    if not options:
+        return ""
+    seed = "|".join(str(part) for part in parts if part not in (None, ""))
+    if not seed:
+        return options[0]
+    index = sum((idx + 1) * ord(char) for idx, char in enumerate(seed)) % len(options)
+    return options[index]
+
+
 def _narrative_result_status(value: Any) -> str:
     realized = _decimal_from_value(value) or Decimal("0")
     if realized > 0:
@@ -4374,12 +4610,27 @@ def _deterministic_bot_narrative_sections(
         realized_pl = _decimal_from_value(item.get("realized_pl")) or Decimal("0")
         if trade_count <= 0:
             if bot == INVERSE_BOT:
-                sections[bot] = (
-                    f"{display} stayed flat. That reads as gate discipline: no clean "
-                    "cascade qualified strongly enough to justify a SOXS entry."
+                sections[bot] = _narrative_variant(
+                    [context.get("session", {}).get("date"), bot, "flat"],
+                    [
+                        (
+                            f"{display} stayed flat. That reads as gate discipline: no clean "
+                            "cascade qualified strongly enough to justify a SOXS entry."
+                        ),
+                        (
+                            f"{display} stayed flat by design: the cascade gate never saw "
+                            "a clean enough SOXS setup."
+                        ),
+                    ],
                 )
             else:
-                sections[bot] = f"{display} stayed flat; no qualifying setup fired."
+                sections[bot] = _narrative_variant(
+                    [context.get("session", {}).get("date"), bot, "flat"],
+                    [
+                        f"{display} stayed flat; no qualifying setup fired.",
+                        f"{display} stayed quiet; the setup never cleared its gates.",
+                    ],
+                )
             continue
 
         wins = int(item.get("wins") or 0)
@@ -4394,11 +4645,23 @@ def _deterministic_bot_narrative_sections(
         trail_exits = bot_exits.get("trailing_stop_breached", 0)
         if route_exits and route_exits == trade_count:
             parts.append(
-                "Every exit was route invalidation, so regime flips were the pressure point."
+                _narrative_variant(
+                    [context.get("session", {}).get("date"), bot, "route_all"],
+                    [
+                        "Every exit was route invalidation, so regime flips were the pressure point.",
+                        "All exits came from route invalidation, pointing directly at regime churn.",
+                    ],
+                )
             )
         elif route_exits:
             parts.append(
-                f"{route_exits} exit(s) were route invalidations, tying the result to regime churn."
+                _narrative_variant(
+                    [context.get("session", {}).get("date"), bot, "route_some"],
+                    [
+                        f"{route_exits} exit(s) were route invalidations, tying the result to regime churn.",
+                        f"{route_exits} exit(s) came from route invalidation, so churn shaped the outcome.",
+                    ],
+                )
             )
         if trail_exits and trail_exits == trade_count:
             parts.append("The exit path was trailing-stop based.")
@@ -4528,17 +4791,65 @@ def _deterministic_daily_narrative_sections(
         else "finished red"
     )
 
-    tldr = (
-        f"Edgewalker {result_phrase} at {_narrative_money(realized_pl)} "
-        f"with {trade_summary} during a {character} {symbol} session."
-    )
-    highlight = (
-        f"The main story was regime churn: {transition_text}, with {trust_text}."
+    variant_parts = [
+        date_text,
+        result_status,
+        character,
+        trade_count,
+        route_exits,
+        trail_exits,
+    ]
+    tldr = _narrative_variant(
+        variant_parts + ["tldr"],
+        [
+            (
+                f"Edgewalker {result_phrase} at {_narrative_money(realized_pl)} "
+                f"with {trade_summary} during a {character} {symbol} session."
+            ),
+            (
+                f"Edgewalker ended the session {result_phrase.replace('finished ', '')} "
+                f"at {_narrative_money(realized_pl)} with {trade_summary} in {character} {symbol} tape."
+            ),
+            (
+                f"Edgewalker closed {date_text or 'the session'} at {_narrative_money(realized_pl)} "
+                f"with {trade_summary}; the backdrop was {character} {symbol} tape."
+            ),
+        ],
     )
 
-    market_conditions = (
-        f"{symbol} traded through {character} tape. {transition_text.capitalize()}, "
-        f"and {trust_text} kept the specialist gates selective instead of chasing every move."
+    if trade_count <= 0:
+        highlight_options = [
+            f"The useful signal was restraint: {transition_text}, with {trust_text}.",
+            f"The day was mostly about patience: {transition_text}, with {trust_text}.",
+        ]
+    elif route_exits >= max(1, trade_count // 2):
+        highlight_options = [
+            f"The main story was regime churn: {transition_text}, with {trust_text}.",
+            f"Route churn drove the read: {transition_text}, with {trust_text}.",
+        ]
+    else:
+        highlight_options = [
+            f"The main story was regime churn: {transition_text}, with {trust_text}.",
+            f"The clearest read was tape quality: {transition_text}, with {trust_text}.",
+        ]
+    highlight = _narrative_variant(variant_parts + ["highlight"], highlight_options)
+
+    market_conditions = _narrative_variant(
+        variant_parts + ["market"],
+        [
+            (
+                f"{symbol} traded through {character} tape. {transition_text.capitalize()}, "
+                f"and {trust_text} kept the specialist gates selective instead of chasing every move."
+            ),
+            (
+                f"The {symbol} tape read {character}. {transition_text.capitalize()}, "
+                f"while {trust_text} kept the gates selective."
+            ),
+            (
+                f"{symbol} gave Edgewalker {character} conditions: {transition_text}, "
+                f"and {trust_text} kept the roster selective."
+            ),
+        ],
     )
 
     exit_clauses = []
@@ -4562,36 +4873,83 @@ def _deterministic_daily_narrative_sections(
         operational = "No broker, order, or data issues were noted."
 
     if result_status == "RED" and (transitions >= 20 or (trust_score is not None and trust_score < 45)):
-        verdict = (
-            f"This was a structurally difficult session, not a strategy failure: "
-            f"{transition_text} and {trust_text} created conditions where restraint mattered."
+        verdict = _narrative_variant(
+            variant_parts + ["red_verdict"],
+            [
+                (
+                    f"This was a structurally difficult session, not a strategy failure: "
+                    f"{transition_text} and {trust_text} created conditions where restraint mattered."
+                ),
+                (
+                    f"This reads as a difficult environment first: {transition_text} and "
+                    f"{trust_text} made selectivity more important than activity."
+                ),
+            ],
         )
     elif result_status == "GREEN" and transitions >= 20:
-        verdict = (
-            f"Strong execution despite noisy tape: {transition_text} and {trust_text}, "
-            f"yet the roster still finished positive."
+        verdict = _narrative_variant(
+            variant_parts + ["green_verdict"],
+            [
+                (
+                    f"Strong execution despite noisy tape: {transition_text} and {trust_text}, "
+                    f"yet the roster still finished positive."
+                ),
+                (
+                    f"The roster handled difficult tape well: {transition_text} and "
+                    f"{trust_text}, with a positive finish anyway."
+                ),
+            ],
         )
     elif result_status == "FLAT":
-        verdict = (
-            "Patience was the correct result: no qualifying edge paid enough to justify a net position."
+        verdict = _narrative_variant(
+            variant_parts + ["flat_verdict"],
+            [
+                "Patience was the correct result: no qualifying edge paid enough to justify a net position.",
+                "Flat was a valid outcome: nothing qualified strongly enough to justify exposure.",
+            ],
         )
     else:
-        verdict = (
-            f"The result was {_narrative_money(realized_pl)} with {trade_summary}; keep watching for repeated patterns."
+        verdict = _narrative_variant(
+            variant_parts + ["mixed_verdict"],
+            [
+                f"The result was {_narrative_money(realized_pl)} with {trade_summary}; keep watching for repeated patterns.",
+                f"The session landed at {_narrative_money(realized_pl)} with {trade_summary}; one day is a datapoint, not a verdict.",
+            ],
         )
 
     analysis_parts = [
         verdict,
-        "No parameter conclusions are justified from one session; watch for multi-session patterns before changing the locked build.",
+        _narrative_variant(
+            variant_parts + ["guardrail"],
+            [
+                "No parameter conclusions are justified from one session; watch for multi-session patterns before changing the locked build.",
+                "Do not tune from a single session; wait for a repeated pattern before changing the locked build.",
+            ],
+        ),
     ]
     if session_count is not None and session_count <= 10:
         analysis_parts.append(
-            "Early live observation is data collection, not evidence for tuning."
+            _narrative_variant(
+                variant_parts + ["early_live"],
+                [
+                    "Early live observation is data collection, not evidence for tuning.",
+                    "This is still early live data collection, so the right move is observation.",
+                ],
+            )
         )
 
-    bottom_line = (
-        f"{_narrative_money(realized_pl)} on {trade_summary}. "
-        f"The useful read is environment quality: {character} tape with {trust_text}."
+    bottom_line = _narrative_variant(
+        variant_parts + ["bottom"],
+        [
+            (
+                f"{_narrative_money(realized_pl)} on {trade_summary}. "
+                f"The useful read is environment quality: {character} tape with {trust_text}."
+            ),
+            (
+                f"{_narrative_money(realized_pl)} across {trade_summary}; "
+                f"the main takeaway is {character} tape and {trust_text}."
+            ),
+        ],
     )
 
     return {
@@ -9060,6 +9418,10 @@ class AppHandler(BaseHTTPRequestHandler):
             if self.path == "/api/notifications/test":
                 self.require_local_ui_request("notification test requests")
                 self.send_json(self.runner.send_test_notification())
+                return
+            if self.path == "/api/notifications/daily-summary":
+                self.require_local_ui_request("notification recovery requests")
+                self.send_json(self.runner.send_daily_summary_notification())
                 return
             if self.path == "/api/spreadsheet/row":
                 self.require_local_ui_request("operator spreadsheet requests")

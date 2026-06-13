@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-06-10
+Last updated: 2026-06-13
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -109,15 +109,38 @@ foundation for future work.
   cascade days.
 - ChopBot remains the mean-reversion workhorse under
   `CHOP_PERMISSION_MODE=FIREWALL`.
-- Previous-session close is available through the live market data path and is
+- Previous-session close is preloaded through the live market data path and is
   used by Momentum Surge and Inverse Cascade gates. Missing prior-close context
   fails those gates closed.
-- Strategy Controls are simplified for live operation: most strategy inputs are
-  locked, while position sizing, `Check now`, and the `Turn On` / `Turn Off`
-  control remain operator-facing.
+- The live UI is simplified for operation: strategy doctrine is locked, while
+  position sizing, `Check now`, and the `Turn On` / `Turn Off` control remain
+  operator-facing.
 - Full-roster dress-rehearsal and rolling-balance scoreboards now report
   per-date P/L, specialist attribution, activation rates, active-day counts,
   trade count, and rolling equity/drawdown.
+- Edgewalker Status replaced the old broad Strategy Controls surface for live
+  operation. The default view now exposes the locked build, account vitals,
+  position sizing, `Check now`, and the start/stop control while keeping
+  strategy doctrine locked.
+- Strategy Gates provide structured, always-on gate telemetry for Momentum
+  Surge, Chop Reversion, and Inverse Cascade. All three strategy lanes display
+  route, authority/permission, setup/path, cooldown, and position readiness as
+  colored operator-facing gates, with a separate managing-position state.
+- Prior-close telemetry now reports explicit states (`Loaded`, `Pending`, or
+  `Unavailable`) and includes tooltip context instead of the ambiguous
+  `Guarded` label.
+- Edgewalker preloads required previous-session close anchors during
+  startup/warmup for active specialist gates.
+- Daily reports split ordinary signal cycles from faster active-position risk
+  scans, keeping transition-rate and trend-trust narrative accounting honest.
+- Deterministic local narratives now power the Narrative tab and EOD emails,
+  including source indicators, multi-day summaries, partial-period language,
+  structured specialist sections, and varied phrasing without sending raw logs
+  to OpenAI.
+- Notification delivery state is visible in settings, including last sent
+  notification, last failure, active cooldown, and manual EOD-summary recovery.
+- Telemetry tooltips now explain the compact data-health label by separating
+  bars, quotes, trades, feed, and stream state.
 
 ## Priority 0: Operational Truth
 
@@ -302,22 +325,17 @@ Notes:
 
 Previous-session close warmup integrity:
 
-- Current state: Momentum Surge and Inverse Cascade can lazily request the
-  previous regular-session close through the active market data source during
-  candidate evaluation.
-- Current safety behavior: if the prior-close value is unavailable, the
-  dependent gate fails closed with a prior-close-unavailable reason instead of
-  entering from incomplete context.
-- Desired hardening: preload required prior-close anchors during EdgeWalker
-  startup/warmup for all symbols used by active specialist gates.
-- Acceptance criteria:
-  - `SOXL` previous-session close is cached before the first actionable regular
-    session gate evaluation.
-  - The dashboard or activity log can distinguish "prior close loaded" from
-    "prior close unavailable, gate failed closed."
-  - Research replay, paper, and live paths all use the same semantic value:
-    previous regular-session close, not premarket marks or current-session
-    partial data.
+- Implemented: Momentum Surge and Inverse Cascade preload the previous
+  regular-session close through the active market data source during
+  startup/warmup.
+- Implemented: if the prior-close value is unavailable, the dependent gate
+  fails closed with a prior-close-unavailable reason instead of entering from
+  incomplete context.
+- Implemented: dashboard telemetry distinguishes `Loaded`, `Pending`, and
+  `Unavailable`, with tooltip context for the loaded value or fail-closed state.
+- Research replay, paper, and live paths should continue to use the same
+  semantic value: previous regular-session close, not premarket marks or
+  current-session partial data.
 
 ### Foundational Replay / Timeline Reconstruction
 
@@ -563,36 +581,33 @@ go-live milestone.
 
 Goal: turn logs into readable operating summaries without replacing raw logs.
 
-- Activity / Narrative tabs
-- Timeframe selectors:
-  - 1D
-  - 1W
-  - 1M
-  - 3M
-  - YTD
-  - MAX
-- MVP:
-  - User-triggered log summary request
-  - Structured prompt over selected logs
-  - Render returned narrative in-app
-  - Include a cautious Analysis section with operator-facing tuning ideas
-- Later:
-  - Archived debrief history
-  - Notable event extraction
-  - Autonomous daily battle report
+- Implemented foundation:
+  - Activity / Narrative tabs
+  - Timeframe selectors: 1D, 1W, 1M, YTD, MAX
+  - Source indicator (`Local`, `OpenAI`, or `Cached`)
+  - Deterministic local beat-builder for 1D and multi-day summaries
+  - Partial-period language for incomplete weeks or ranges
+  - EOD email formatting that mirrors the in-app deterministic sections
+
+Later:
+
+- Archived debrief history
+- Notable event extraction
+- Optional OpenAI polish layer on top of deterministic beats
+- Autonomous daily battle report
 
 Notes:
 
-- Narrative V2 should move toward an evidence-backed AAR format:
-  `Session Identity`, `Scorecard`, `What The Logs Support`, `Bot Behavior`,
-  `Operational Health`, `Interpretation`, `Watchlist`, `Bottom Line`, and
-  `Narrative Confidence`.
-- The narrative should separate broker/order execution health from data health.
-  For example, stale bars that were safely handled should not be summarized as
-  "no operational issues."
-- The narrative should explicitly state the active mode and whether Adaptive was
-  active or shadow-only, so routing behavior is not accidentally described as
-  Adaptive control.
+- Current deterministic narratives use grounded sections: TL;DR, Highlight,
+  Bot/Strategy Performance, Market Conditions, Operational Health, Analysis,
+  and Bottom Line.
+- Narrative text should continue to separate broker/order execution health from
+  data health. For example, stale bars that were safely handled should not be
+  summarized as "no operational issues."
+- Narrative text should continue to distinguish intentional restraint from
+  missed opportunity, especially for flat Momentum or Inverse days.
+- Narrative variety is now deterministic and fact-preserving. Keep future
+  variation bounded by the computed story beats.
 
 - Do not auto-send logs anywhere without explicit user action.
 - Redact secrets and avoid including API credentials.
@@ -888,18 +903,19 @@ production strategy stack casually.
 
 Recommended order:
 
-1. Documentation and operator guide refresh for the current full-roster
+1. Continue documentation and operator guide refresh for the current full-roster
    "PatienceBot" behavior.
-2. Previous-session close warmup preload for active specialist gates.
-3. Live Strategy Controls cleanup: keep sizing and start/stop obvious, move
-   advanced controls behind an intentional diagnostics surface.
-4. Persist richer realized-result lifecycle records per closed trade.
-5. Add average hold duration, best/worst trade, and specialist attribution
+2. Persist richer realized-result lifecycle records per closed trade.
+3. Add average hold duration, best/worst trade, and specialist attribution
    history to the dashboard/export path.
-6. Start Foundational Replay / Timeline Reconstruction once the event stream is
+4. Start Foundational Replay / Timeline Reconstruction once the event stream is
    representative enough to design against.
-7. Keep Dynamic Controls and environment classifier authority in shadow until
+5. Keep Dynamic Controls and environment classifier authority in shadow until
    they have replay and live evidence.
+6. Keep Event-Driven Signal/Risk Separation parked until the 5-second active
+   scan bridge has enough live evidence.
+7. Keep Environment Classification in deterministic research/shadow mode until
+   repeated fingerprints earn stable labels.
 
 Operating rules:
 
