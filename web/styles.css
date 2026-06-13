@@ -1808,13 +1808,13 @@ button:disabled {
 
 .gate-strip {
   display: grid;
-  grid-template-columns: repeat(8, minmax(96px, 1fr));
+  grid-template-columns: repeat(var(--gate-count, 8), minmax(96px, 1fr));
   gap: 5px;
   width: 100%;
 }
 
 .gate-strip.is-exit {
-  grid-template-columns: repeat(3, minmax(96px, 1fr));
+  grid-template-columns: repeat(var(--gate-count, 3), minmax(96px, 1fr));
 }
 
 .gate-segment {
@@ -2251,6 +2251,21 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 1.2em !important;
+}
+
+.narrative-source-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.72rem !important;
+  font-weight: 900;
+  line-height: 1.25 !important;
+  text-transform: none;
+  background: rgba(255, 255, 255, 0.02);
+  margin: 0 !important;
 }
 
 .narrative-tldr {

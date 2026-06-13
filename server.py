@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import html as html_lib
 import io
 import json
 import mimetypes
@@ -88,6 +89,7 @@ NARRATIVE_CACHE_PATH = PROJECT_ROOT / ".narrative_cache.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
 NY_TZ = ZoneInfo("America/New_York")
+REGULAR_SESSION_CLOSE_MINUTE = 16 * 60
 BOT_PERFORMANCE_ORDER = (MOMENTUM_BOT, CHOP_BOT, INVERSE_BOT)
 SPECIALIST_DISPLAY_NAMES = {
     MOMENTUM_BOT: "Momentum Surge",
@@ -105,6 +107,18 @@ OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 VALID_TIMEFRAMES = {"1D", "1W", "1M", "3M", "YTD", "MAX", "CUSTOM"}
 PRESET_AUTHORITY_MODE_V6 = "V6_0945"
 PRESET_AUTHORITY_MODEL_V6 = "v6_0945_high_confidence_with_rebound_block"
+
+
+def _regular_session_close_elapsed(now_ny: datetime) -> bool:
+    local_now = (
+        now_ny.astimezone(NY_TZ)
+        if now_ny.tzinfo is not None
+        else now_ny.replace(tzinfo=NY_TZ)
+    )
+    current_minute = local_now.hour * 60 + local_now.minute
+    return current_minute >= REGULAR_SESSION_CLOSE_MINUTE
+
+
 OPERATOR_SPREADSHEET_COLUMNS = [
     "date",
     "mode",
@@ -687,12 +701,12 @@ class BotRunner:
 
         now_ny = datetime.now(NY_TZ)
         today = now_ny.date().isoformat()
+        if not _regular_session_close_elapsed(now_ny):
+            return None
         if next_open is not None:
             next_open_day = next_open.astimezone(NY_TZ).date().isoformat()
             if next_open_day == today:
                 return None
-        elif now_ny.hour < 16:
-            return None
 
         latest_log_date = _most_recent_log_date(market_open_only=True)
         if latest_log_date != today:
@@ -1078,31 +1092,30 @@ class BotRunner:
         row = payload.get("row") if isinstance(payload, dict) else {}
         if not isinstance(row, dict):
             row = {}
-        result = _optional_text(row.get("account_result_status")) or "SESSION"
-        realized = _narrative_money(row.get("realized_pl_dollars"))
-        trade_count = int(_float_from_value(row.get("closed_trades")) or 0)
+        try:
+            narrative_summary = generate_session_summary(target_date, "1D")
+        except BotError as exc:
+            narrative_summary = {}
+            self._record_notification_activity(
+                f"[NOTIFY] Daily narrative unavailable for {target_date}: {exc}",
+                error=str(exc),
+            )
         next_open_text = (
             next_open.astimezone(NY_TZ).isoformat(timespec="seconds")
             if next_open
             else "Unknown"
         )
-        subject = f"Edgewalker EOD {target_date}: {realized} ({result})"
-        body = "\n".join(
-            [
-                subject,
-                "",
-                f"Closed trades: {trade_count}",
-                f"Account value: {_narrative_money(row.get('ending_account_value'))}",
-                f"Momentum: {_narrative_money(row.get('momentum_pl'))}",
-                f"Chop: {_narrative_money(row.get('chop_pl'))}",
-                f"Inverse: {_narrative_money(row.get('inverse_pl'))}",
-                f"Next market open: {next_open_text}",
-            ]
+        subject, body, html = _daily_summary_email_content(
+            target_date=target_date,
+            row=row,
+            narrative_summary=narrative_summary,
+            next_open_text=next_open_text,
         )
         self._deliver_notification_event(
             event_id=f"daily-summary:{target_date}",
             subject=subject,
             body=body,
+            html=html,
         )
 
     def _daily_summary_notification_date(
@@ -1111,12 +1124,12 @@ class BotRunner:
     ) -> str | None:
         now_ny = datetime.now(NY_TZ)
         today = now_ny.date().isoformat()
+        if not _regular_session_close_elapsed(now_ny):
+            return None
         if next_open is not None:
             next_open_day = next_open.astimezone(NY_TZ).date().isoformat()
             if next_open_day == today:
                 return None
-        elif now_ny.hour < 16:
-            return None
 
         latest_log_date = _most_recent_log_date(market_open_only=True)
         if latest_log_date != today:
@@ -1929,6 +1942,193 @@ def _payload_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return _env_bool_text(str(value))
+
+
+def _notification_subject_date(date_text: str) -> str:
+    try:
+        parsed = datetime.strptime(date_text, "%Y-%m-%d")
+    except ValueError:
+        return date_text
+    return f"{MONTH_NAMES[parsed.month - 1][:3]} {parsed.day}"
+
+
+def _trade_count_label(value: Any) -> str:
+    count = int(_float_from_value(value) or 0)
+    return f"{count} {'trade' if count == 1 else 'trades'}"
+
+
+def _daily_summary_email_content(
+    *,
+    target_date: str,
+    row: dict[str, Any],
+    narrative_summary: dict[str, Any],
+    next_open_text: str,
+) -> tuple[str, str, str]:
+    realized = _narrative_money(row.get("realized_pl_dollars"))
+    change_percent = _narrative_percent(row.get("account_change_percent"))
+    trade_label = _trade_count_label(row.get("closed_trades"))
+    subject = (
+        f"Edgewalker · {_notification_subject_date(target_date)} · "
+        f"{realized} ({change_percent}) · {trade_label}"
+    )
+
+    sections = narrative_summary.get("narrative")
+    if not isinstance(sections, dict):
+        sections = {}
+    bot_performance = sections.get("bot_performance")
+    if not isinstance(bot_performance, dict):
+        bot_performance = {}
+
+    display_date = (
+        _optional_text(narrative_summary.get("display_date"))
+        or _display_date_label(target_date)
+    )
+    scan_label = _narrative_email_scan_label(narrative_summary)
+
+    bot_rows: list[tuple[str, str]] = []
+    for bot in BOT_PERFORMANCE_ORDER:
+        bot_rows.append(
+            (
+                _specialist_display_name(bot),
+                _optional_text(bot_performance.get(bot))
+                or _daily_summary_bot_fallback(row, bot),
+            )
+        )
+
+    tldr = _optional_text(sections.get("tldr")) or (
+        f"Edgewalker finished {realized} ({change_percent}) with {trade_label}."
+    )
+    highlight = _optional_text(sections.get("highlight")) or "No standout highlight was recorded."
+    market_conditions = (
+        _optional_text(sections.get("market_conditions"))
+        or "No market-condition narrative was recorded."
+    )
+    operational_issues = (
+        _optional_text(sections.get("operational_issues"))
+        or "No operational issues were noted."
+    )
+    analysis = _optional_text(sections.get("analysis")) or ""
+    bottom_line = _optional_text(sections.get("bottom_line")) or tldr
+
+    text_lines = [
+        subject,
+        "",
+        f"{display_date} · {scan_label}",
+        "",
+        f"TL;DR: {tldr}",
+        "",
+        f"Highlight: {highlight}",
+        "",
+        "Specialist Performance:",
+        *[f"{name}: {summary}" for name, summary in bot_rows],
+        "",
+        f"Market Conditions: {market_conditions}",
+        "",
+        f"Operational Health: {operational_issues}",
+    ]
+    if analysis:
+        text_lines.extend(["", f"Analysis: {analysis}"])
+    text_lines.extend(["", f"Bottom Line: {bottom_line}", "", f"Next market open: {next_open_text}"])
+
+    html = _daily_summary_email_html(
+        subject=subject,
+        display_date=display_date,
+        scan_label=scan_label,
+        tldr=tldr,
+        highlight=highlight,
+        bot_rows=bot_rows,
+        market_conditions=market_conditions,
+        operational_issues=operational_issues,
+        analysis=analysis,
+        bottom_line=bottom_line,
+        next_open_text=next_open_text,
+    )
+    return subject, "\n".join(text_lines), html
+
+
+def _narrative_email_scan_label(narrative_summary: dict[str, Any]) -> str:
+    total = narrative_summary.get("cycle_count")
+    if total in (None, ""):
+        return "scans unavailable"
+    signal = narrative_summary.get("signal_cycle_count")
+    risk = narrative_summary.get("risk_scan_count")
+    if signal not in (None, "") and risk not in (None, ""):
+        return f"{total} scans ({signal} signal / {risk} risk)"
+    return f"{total} scans"
+
+
+def _daily_summary_bot_fallback(row: dict[str, Any], bot: str) -> str:
+    prefix = {
+        MOMENTUM_BOT: "momentum",
+        CHOP_BOT: "chop",
+        INVERSE_BOT: "inverse",
+    }.get(bot, "")
+    if not prefix:
+        return "No specialist data available."
+    trades = int(_float_from_value(row.get(f"{prefix}_trades")) or 0)
+    pl = _narrative_money(row.get(f"{prefix}_pl"))
+    if trades <= 0:
+        return f"No closed trades; realized P/L {pl}."
+    return f"{trades} closed {'trade' if trades == 1 else 'trades'}; realized P/L {pl}."
+
+
+def _email_escape(value: Any) -> str:
+    return html_lib.escape(str(value), quote=True)
+
+
+def _email_section_html(title: str, body: str) -> str:
+    if not body:
+        return ""
+    return (
+        "<section style=\"margin:18px 0 0;\">"
+        f"<h3 style=\"margin:0 0 6px;font-size:14px;color:#aeb8af;text-transform:uppercase;letter-spacing:.08em;\">{_email_escape(title)}</h3>"
+        f"<p style=\"margin:0;color:#f4f7f2;line-height:1.55;\">{_email_escape(body)}</p>"
+        "</section>"
+    )
+
+
+def _daily_summary_email_html(
+    *,
+    subject: str,
+    display_date: str,
+    scan_label: str,
+    tldr: str,
+    highlight: str,
+    bot_rows: list[tuple[str, str]],
+    market_conditions: str,
+    operational_issues: str,
+    analysis: str,
+    bottom_line: str,
+    next_open_text: str,
+) -> str:
+    bot_cells = "".join(
+        (
+            "<td style=\"width:33.33%;vertical-align:top;padding:12px;border:1px solid #2b3a31;\">"
+            f"<div style=\"font-size:12px;color:#aeb8af;text-transform:uppercase;letter-spacing:.08em;font-weight:800;\">{_email_escape(name)}</div>"
+            f"<div style=\"margin-top:8px;color:#f4f7f2;line-height:1.5;\">{_email_escape(summary)}</div>"
+            "</td>"
+        )
+        for name, summary in bot_rows
+    )
+    analysis_html = _email_section_html("Analysis", analysis) if analysis else ""
+    return (
+        "<div style=\"margin:0;padding:24px;background:#0b100d;color:#f4f7f2;font-family:Arial,Helvetica,sans-serif;\">"
+        "<div style=\"max-width:760px;margin:0 auto;padding:22px;border:1px solid #2b3a31;border-radius:10px;background:#141b17;\">"
+        f"<h1 style=\"margin:0 0 6px;font-size:24px;line-height:1.2;\">{_email_escape(subject)}</h1>"
+        f"<div style=\"color:#aeb8af;font-size:13px;font-weight:700;\">{_email_escape(display_date)} · {_email_escape(scan_label)}</div>"
+        f"<p style=\"margin:22px 0 0;font-size:16px;line-height:1.55;\"><strong>TL;DR:</strong> {_email_escape(tldr)}</p>"
+        f"{_email_section_html('Highlight', highlight)}"
+        "<section style=\"margin:20px 0 0;\">"
+        "<h3 style=\"margin:0 0 8px;font-size:14px;color:#aeb8af;text-transform:uppercase;letter-spacing:.08em;\">Specialist Performance</h3>"
+        f"<table role=\"presentation\" style=\"width:100%;border-collapse:collapse;table-layout:fixed;\">{bot_cells}</table>"
+        "</section>"
+        f"{_email_section_html('Market Conditions', market_conditions)}"
+        f"{_email_section_html('Operational Health', operational_issues)}"
+        f"{analysis_html}"
+        f"{_email_section_html('Bottom Line', bottom_line)}"
+        f"<p style=\"margin:22px 0 0;color:#aeb8af;font-size:13px;\">Next market open: {_email_escape(next_open_text)}</p>"
+        "</div></div>"
+    )
 
 
 def _notification_cooldown_minutes(value: Any) -> int:
@@ -4406,6 +4606,323 @@ def _deterministic_daily_narrative_sections(
             "regime_character": highlight,
             "day_verdict": verdict,
             "patience_guardrail": analysis_parts[-1],
+        },
+    }
+
+
+def _period_realized_pl(day: dict[str, Any]) -> Decimal:
+    performance = day.get("performance") if isinstance(day, dict) else None
+    if not isinstance(performance, dict):
+        return Decimal("0")
+    return _decimal_from_value(performance.get("session_realized_pl")) or Decimal("0")
+
+
+def _period_trade_count(day: dict[str, Any]) -> int:
+    performance = day.get("performance") if isinstance(day, dict) else None
+    if not isinstance(performance, dict):
+        return 0
+    return int(performance.get("session_trade_count") or 0)
+
+
+def _period_equity_change(
+    days: list[dict[str, Any]],
+    total_pl: Decimal,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    if not days:
+        return None, None, None
+    first_perf = days[0].get("performance") if isinstance(days[0], dict) else None
+    first_final = days[0].get("final_state") if isinstance(days[0], dict) else None
+    last_final = days[-1].get("final_state") if isinstance(days[-1], dict) else None
+    if not isinstance(first_final, dict) or not isinstance(last_final, dict):
+        return None, None, None
+    first_ending = _decimal_from_value(first_final.get("portfolio_value"))
+    last_ending = _decimal_from_value(last_final.get("portfolio_value"))
+    first_pl = (
+        _decimal_from_value(first_perf.get("session_realized_pl"))
+        if isinstance(first_perf, dict)
+        else Decimal("0")
+    ) or Decimal("0")
+    if first_ending is None or last_ending is None:
+        return None, last_ending, None
+    starting = first_ending - first_pl
+    if starting == 0:
+        return starting, last_ending, None
+    return_pct = total_pl / starting * Decimal("100")
+    return starting, last_ending, return_pct
+
+
+def _period_display_label(start: str, end: str) -> str:
+    if start == end:
+        return _display_date_label(start)
+    return _display_date_label(f"{start} to {end}")
+
+
+def _period_scope_note(
+    *,
+    timeframe: str,
+    requested_start: str,
+    requested_end: str,
+    actual_start: str,
+    actual_end: str,
+    day_count: int,
+) -> str:
+    if timeframe == "1W":
+        if day_count < 5:
+            return (
+                f"Partial-week read: {day_count} logged session"
+                f"{'' if day_count == 1 else 's'} from "
+                f"{_period_display_label(actual_start, actual_end)}; "
+                "fewer than five market sessions are available in this window."
+            )
+        return (
+            f"One-week read: latest {day_count} logged sessions from "
+            f"{_period_display_label(actual_start, actual_end)}."
+        )
+    if actual_start != requested_start or actual_end != requested_end:
+        return (
+            f"Period uses {day_count} logged session{'' if day_count == 1 else 's'} "
+            f"from {_period_display_label(actual_start, actual_end)}; "
+            "unlogged market days are excluded."
+        )
+    return (
+        f"Period uses {day_count} logged session{'' if day_count == 1 else 's'} "
+        f"from {_period_display_label(actual_start, actual_end)}."
+    )
+
+
+def _period_bot_aggregates(days: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    aggregates = {
+        bot: {"pl": Decimal("0"), "trades": 0, "wins": 0, "losses": 0, "captures": []}
+        for bot in BOT_PERFORMANCE_ORDER
+    }
+    for day in days:
+        performance = day.get("performance") if isinstance(day, dict) else None
+        by_bot = _bot_performance_by_name(performance)
+        for bot in BOT_PERFORMANCE_ORDER:
+            item = by_bot.get(bot) or {}
+            aggregate = aggregates[bot]
+            aggregate["pl"] += _decimal_from_value(item.get("realized_pl")) or Decimal("0")
+            aggregate["trades"] += int(item.get("trade_count") or 0)
+            aggregate["wins"] += int(item.get("wins") or 0)
+            aggregate["losses"] += int(item.get("losses") or 0)
+            capture = _float_from_value(item.get("avg_capture_ratio_percent"))
+            if capture is not None:
+                aggregate["captures"].append(capture)
+    return aggregates
+
+
+def _period_bot_sections(aggregates: dict[str, dict[str, Any]]) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    for bot in BOT_PERFORMANCE_ORDER:
+        item = aggregates.get(bot) or {}
+        trades = int(item.get("trades") or 0)
+        pl = item.get("pl") if isinstance(item.get("pl"), Decimal) else Decimal("0")
+        wins = int(item.get("wins") or 0)
+        losses = int(item.get("losses") or 0)
+        captures = item.get("captures") if isinstance(item.get("captures"), list) else []
+        capture_text = ""
+        if captures:
+            avg_capture = sum(captures) / len(captures)
+            capture_text = f" Avg capture across active sessions {avg_capture:.2f}%."
+        if trades <= 0:
+            sections[bot] = (
+                f"{_specialist_display_name(bot)} stayed flat across the period; "
+                "that is valid gate restraint, not a missing trade."
+            )
+        else:
+            sections[bot] = (
+                f"{_specialist_display_name(bot)} closed {trades} "
+                f"{'trade' if trades == 1 else 'trades'} ({wins}W/{losses}L) "
+                f"for {_narrative_money(pl)}.{capture_text}"
+            )
+    return sections
+
+
+def _period_top_bottom_bots(
+    aggregates: dict[str, dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    active = []
+    for bot, item in aggregates.items():
+        pl = item.get("pl")
+        trades = int(item.get("trades") or 0)
+        if isinstance(pl, Decimal) and trades > 0:
+            active.append((bot, pl))
+    if not active:
+        return None, None
+    top = max(active, key=lambda item: item[1])[0]
+    bottom = min(active, key=lambda item: item[1])[0]
+    return top, bottom
+
+
+def _period_exit_pressure(days: list[dict[str, Any]]) -> tuple[int, int, int]:
+    route_sessions = 0
+    route_exits = 0
+    trailing_exits = 0
+    for day in days:
+        metrics = day.get("session_metrics") if isinstance(day, dict) else None
+        if not isinstance(metrics, dict):
+            continue
+        route = int(metrics.get("route_invalidation_exit_count") or 0)
+        trail = int(metrics.get("trailing_stop_exit_count") or 0)
+        route_exits += route
+        trailing_exits += trail
+        if route:
+            route_sessions += 1
+    return route_sessions, route_exits, trailing_exits
+
+
+def _deterministic_period_narrative_sections(
+    context: dict[str, Any],
+    *,
+    timeframe: str,
+    requested_start: str,
+    requested_end: str,
+    actual_start: str,
+    actual_end: str,
+) -> dict[str, Any]:
+    raw_days = context.get("days")
+    days = [day for day in raw_days if isinstance(day, dict)] if isinstance(raw_days, list) else []
+    day_count = len(days)
+    total_pl = sum((_period_realized_pl(day) for day in days), Decimal("0"))
+    total_trades = sum(_period_trade_count(day) for day in days)
+    green_days = sum(1 for day in days if _period_realized_pl(day) > 0)
+    red_days = sum(1 for day in days if _period_realized_pl(day) < 0)
+    flat_days = day_count - green_days - red_days
+    starting_equity, ending_equity, return_pct = _period_equity_change(days, total_pl)
+    aggregates = _period_bot_aggregates(days)
+    top_bot, bottom_bot = _period_top_bottom_bots(aggregates)
+
+    transition_count = sum(
+        int((day.get("session_metrics") or {}).get("regime_transition_count") or 0)
+        for day in days
+        if isinstance(day.get("session_metrics"), dict)
+    )
+    duration_hours = sum(
+        _float_from_value((day.get("session_metrics") or {}).get("cycle_accounting", {}).get("duration_hours")) or 0
+        for day in days
+        if isinstance(day.get("session_metrics"), dict)
+    )
+    transition_rate = round(transition_count / duration_hours, 2) if duration_hours > 0 else None
+    trust_weighted = Decimal("0")
+    trust_observations = 0
+    total_stale = 0
+    total_errors = int(context.get("total_errors") or 0)
+    for day in days:
+        metrics = day.get("session_metrics") if isinstance(day, dict) else None
+        if not isinstance(metrics, dict):
+            continue
+        total_stale += int(metrics.get("stale_bar_cycles") or 0)
+        trend = metrics.get("trend_trust") if isinstance(metrics.get("trend_trust"), dict) else {}
+        avg_score = _decimal_from_value(trend.get("average_score"))
+        observations = int(trend.get("observations") or 0)
+        if avg_score is not None and observations > 0:
+            trust_weighted += avg_score * Decimal(observations)
+            trust_observations += observations
+    trust_score = (
+        float(trust_weighted / Decimal(trust_observations))
+        if trust_observations
+        else None
+    )
+    trust_tier = _narrative_trust_tier(trust_score)
+    route_sessions, route_exits, trailing_exits = _period_exit_pressure(days)
+    scope_note = _period_scope_note(
+        timeframe=timeframe,
+        requested_start=requested_start,
+        requested_end=requested_end,
+        actual_start=actual_start,
+        actual_end=actual_end,
+        day_count=day_count,
+    )
+
+    scorecard = (
+        f"{green_days} green / {red_days} red / {flat_days} flat days, "
+        f"{_narrative_money(total_pl)} total P/L, {total_trades} closed "
+        f"{'trade' if total_trades == 1 else 'trades'}"
+    )
+    if starting_equity is not None and ending_equity is not None and return_pct is not None:
+        scorecard += (
+            f", account {_narrative_money(starting_equity)} → "
+            f"{_narrative_money(ending_equity)} ({_narrative_percent(return_pct)})"
+        )
+    top_text = (
+        f"{_specialist_display_name(top_bot)} led the period"
+        if top_bot
+        else "No specialist drove the period"
+    )
+    bottom_text = (
+        f"{_specialist_display_name(bottom_bot)} was the drag"
+        if bottom_bot and bottom_bot != top_bot
+        else "no separate specialist drag stood out"
+    )
+    rate_text = (
+        f"about {transition_rate:g} transitions/hour"
+        if transition_rate is not None
+        else "transition rate unavailable"
+    )
+    trust_text = (
+        f"average trend trust {trust_score:.1f} ({trust_tier})"
+        if trust_score is not None
+        else "average trend trust unavailable"
+    )
+    exit_text = []
+    if route_exits:
+        exit_text.append(_narrative_plural(route_exits, "route-invalidation exit"))
+    if trailing_exits:
+        exit_text.append(_narrative_plural(trailing_exits, "trailing-stop exit"))
+    exit_sentence = (
+        f" Exit pressure came from {', '.join(exit_text)}."
+        if exit_text
+        else " Exit pressure was minimal."
+    )
+    if route_sessions >= 5:
+        recurring = (
+            f"Route invalidation appeared across {route_sessions} sessions; "
+            "that is a watchlist pattern, not an automatic tuning command."
+        )
+    elif route_sessions >= 3:
+        recurring = (
+            f"Route invalidation appeared across {route_sessions} sessions, enough to watch "
+            "but not enough to change the locked build by itself."
+        )
+    else:
+        recurring = "No recurring failure mode spans enough sessions to justify tuning language."
+
+    tldr = f"Across {day_count} logged sessions, Edgewalker posted {scorecard}."
+    highlight = f"{scope_note} {top_text}; {bottom_text}."
+    market_conditions = (
+        f"Regime character: {transition_count} transitions across the period, "
+        f"{rate_text}, with {trust_text}.{exit_sentence}"
+    )
+    operational = (
+        f"{_narrative_plural(total_errors, 'operational error')} and "
+        f"{_narrative_plural(total_stale, 'stale data cycle')} noted."
+        if total_errors or total_stale
+        else "No broker, order, or data issues were noted across the period."
+    )
+    analysis = (
+        f"{recurring} Flat days are valid behavior: {flat_days} flat "
+        f"{'day' if flat_days == 1 else 'days'} means the gates declined low-quality trades. "
+        "Do not change parameters from this summary alone; watch for patterns spanning five or more sessions."
+    )
+    bottom_line = (
+        f"{_narrative_money(total_pl)} over {day_count} logged sessions. "
+        f"The useful read is attribution and environment quality: {top_text.lower()}, "
+        f"{bottom_text}, with {trust_text}."
+    )
+    return {
+        "tldr": tldr,
+        "highlight": highlight,
+        "bot_performance": _period_bot_sections(aggregates),
+        "market_conditions": market_conditions,
+        "operational_issues": operational,
+        "analysis": analysis,
+        "bottom_line": bottom_line,
+        "story_beats": {
+            "period_scorecard": scorecard,
+            "specialist_attribution": highlight,
+            "regime_character": market_conditions,
+            "recurring_failure_modes": recurring,
+            "patience_note": analysis,
         },
     }
 
@@ -8061,8 +8578,11 @@ def _period_summary_signature(context: dict[str, Any]) -> str:
             )
     return _narrative_cache_signature(
         {
+            "grounding_version": NARRATIVE_GROUNDING_VERSION,
             "day_count": context.get("day_count"),
             "total_cycles": context.get("total_cycles"),
+            "total_signal_cycles": context.get("total_signal_cycles"),
+            "total_risk_scans": context.get("total_risk_scans"),
             "total_trades": context.get("total_trades"),
             "days": day_signatures,
         }
@@ -8083,6 +8603,7 @@ def _cached_narrative_summary(
     cached = dict(summary)
     cached["cached"] = True
     cached["available"] = True
+    cached["narrative_source"] = "Cached"
     return cached
 
 
@@ -8177,6 +8698,8 @@ def _extract_period_context(
 ) -> dict[str, Any]:
     days: list[dict[str, Any]] = []
     total_cycles = 0
+    total_signal_cycles = 0
+    total_risk_scans = 0
     total_trades = 0
     total_errors = 0
     for log_path in log_files:
@@ -8187,11 +8710,16 @@ def _extract_period_context(
         ctx = _extract_session_context(records, date_str, lifecycle_records)
         days.append(ctx)
         total_cycles += len(records)
+        session = ctx.get("session") if isinstance(ctx.get("session"), dict) else {}
+        total_signal_cycles += int(session.get("signal_cycles") or len(records))
+        total_risk_scans += int(session.get("risk_scans") or 0)
         total_trades += len(ctx.get("trades", []))
         total_errors += ctx.get("error_count", 0)
     return {
         "day_count": len(days),
         "total_cycles": total_cycles,
+        "total_signal_cycles": total_signal_cycles,
+        "total_risk_scans": total_risk_scans,
         "total_trades": total_trades,
         "total_errors": total_errors,
         "days": days,
@@ -8329,6 +8857,7 @@ def generate_session_summary(
         summary = {
             "available": True,
             "cached": False,
+            "narrative_source": "Local",
             "timeframe": "1D",
             "summary": _narrative_for_spreadsheet(
                 {
@@ -8356,6 +8885,10 @@ def generate_session_summary(
     else:
         start_date, end_date = _date_range_for_timeframe(timeframe)
     log_files = _find_log_files_in_range(start_date, end_date)
+    if timeframe == "1W":
+        log_files = log_files[-5:]
+    elif timeframe == "1M":
+        log_files = log_files[-21:]
     if not log_files:
         raise BotError(
             f"No session logs found for {timeframe} ({start_date} to {end_date})."
@@ -8385,24 +8918,38 @@ def generate_session_summary(
             date_label=date_label,
             display_date=_display_date_label(date_label),
             cycle_count=int(context["total_cycles"] or 0),
+            signal_cycle_count=int(context.get("total_signal_cycles") or 0),
+            risk_scan_count=int(context.get("total_risk_scans") or 0),
         )
 
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise BotError(
-            "OPENAI_API_KEY is not configured. Add it to your .env file."
-        )
-    prompt = _build_period_prompt(context, timeframe, (start_date, end_date))
-    raw_narrative = _call_openai(prompt, api_key)
+    narrative_sections = _deterministic_period_narrative_sections(
+        context,
+        timeframe=timeframe,
+        requested_start=start_date,
+        requested_end=end_date,
+        actual_start=actual_start,
+        actual_end=actual_end,
+    )
     summary = {
         "available": True,
         "cached": False,
+        "narrative_source": "Local",
         "timeframe": timeframe,
-        "summary": raw_narrative,
-        "narrative": _parse_narrative_response(raw_narrative),
+        "summary": _narrative_for_spreadsheet(
+            {
+                "narrative": narrative_sections,
+                "display_date": _display_date_label(date_label),
+                "cycle_count": context["total_cycles"],
+                "signal_cycle_count": context.get("total_signal_cycles"),
+                "risk_scan_count": context.get("total_risk_scans"),
+            }
+        ),
+        "narrative": narrative_sections,
         "date": date_label,
         "display_date": _display_date_label(date_label),
         "cycle_count": context["total_cycles"],
+        "signal_cycle_count": context.get("total_signal_cycles"),
+        "risk_scan_count": context.get("total_risk_scans"),
         "generated_at": now_iso(),
     }
     _store_narrative_summary(cache_key, signature, summary)

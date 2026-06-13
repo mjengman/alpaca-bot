@@ -22,6 +22,7 @@ const state = {
   narrativeCycles: null,
   narrativeSignalCycles: null,
   narrativeRiskScans: null,
+  narrativeSource: null,
   narrativeLoading: false,
   narrativeCacheLoading: false,
   activeEnvironment: "paper",
@@ -430,6 +431,21 @@ function sizingValueFromData(data) {
   return "CUSTOM";
 }
 
+function activeSizingData(data) {
+  const status = data?.edgewalker_status;
+  if (!data?.running || !status || status.position_sizing_mode === undefined) {
+    return data;
+  }
+  return {
+    ...data,
+    position_sizing_mode:
+      status.position_sizing_mode ?? data.position_sizing_mode,
+    position_allocation_percent:
+      status.position_allocation_percent ?? data.position_allocation_percent,
+    position_notional: status.position_notional ?? data.position_notional,
+  };
+}
+
 function buyingPowerFromData(data) {
   const value = data.edgewalker_status?.buying_power ?? null;
   return numberOrNull(value);
@@ -526,6 +542,24 @@ function syncSizingControls() {
   renderPositionSizeSummary();
 }
 
+function syncActiveSizingControls(data) {
+  if (!state.running || !els.positionSizing) {
+    return;
+  }
+  const sizingData = activeSizingData(data);
+  const sizingValue = sizingValueFromData(sizingData);
+  const allocation = String(sizingData.position_allocation_percent || "25");
+
+  els.positionSizing.value = sizingValue;
+  state.lastSizingValue = sizingValue;
+  if (els.customAllocation) {
+    els.customAllocation.value = allocation;
+  }
+  if (sizingData.position_notional) {
+    state.fixedNotionalValue = String(sizingData.position_notional);
+  }
+}
+
 function selectedAllocationPercent() {
   if (!els.positionSizing || els.positionSizing.value === "FIXED") {
     return "25";
@@ -540,7 +574,11 @@ function renderPositionSizeSummary(status = null) {
   if (!els.positionSizeSummary || !els.positionSizing) {
     return;
   }
-  const mode = els.positionSizing.value;
+  const runtimeMode =
+    status?.position_sizing_mode !== undefined
+      ? sizingValueFromData(status)
+      : null;
+  const mode = runtimeMode || els.positionSizing.value;
   const effectiveNotional =
     status?.effective_position_notional !== undefined
       ? status.effective_position_notional
@@ -549,7 +587,10 @@ function renderPositionSizeSummary(status = null) {
     els.positionSizeSummary.textContent = `${formatMoney(els.notional.value)} fixed`;
     return;
   }
-  const allocation = selectedAllocationPercent();
+  const allocation =
+    status?.position_allocation_percent !== undefined
+      ? String(status.position_allocation_percent)
+      : selectedAllocationPercent();
   const dollars = formatMoney(effectiveNotional);
   els.positionSizeSummary.textContent =
     effectiveNotional === null || effectiveNotional === undefined
@@ -1492,14 +1533,16 @@ function hydrateForm(data) {
   ) {
     return;
   }
+  const sizingData = activeSizingData(data);
   if (els.symbol) {
     els.symbol.value = data.symbol || "SOXL";
   }
-  state.fixedNotionalValue = data.position_notional || state.fixedNotionalValue || "25";
+  state.fixedNotionalValue =
+    sizingData.position_notional || state.fixedNotionalValue || "25";
   els.notional.value = state.fixedNotionalValue;
   if (els.positionSizing) {
-    const allocation = String(data.position_allocation_percent || "25");
-    const sizingValue = sizingValueFromData(data);
+    const allocation = String(sizingData.position_allocation_percent || "25");
+    const sizingValue = sizingValueFromData(sizingData);
     els.positionSizing.value = sizingValue;
     state.lastSizingValue = els.positionSizing.value;
     if (els.customAllocation) {
@@ -1936,19 +1979,27 @@ function renderSpecialistReadiness(gates) {
     return;
   }
 
-  const specialists = rows
-    .map(([bot, payload]) => ({ bot, ...(payload || {}) }))
-    .sort(
-      (a, b) =>
-        (numberOrNull(a.state_rank) || 99) - (numberOrNull(b.state_rank) || 99),
-    );
-  const lead = specialists[0];
+  const specialists = rows.map(([bot, payload]) => ({ bot, ...(payload || {}) }));
+  const lead = [...specialists].sort(readinessLeadSort)[0];
   els.specialistReadinessSummary.textContent =
     lead?.state === "Inactive" ? "Standing by" : lead?.state || "Waiting";
   els.specialistReadinessSummary.className = readinessToneClass(lead?.state);
   els.specialistReadinessBody.innerHTML = specialists
     .map(renderSpecialistReadinessCard)
     .join("");
+}
+
+function readinessLeadSort(a, b) {
+  const rank = (row) => {
+    if (row?.state === "Managing") {
+      return 0;
+    }
+    if (row?.route_relevant) {
+      return 10 + (numberOrNull(row.state_rank) || 99);
+    }
+    return 50 + (numberOrNull(row?.state_rank) || 99);
+  };
+  return rank(a) - rank(b);
 }
 
 function fallbackSpecialistReadiness() {
@@ -1960,6 +2011,25 @@ function fallbackSpecialistReadiness() {
 }
 
 function fallbackSpecialistReadinessCard(bot, displayName) {
+  const entryGates =
+    bot === "ChopBot"
+      ? [
+          fallbackGate(bot, "route", "Route"),
+          fallbackGate(bot, "permission", "Permission"),
+          fallbackGate(bot, "setup", "Setup"),
+          fallbackGate(bot, "cooldown", "Cooldown"),
+          fallbackGate(bot, "position", "Position"),
+        ]
+      : [
+          fallbackGate(bot, "route", "Route"),
+          fallbackGate(bot, "authority", "Authority"),
+          fallbackGate(bot, "prior_close", "Prior Close"),
+          fallbackGate(bot, "setup", "Setup"),
+          fallbackGate(bot, "path", "Path"),
+          fallbackGate(bot, "entry_bar", "Entry Bar"),
+          fallbackGate(bot, "cooldown", "Cooldown"),
+          fallbackGate(bot, "position", "Position"),
+        ];
   return {
     bot,
     display_name: displayName,
@@ -1968,16 +2038,7 @@ function fallbackSpecialistReadinessCard(bot, displayName) {
     route_relevant: false,
     primary_message: "Awaiting first strategy check",
     position: null,
-    entry_gates: [
-      fallbackGate(bot, "route", "Route"),
-      fallbackGate(bot, "authority", bot === "ChopBot" ? "Permission" : "Authority"),
-      fallbackGate(bot, "prior_close", "Prior Close"),
-      fallbackGate(bot, "setup", "Setup"),
-      fallbackGate(bot, "path", "Path"),
-      fallbackGate(bot, "entry_bar", "Entry Bar"),
-      fallbackGate(bot, "cooldown", "Cooldown"),
-      fallbackGate(bot, "position", "Position"),
-    ],
+    entry_gates: entryGates,
     exit_gates: [],
   };
 }
@@ -1997,11 +2058,8 @@ function renderSpecialistReadinessCard(row) {
   const stateClass = readinessStateClass(stateValue);
   const displayName = row.display_name || formatLabel(row.bot || "Specialist");
   const strategyDescription = strategyGateDescription(row.bot, displayName);
-  const message = row.primary_message || "No gate message reported.";
-  const messageMarkup =
-    stateValue === "Inactive" || message === "Not the current route"
-      ? ""
-      : `<strong>${escapeHtml(message)}</strong>`;
+  const stateBadgeMarkup =
+    stateValue === "Blocked" ? "" : `<b>${escapeHtml(stateValue)}</b>`;
   const content =
     stateValue === "Managing"
       ? renderManagingReadiness(row)
@@ -2015,9 +2073,8 @@ function renderSpecialistReadinessCard(row) {
             tabindex="0"
             data-tooltip="${escapeHtml(strategyDescription)}"
           >${escapeHtml(displayName)}</span>
-          ${messageMarkup}
         </div>
-        <b>${escapeHtml(stateValue)}</b>
+        ${stateBadgeMarkup}
       </div>
       ${content}
     </article>
@@ -2030,7 +2087,7 @@ function renderEntryGateReadiness(row) {
     return '<div class="gate-empty">Entry gates are not active.</div>';
   }
   return `
-    <div class="gate-strip">
+    <div class="gate-strip" style="--gate-count: ${Math.max(gates.length, 1)}">
       ${gates.map((gate) => renderGateSegment(gate, row.bot)).join("")}
     </div>
   `;
@@ -2047,7 +2104,10 @@ function renderManagingReadiness(row) {
         ${renderManagingMetric("Trail", formatPrice(position.trail_price))}
         ${renderManagingMetric("Trail P/L", formatMoney(position.trail_pl_dollars))}
       </div>
-      <div class="gate-strip is-exit">
+      <div class="gate-strip is-exit" style="--gate-count: ${Math.max(
+        exitGates.length,
+        1,
+      )}">
         ${exitGates.map((gate) => renderGateSegment(gate, row.bot)).join("")}
       </div>
     </div>
@@ -5199,6 +5259,7 @@ function clearNarrativeState() {
   state.narrativeCycles = null;
   state.narrativeSignalCycles = null;
   state.narrativeRiskScans = null;
+  state.narrativeSource = null;
 }
 
 function applyNarrativeSnapshot(snapshot) {
@@ -5212,6 +5273,7 @@ function applyNarrativeSnapshot(snapshot) {
   state.narrativeCycles = snapshot.cycles || null;
   state.narrativeSignalCycles = snapshot.signalCycles || null;
   state.narrativeRiskScans = snapshot.riskScans || null;
+  state.narrativeSource = "Cached";
   state.narrativeText = state.narrativeSections
     ? narrativeCopyText()
     : legacyNarrativeText(snapshot.text);
@@ -5224,6 +5286,7 @@ function applyNarrativeData(data) {
   state.narrativeCycles = data.cycle_count;
   state.narrativeSignalCycles = data.signal_cycle_count;
   state.narrativeRiskScans = data.risk_scan_count;
+  state.narrativeSource = narrativeSourceFromPayload(data);
   state.narrativeText = state.narrativeSections
     ? narrativeCopyText()
     : legacyNarrativeText(data.summary);
@@ -5238,6 +5301,7 @@ function currentNarrativeSnapshot() {
     cycles: state.narrativeCycles,
     signalCycles: state.narrativeSignalCycles,
     riskScans: state.narrativeRiskScans,
+    source: state.narrativeSource,
     savedAt: new Date().toISOString(),
   };
 }
@@ -5329,8 +5393,15 @@ function renderNarrative() {
   }
   const metaLabel = state.narrativeDisplayDate || state.narrativeDate;
   const scanLabel = narrativeScanLabel();
-  const meta = metaLabel
-    ? `<p class="narrative-meta">${escapeHtml(metaLabel)} · ${escapeHtml(scanLabel)}</p>`
+  const sourceLabel = narrativeSourceLabel();
+  const metaText = metaLabel
+    ? `${metaLabel} · ${scanLabel}`
+    : "";
+  const sourcePill = sourceLabel
+    ? `<span class="narrative-source-pill">Source: ${escapeHtml(sourceLabel)}</span>`
+    : "";
+  const meta = metaText || sourcePill
+    ? `<p class="narrative-meta">${escapeHtml(metaText)}${metaText && sourcePill ? " · " : ""}${sourcePill}</p>`
     : "";
   if (!state.narrativeSections) {
     const body = (state.narrativeText || "")
@@ -5382,8 +5453,9 @@ function renderNarrativeBotPerformance(botPerformance) {
 function narrativeCopyText() {
   const metaLabel = state.narrativeDisplayDate || state.narrativeDate;
   const scanLabel = narrativeScanLabel();
+  const sourceLabel = narrativeSourceLabel();
   const meta = metaLabel
-    ? `${metaLabel} · ${scanLabel}`
+    ? `${metaLabel} · ${scanLabel}${sourceLabel ? ` · Source: ${sourceLabel}` : ""}`
     : "";
   if (!state.narrativeSections) {
     return [meta, state.narrativeText || ""].filter(Boolean).join("\n\n");
@@ -5416,6 +5488,28 @@ function narrativeScanLabel() {
     label += ` (${state.narrativeSignalCycles} signal / ${state.narrativeRiskScans} risk)`;
   }
   return label;
+}
+
+function narrativeSourceFromPayload(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.cached) return "Cached";
+  const rawSource = data.narrative_source || data.narrativeSource || data.source;
+  const normalized = normalizeNarrativeSource(rawSource);
+  if (normalized) return normalized;
+  const timeframe = String(data.timeframe || state.narrativeTimeframe || "").toUpperCase();
+  return timeframe === "1D" ? "Local" : "OpenAI";
+}
+
+function normalizeNarrativeSource(source) {
+  const normalized = String(source || "").trim().toLowerCase();
+  if (normalized === "local") return "Local";
+  if (normalized === "openai" || normalized === "open_ai") return "OpenAI";
+  if (normalized === "cached" || normalized === "cache") return "Cached";
+  return null;
+}
+
+function narrativeSourceLabel() {
+  return normalizeNarrativeSource(state.narrativeSource);
 }
 
 function normalizeNarrativeSections(sections) {
@@ -6284,6 +6378,7 @@ function render(data) {
       ? "Stop Edgewalker before changing Adaptive shadow telemetry."
       : "When enabled, Adaptive logs the posture it would select while manual directional modes remain in control.";
   }
+  syncActiveSizingControls(data);
   syncSizingControls();
 
   const isDryRun = state.running ? Boolean(data.dry_run) : state.dryRun;
@@ -6307,7 +6402,7 @@ function render(data) {
     data.performance,
     data.edgewalker_status?.preset_authority || data.preset_authority,
   );
-  renderPositionSizeSummary(data.edgewalker_status);
+  renderPositionSizeSummary(state.running ? data.edgewalker_status : null);
   renderLog(data);
   handleRuntimeSounds(data, wasRunning);
 }

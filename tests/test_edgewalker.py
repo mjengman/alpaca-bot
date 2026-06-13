@@ -1932,6 +1932,34 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(momentum["primary_message"], "Blocked by Authority")
         self.assertEqual(authority_gate["status"], "veto")
         self.assertEqual(authority_gate["tier"], "hard_veto")
+        self.assertIn("Closed because", authority_gate["detail"])
+        self.assertNotIn("no_authority", authority_gate["detail"])
+
+        chop = status.specialist_gates[CHOP_BOT]
+        chop_gates = {gate["id"]: gate for gate in chop["entry_gates"]}
+        self.assertEqual(
+            list(chop_gates),
+            ["route", "permission", "setup", "cooldown", "position"],
+        )
+        self.assertEqual(chop_gates["route"]["status"], "veto")
+        self.assertEqual(chop_gates["permission"]["status"], "pass")
+        self.assertNotIn("prior_close", chop_gates)
+        self.assertNotIn("entry_bar", chop_gates)
+        self.assertNotIn("path", chop_gates)
+
+    def test_gate_reason_labels_are_operator_facing(self) -> None:
+        bot = EdgeWalkerBot.__new__(EdgeWalkerBot)
+
+        label = bot._gate_reason_label(
+            "soxl_below_v9_momentum_floor,trend_trust_below_v9_minimum"
+        )
+
+        self.assertEqual(
+            label,
+            "SOXL has not cleared the momentum threshold; trend trust is below the required level",
+        )
+        self.assertNotIn("v9", label.lower())
+        self.assertNotIn("_", label)
 
     def test_status_reports_managing_specialist_gate_state(self) -> None:
         def setup_state(state_store: BotStateStore) -> None:

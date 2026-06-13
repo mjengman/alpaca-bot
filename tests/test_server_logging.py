@@ -42,7 +42,9 @@ from server import (
     _current_ny_activity,
     _cycle_log_record,
     _daily_log_path,
+    _daily_summary_email_content,
     _deterministic_daily_narrative_sections,
+    _deterministic_period_narrative_sections,
     _display_date_label,
     _extract_session_context,
     _format_regime_transition,
@@ -85,6 +87,29 @@ from server import (
 from research import _session_metrics, build_roster_dress_rehearsal_scoreboard
 from trade_metrics import enrich_trades_with_bar_extremes
 from trade_metrics import bot_archaeology_report
+
+
+class FrozenServerDateTime(datetime):
+    current: datetime = datetime.now(timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None) -> datetime:
+        value = cls.current
+        if tz is not None:
+            value = value.astimezone(tz)
+        else:
+            value = value.replace(tzinfo=None)
+        return cls(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            tzinfo=value.tzinfo,
+            fold=getattr(value, "fold", 0),
+        )
 
 
 def config() -> BotConfig:
@@ -2990,9 +3015,122 @@ class ServerLoggingTest(unittest.TestCase):
 
         self.assertEqual(call_openai.call_count, 0)
         self.assertFalse(first["cached"])
+        self.assertEqual(first["narrative_source"], "Local")
         self.assertTrue(second["cached"])
+        self.assertEqual(second["narrative_source"], "Cached")
         self.assertTrue(cache_only["cached"])
+        self.assertEqual(cache_only["narrative_source"], "Cached")
         self.assertIn("Edgewalker", second["narrative"]["tldr"])
+
+    def test_generate_multi_day_summary_is_local_and_does_not_call_openai(self) -> None:
+        def records_for(date: str, final_value: str, realized_pl: str, bot: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": f"{date}T13:30:00+00:00",
+                    "market_open": True,
+                    "portfolio_value": "1000",
+                    "config": {"directional_mode": "BALANCED", "dry_run": False},
+                    "regime": "UPTREND",
+                    "source_price": "200",
+                    "console_lines": [],
+                },
+                {
+                    "timestamp": f"{date}T20:00:00+00:00",
+                    "market_open": True,
+                    "portfolio_value": final_value,
+                    "config": {"directional_mode": "BALANCED", "dry_run": False},
+                    "regime": "SIDEWAYS",
+                    "source_price": "205",
+                    "console_lines": [],
+                    "performance": {
+                        "session_realized_pl": realized_pl,
+                        "session_trade_count": 1,
+                        "session_wins": 1 if Decimal(realized_pl) > 0 else 0,
+                        "session_losses": 1 if Decimal(realized_pl) < 0 else 0,
+                        "reconciliation_confidence": "HIGH",
+                        "bot_performance": [
+                            {
+                                "bot": bot,
+                                "realized_pl": realized_pl,
+                                "trade_count": 1,
+                                "wins": 1 if Decimal(realized_pl) > 0 else 0,
+                                "losses": 1 if Decimal(realized_pl) < 0 else 0,
+                                "avg_capture_ratio_percent": "42",
+                            }
+                        ],
+                    },
+                },
+            ]
+
+        class FakeLifecycleLedger:
+            def read_all(self) -> list[dict[str, object]]:
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for date, final_value, realized_pl, bot in [
+                ("2026-06-10", "1002", "2", MOMENTUM_BOT),
+                ("2026-06-11", "1001", "-1", CHOP_BOT),
+            ]:
+                (root / f"edgewalker-{date}.jsonl").write_text(
+                    "\n".join(
+                        json.dumps(record)
+                        for record in records_for(date, final_value, realized_pl, bot)
+                    ),
+                    encoding="utf-8",
+                )
+            cache_path = root / ".narrative_cache.json"
+            with (
+                patch("server.LOGS_ROOT", root),
+                patch("server.NARRATIVE_CACHE_PATH", cache_path),
+                patch("server.LifecycleLedger", FakeLifecycleLedger),
+                patch("server._call_openai") as call_openai,
+            ):
+                summary = generate_session_summary(
+                    timeframe="CUSTOM",
+                    start_date="2026-06-10",
+                    end_date="2026-06-11",
+                )
+
+        self.assertEqual(call_openai.call_count, 0)
+        self.assertFalse(summary["cached"])
+        self.assertEqual(summary["narrative_source"], "Local")
+        self.assertIn("Across 2 logged sessions", summary["narrative"]["tldr"])
+        self.assertIn("Momentum Surge", summary["narrative"]["bot_performance"][MOMENTUM_BOT])
+        self.assertIn("Do not change parameters", summary["narrative"]["analysis"])
+
+    def test_period_narrative_names_partial_weeks(self) -> None:
+        context = {
+            "days": [
+                {
+                    "session": {"date": "2026-06-10", "total_cycles": 2},
+                    "performance": {
+                        "session_realized_pl": "0",
+                        "session_trade_count": 0,
+                        "bot_performance": [],
+                    },
+                    "final_state": {"portfolio_value": "1000"},
+                    "session_metrics": {
+                        "regime_transition_count": 0,
+                        "cycle_accounting": {"duration_hours": 6.5},
+                        "trend_trust": {"average_score": "50", "observations": 2},
+                    },
+                }
+            ],
+            "total_errors": 0,
+        }
+
+        sections = _deterministic_period_narrative_sections(
+            context,
+            timeframe="1W",
+            requested_start="2026-06-06",
+            requested_end="2026-06-12",
+            actual_start="2026-06-10",
+            actual_end="2026-06-10",
+        )
+
+        self.assertIn("Partial-week read", sections["highlight"])
+        self.assertIn("fewer than five market sessions", sections["highlight"])
 
     def test_environment_settings_round_trip_masks_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3388,6 +3526,49 @@ class ServerLoggingTest(unittest.TestCase):
             [line for _, line in runner._activity_log],
         )
 
+    def test_runner_daily_close_actions_wait_until_regular_close(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        next_open = datetime(2026, 6, 15, 13, 30, 0, tzinfo=timezone.utc)
+        spreadsheet_settings = {
+            "auto_post_enabled": True,
+            "post_endpoint_url": "https://script.google.com/macros/s/example/exec",
+        }
+
+        with (
+            patch("server.datetime", FrozenServerDateTime),
+            patch("server._most_recent_log_date", return_value="2026-06-12"),
+            patch("server.operator_spreadsheet_settings", return_value=spreadsheet_settings),
+        ):
+            FrozenServerDateTime.current = datetime(
+                2026,
+                6,
+                12,
+                10,
+                11,
+                tzinfo=NY_TZ,
+            )
+            self.assertIsNone(
+                runner._operator_spreadsheet_auto_post_date(next_open)
+            )
+            self.assertIsNone(runner._daily_summary_notification_date(next_open))
+
+            FrozenServerDateTime.current = datetime(
+                2026,
+                6,
+                12,
+                16,
+                1,
+                tzinfo=NY_TZ,
+            )
+            self.assertEqual(
+                runner._operator_spreadsheet_auto_post_date(next_open),
+                "2026-06-12",
+            )
+            self.assertEqual(
+                runner._daily_summary_notification_date(next_open),
+                "2026-06-12",
+            )
+
     def test_notification_event_dedupes_and_records_activity(self) -> None:
         runner = BotRunner.__new__(BotRunner)
         runner._lock = threading.Lock()
@@ -3486,6 +3667,56 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(payload["body"], "Trade entered.")
         self.assertEqual(payload["html_body"], "<p>Trade entered.</p>")
         self.assertEqual(payload["shared_secret"], "notify-secret")
+
+    def test_daily_summary_email_content_uses_narrative_sections(self) -> None:
+        row = {
+            "realized_pl_dollars": "-1.21",
+            "account_change_percent": "-0.37",
+            "closed_trades": "4",
+            "momentum_pl": "-0.45",
+            "chop_pl": "-0.76",
+            "inverse_pl": "0",
+            "momentum_trades": "1",
+            "chop_trades": "3",
+            "inverse_trades": "0",
+        }
+        narrative_summary = {
+            "display_date": "June 11 2026",
+            "cycle_count": 432,
+            "signal_cycle_count": 360,
+            "risk_scan_count": 72,
+            "narrative": {
+                "tldr": "Edgewalker finished slightly red.",
+                "highlight": "Regime churn was the main story.",
+                "bot_performance": {
+                    MOMENTUM_BOT: "Momentum Surge closed one trailing-stop trade.",
+                    CHOP_BOT: "Chop Reversion took route-invalidation pressure.",
+                    INVERSE_BOT: "Inverse Cascade stayed flat by gate discipline.",
+                },
+                "market_conditions": "SOXL traded through churn-heavy tape.",
+                "operational_issues": "No broker errors were noted.",
+                "analysis": "No parameter conclusions are justified from one session.",
+                "bottom_line": "The useful read is environment quality.",
+            },
+        }
+
+        subject, text, html = _daily_summary_email_content(
+            target_date="2026-06-11",
+            row=row,
+            narrative_summary=narrative_summary,
+            next_open_text="2026-06-12T09:30:00-04:00",
+        )
+
+        self.assertEqual(
+            subject,
+            "Edgewalker · Jun 11 · -$1.21 (-0.37%) · 4 trades",
+        )
+        self.assertIn("TL;DR: Edgewalker finished slightly red.", text)
+        self.assertIn("Momentum Surge: Momentum Surge closed one trailing-stop trade.", text)
+        self.assertIn("Next market open: 2026-06-12T09:30:00-04:00", text)
+        self.assertIn("<table", html)
+        self.assertIn("Chop Reversion took route-invalidation pressure.", html)
+        self.assertIn("No parameter conclusions are justified", html)
 
     def test_warmup_notifications_are_deduped_by_session(self) -> None:
         runner = BotRunner.__new__(BotRunner)

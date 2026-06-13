@@ -3470,10 +3470,10 @@ class EdgeWalkerBot:
         action_taken: str,
         entry_block_reason: str | None,
     ) -> dict[str, Any]:
-        del signal
         return {
             bot_name: self._specialist_gate_card(
                 bot_name,
+                signal,
                 route,
                 position_symbol,
                 position,
@@ -3490,6 +3490,7 @@ class EdgeWalkerBot:
     def _specialist_gate_card(
         self,
         bot_name: str,
+        signal: RegimeSignal | None,
         route: BotRoute | None,
         position_symbol: str | None,
         position: dict[str, Any] | None,
@@ -3506,6 +3507,8 @@ class EdgeWalkerBot:
             position_owner,
         )
         route_relevant = bool(route and route.active_bot == bot_name)
+        bot_entry_signal = entry_signal if route_relevant else None
+        bot_entry_block_reason = entry_block_reason if route_relevant else None
         if managing:
             exit_gates = self._specialist_exit_gates(
                 bot_name,
@@ -3533,15 +3536,16 @@ class EdgeWalkerBot:
 
         entry_gates = self._specialist_entry_gates(
             bot_name,
+            signal,
             route,
             position_symbol,
-            entry_signal,
+            bot_entry_signal,
             action_taken,
-            entry_block_reason,
+            bot_entry_block_reason,
         )
-        if not route_relevant:
-            state = "Inactive"
-        elif entry_signal is True:
+        if bot_entry_signal is True and not any(
+            gate.get("status") == "veto" for gate in entry_gates
+        ):
             state = "Ready"
         elif any(gate.get("status") == "veto" for gate in entry_gates):
             state = "Blocked"
@@ -3562,35 +3566,39 @@ class EdgeWalkerBot:
     def _specialist_entry_gates(
         self,
         bot_name: str,
+        signal: RegimeSignal | None,
         route: BotRoute | None,
         position_symbol: str | None,
         entry_signal: bool | None,
         action_taken: str,
         entry_block_reason: str | None,
     ) -> list[dict[str, Any]]:
-        route_relevant = bool(route and route.active_bot == bot_name)
-        if not route_relevant:
-            return [
-                self._specialist_gate(
-                    gate_id,
-                    label,
-                    "inactive",
-                    tier,
-                    self._specialist_gate_requirement_detail(bot_name, gate_id),
-                )
-                for gate_id, label, tier in self._specialist_gate_template(bot_name)
-            ]
-
-        return [
-            self._route_gate(bot_name, route),
-            self._authority_gate(bot_name, entry_block_reason),
-            self._prior_close_gate(bot_name),
-            self._setup_window_gate(bot_name, entry_signal, entry_block_reason),
-            self._path_quality_gate(bot_name, entry_block_reason),
-            self._entry_bar_gate(bot_name),
-            self._cooldown_gate(entry_block_reason),
-            self._position_clear_gate(position_symbol, action_taken, entry_block_reason),
-        ]
+        gate_builders = {
+            "route": lambda: self._route_gate(bot_name, route),
+            "authority": lambda: self._authority_gate(bot_name, entry_block_reason),
+            "permission": lambda: self._authority_gate(bot_name, entry_block_reason),
+            "prior_close": lambda: self._prior_close_gate(bot_name),
+            "setup": lambda: self._setup_window_gate(
+                bot_name,
+                signal,
+                entry_signal,
+                entry_block_reason,
+            ),
+            "path": lambda: self._path_quality_gate(bot_name, entry_block_reason),
+            "entry_bar": lambda: self._entry_bar_gate(bot_name),
+            "cooldown": lambda: self._cooldown_gate(bot_name, entry_block_reason),
+            "position": lambda: self._position_clear_gate(
+                position_symbol,
+                action_taken,
+                entry_block_reason,
+            ),
+        }
+        gates: list[dict[str, Any]] = []
+        for gate_id, _label, _tier in self._specialist_gate_template(bot_name):
+            builder = gate_builders.get(gate_id)
+            if builder is not None:
+                gates.append(builder())
+        return gates
 
     def _specialist_gate_template(
         self,
@@ -3600,10 +3608,7 @@ class EdgeWalkerBot:
             return (
                 ("route", "Route", "required"),
                 ("permission", "Permission", "hard_veto"),
-                ("prior_close", "Prior Close", "quality"),
                 ("setup", "Setup", "required"),
-                ("path", "Path", "quality"),
-                ("entry_bar", "Entry Bar", "quality"),
                 ("cooldown", "Cooldown", "required"),
                 ("position", "Position", "required"),
             )
@@ -3684,17 +3689,18 @@ class EdgeWalkerBot:
                 "Authority",
                 "veto",
                 "hard_veto",
-                f"Momentum authority is closed: {self._gate_reason_label(reason)}.",
+                f"Closed because {self._gate_reason_label(reason)}.",
             )
 
         if bot_name == CHOP_BOT:
-            if entry_block_reason == CHOP_PERMISSION_SUPPRESSION_REASON:
+            reason = self._chop_permission_block_reason()
+            if reason:
                 return self._specialist_gate(
                     "permission",
                     "Permission",
                     "veto",
                     "hard_veto",
-                    "Chop Reversion permission gate is blocking this entry.",
+                    f"Closed because {self._gate_reason_label(reason)}.",
                     self.config.chop_permission_mode,
                 )
             return self._specialist_gate(
@@ -3706,6 +3712,15 @@ class EdgeWalkerBot:
                 self.config.chop_permission_mode,
             )
 
+        active_momentum_context = self._v9_active_momentum_context()
+        if active_momentum_context is not None:
+            return self._specialist_gate(
+                "authority",
+                "Authority",
+                "veto",
+                "hard_veto",
+                "Momentum authority is suppressing inverse entries.",
+            )
         if entry_block_reason == V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON:
             return self._specialist_gate(
                 "authority",
@@ -3772,32 +3787,59 @@ class EdgeWalkerBot:
     def _setup_window_gate(
         self,
         bot_name: str,
+        signal: RegimeSignal | None,
         entry_signal: bool | None,
         entry_block_reason: str | None,
     ) -> dict[str, Any]:
         if bot_name == CHOP_BOT:
-            if entry_signal is True:
-                return self._specialist_gate(
-                    "setup",
-                    "Setup",
-                    "pass",
-                    "required",
-                    "Chop discount setup is confirmed.",
-                )
-            if entry_block_reason in {"price_above_mean", "discount_insufficient"}:
+            if signal is None:
                 return self._specialist_gate(
                     "setup",
                     "Setup",
                     "waiting",
                     "required",
-                    f"Chop setup is waiting: {self._gate_reason_label(entry_block_reason)}.",
+                    "Waiting for SOXL slow-SMA data before checking the chop discount.",
+                )
+            if signal.slow_sma == 0:
+                return self._specialist_gate(
+                    "setup",
+                    "Setup",
+                    "waiting",
+                    "required",
+                    "Waiting for a valid slow SMA before checking the chop discount.",
+                )
+            discount_percent = (
+                (signal.slow_sma - signal.price)
+                / signal.slow_sma
+                * Decimal("100")
+            )
+            required_discount = self.config.chop_entry_discount_percent
+            discount_value = f"{self._decimal_text(discount_percent)}%"
+            if discount_percent >= required_discount:
+                return self._specialist_gate(
+                    "setup",
+                    "Setup",
+                    "pass",
+                    "required",
+                    "SOXL is discounted enough versus the slow SMA for Chop Reversion.",
+                    discount_value,
+                )
+            if discount_percent <= 0:
+                return self._specialist_gate(
+                    "setup",
+                    "Setup",
+                    "waiting",
+                    "required",
+                    "SOXL is above the slow SMA, so no chop discount is present yet.",
+                    discount_value,
                 )
             return self._specialist_gate(
                 "setup",
                 "Setup",
-                "pass",
+                "waiting",
                 "required",
-                "SIDEWAYS route is active; Chop setup can evaluate.",
+                f"SOXL discount is shallower than the {required_discount}% requirement.",
+                discount_value,
             )
 
         context = self._specialist_setup_context(bot_name) or {}
@@ -3959,7 +4001,29 @@ class EdgeWalkerBot:
             "Waiting for entry-bar confirmation.",
         )
 
-    def _cooldown_gate(self, entry_block_reason: str | None) -> dict[str, Any]:
+    def _cooldown_gate(
+        self,
+        bot_name: str,
+        entry_block_reason: str | None,
+    ) -> dict[str, Any]:
+        cooldown_symbol = None
+        if bot_name == MOMENTUM_BOT:
+            cooldown_symbol = SOXL
+        elif bot_name == INVERSE_BOT:
+            cooldown_symbol = SOXS
+        if cooldown_symbol is not None:
+            cooldown_active, cooldown_remaining = self._directional_cooldown_status(
+                bot_name,
+                cooldown_symbol,
+            )
+            if cooldown_active:
+                return self._specialist_gate(
+                    "cooldown",
+                    "Cooldown",
+                    "waiting",
+                    "required",
+                    f"Directional cooldown is active for about {cooldown_remaining}m.",
+                )
         if entry_block_reason and entry_block_reason.startswith(
             "directional_cooldown_active_"
         ):
@@ -4172,7 +4236,7 @@ class EdgeWalkerBot:
         if state == "Ready":
             return "All core gates are passing"
         if state == "Inactive":
-            return "Not the current route"
+            return "Standing by"
         if state == "Blocked":
             gate = next((item for item in gates if item.get("status") == "veto"), None)
             if gate:
@@ -4258,7 +4322,85 @@ class EdgeWalkerBot:
         return payload
 
     def _gate_reason_label(self, reason: Any) -> str:
-        return str(reason or "not qualified").replace("_", " ")
+        raw = str(reason or "").strip()
+        if not raw:
+            return "not qualified"
+        labels = []
+        for part in raw.split(","):
+            key = part.strip()
+            if not key:
+                continue
+            label = self._plain_gate_reason_label(key)
+            if label not in labels:
+                labels.append(label)
+        return "; ".join(labels) if labels else "not qualified"
+
+    def _plain_gate_reason_label(self, reason: str) -> str:
+        labels = {
+            MOMENTUM_AUTHORITY_REQUIRED_REASON: "momentum authority has not qualified yet",
+            V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON: "momentum authority has not given this entry permission",
+            V9_MOMENTUM_CONTEXT_SUPPRESSION_REASON: "active Momentum authority is reserving this tape for SOXL, so inverse entries stay closed",
+            V9_MOMENTUM_CONTEXT_ACTIVATION_REASON: "clean momentum tape has qualified",
+            V9_MOMENTUM_CONTEXT_RECLAIM_REASON: "momentum has reclaimed enough strength after the open",
+            V9_MOMENTUM_CONTEXT_INVALIDATION_REASON: "momentum authority was invalidated",
+            "soxl_below_v9_momentum_floor": "SOXL has not cleared the momentum threshold",
+            "soxl_below_open_after_1030": "SOXL fell below the session open after the clean-momentum window",
+            "trend_trust_below_v9_minimum": "trend trust is below the required level",
+            "soxl_below_reclaim_floor": "SOXL has not reclaimed enough strength",
+            "trend_trust_below_reclaim_minimum": "trend trust is below the reclaim threshold",
+            "first_30m_raw_transition_count_above_limit": "the early tape had too many regime flips",
+            "first_30m_non_warmup_transition_count_not_zero": "the tape already flipped after warmup",
+            "momentum_drawdown_with_dirty_tape": "momentum gave back too much ground in dirty tape",
+            "v8_noisy_water_filter": "the tape is too noisy for a clean directional entry",
+            "v8_trend_trust_below_minimum": "trend trust is below the required level",
+            "trend_strength_weakening": "trend strength is weakening",
+            "directional_strength_below_minimum": "directional strength is below the minimum",
+            "already_extended_above_fast_sma": "price is already too extended above the fast SMA",
+            "price_above_mean": "price is above the mean-reversion entry zone",
+            "discount_insufficient": "the discount is not deep enough for Chop Reversion",
+            "source_prior_close_unavailable": "previous-session close is not available",
+            "source_prior_close_above_surge_max": "SOXL started too high versus the previous close for a surge entry",
+            "source_prior_close_above_cascade_max": "SOXL started too high versus the previous close for a cascade entry",
+            "sustained_window_insufficient_bars": "the setup window does not have enough completed bars yet",
+            "momentum_surge_after_entry_window": "the Momentum Surge entry window has closed",
+            "inverse_cascade_after_entry_window": "the Inverse Cascade entry window has closed",
+            "source_entry_bar_not_up": "the latest SOXL bar did not confirm upside momentum",
+            "source_entry_bar_not_down": "the latest SOXL bar did not confirm downside pressure",
+            "inverse_entry_bar_not_down": "SOXS did not confirm the expected pullback pattern for Momentum Surge",
+            "inverse_entry_bar_down": "SOXS is moving the wrong way for an inverse entry",
+            "inverse_entry_bar_above_surge_max": "SOXS is too firm for a clean Momentum Surge entry",
+            "source_new_high_pressure_below_min": "SOXL is not making enough fresh highs",
+            "source_new_low_pressure_below_min": "SOXL is not making enough fresh lows",
+            "source_direction_changes_above_surge_max": "the path has too many direction changes",
+            "source_up_path_ratio_below_surge_min": "the upside path is not clean enough",
+            "source_not_deepening_during_sustain": "the move is not deepening during the sustained window",
+            "source_shallow_surge_current_below_min": "the current surge is too shallow",
+            "source_drawdown_above_surge_max": "SOXL drawdown does not match the surge profile",
+            "source_current_above_cascade_max": "SOXL has not fallen far enough for cascade conditions",
+            "source_drawdown_above_cascade_max": "SOXL drawdown is not deep enough for cascade conditions",
+            "inverse_current_below_cascade_min": "SOXS strength is not high enough for cascade conditions",
+            "source_recovery_above_cascade_max": "SOXL has recovered too much for a clean cascade",
+            "source_velocity_above_cascade_max": "SOXL is not falling fast enough for cascade conditions",
+            "source_not_sustained_below_cascade_max": "SOXL has not stayed weak long enough",
+            "inverse_not_sustained_above_cascade_min": "SOXS has not stayed strong long enough",
+            "source_new_low_pressure_below_min": "SOXL is not making enough fresh lows",
+            "source_window_start_below_cascade_min": "the cascade started from the wrong level",
+            "inverse_cascade_required": "Inverse Cascade requires a confirmed cascade setup",
+            "inverse_cascade_reentry_locked": "Inverse Cascade re-entry is locked for this session",
+            "inverse_cascade_stopped_out_session_locked": "Inverse Cascade is locked after a stopped-out attempt",
+            "v7_route_invalidation_breaker": "route-invalidation breaker is active",
+            "v7_inverse_loss_breaker": "Inverse loss breaker is active",
+            "v7_bot_loss_breaker": "bot loss breaker is active",
+            CHOP_PERMISSION_SUPPRESSION_REASON: "Chop Reversion permission is closed in this tape",
+            "chop_momentum_authority_active": "Momentum authority is active, so Chop Reversion stands down",
+            "chop_early_transition_count_not_zero": "the early tape already changed regimes",
+            "chop_source_directional_state_too_large": "SOXL is too directional for a chop entry",
+            "chop_firewall_context_unavailable": "the Chop Firewall does not have enough context yet",
+            "chop_negative_noisy_tape": "SOXL is negative with noisy post-warmup tape",
+            "chop_source_drawdown_firewall": "SOXL drawdown is too deep for a safe chop entry",
+            "chop_near_momentum_authority": "SOXL is close to clean momentum authority",
+        }
+        return labels.get(reason, reason.replace("_", " "))
 
     def _active_position(
         self,
@@ -5879,6 +6021,21 @@ class EdgeWalkerBot:
         if route.active_bot != CHOP_BOT or mode == CHOP_PERMISSION_MODE_OFF:
             return None
 
+        reason = self._chop_permission_block_reason()
+        if not reason:
+            return None
+
+        print(
+            "[V10] Chop permission suppresses entry: "
+            f"mode={mode} reason={reason}"
+        )
+        return EntryDecision(False, CHOP_PERMISSION_SUPPRESSION_REASON)
+
+    def _chop_permission_block_reason(self) -> str | None:
+        mode = self.config.chop_permission_mode
+        if mode == CHOP_PERMISSION_MODE_OFF:
+            return None
+
         reasons: list[str] = []
         if self._v10_authority_state() == V10_AUTHORITY_STATE_MOMENTUM:
             reasons.append("chop_momentum_authority_active")
@@ -5946,15 +6103,7 @@ class EdgeWalkerBot:
                 ):
                     reasons.append("chop_near_momentum_authority")
 
-        if not reasons:
-            return None
-
-        reason = ",".join(reasons)
-        print(
-            "[V10] Chop permission suppresses entry: "
-            f"mode={mode} reason={reason}"
-        )
-        return EntryDecision(False, CHOP_PERMISSION_SUPPRESSION_REASON)
+        return ",".join(reasons) if reasons else None
 
     def _momentum_authority_entry_policy_decision(
         self,
