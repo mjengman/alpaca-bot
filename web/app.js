@@ -718,8 +718,6 @@ function goLiveRouterFirewallConfig() {
     presetVersion: GO_LIVE_ROUTER_VERSION,
     presetAuthorityMode: "OFF",
     presetAuthorityPresets: [],
-    positionSizingMode: "DYNAMIC",
-    positionAllocationPercent: "25",
     enabledBots: ["MomentumBot", "ChopBot", "InverseBot"],
     directionalMode: "BALANCED",
     directionalMaxExtensionPercent: "0.40",
@@ -757,8 +755,24 @@ function goLiveRouterFirewallConfig() {
   };
 }
 
+function strategyConfigWithoutSizing(config) {
+  if (!config || typeof config !== "object") {
+    return config;
+  }
+  if (config.presetName !== GO_LIVE_ROUTER_NAME) {
+    return config;
+  }
+  const cleaned = { ...config };
+  delete cleaned.positionSizingMode;
+  delete cleaned.positionAllocationPercent;
+  delete cleaned.positionNotional;
+  return cleaned;
+}
+
 function writeActiveStrategyConfig(config) {
-  state.activeStrategyConfig = config && typeof config === "object" ? config : null;
+  const cleaned = strategyConfigWithoutSizing(config);
+  state.activeStrategyConfig =
+    cleaned && typeof cleaned === "object" ? cleaned : null;
   try {
     if (state.activeStrategyConfig) {
       localStorage.setItem(
@@ -781,7 +795,9 @@ function readActiveStrategyConfig() {
       return null;
     }
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
+    return parsed && typeof parsed === "object"
+      ? strategyConfigWithoutSizing(parsed)
+      : null;
   } catch {
     return null;
   }
@@ -1458,9 +1474,12 @@ function applyStrategyConfig(config) {
       mode === PRESET_AUTHORITY_MODE_V6 ? PRESET_AUTHORITY_MODE_V6 : "OFF";
     localStorage.setItem(PRESET_AUTHORITY_MODE_KEY, els.presetAuthorityMode.value);
   }
-  const sizingMode = config.positionSizingMode || "FIXED";
-  const allocation = String(config.positionAllocationPercent || "25");
-  if (els.positionSizing) {
+  const hasSizingConfig =
+    config.positionSizingMode !== undefined ||
+    config.positionAllocationPercent !== undefined;
+  if (hasSizingConfig && els.positionSizing) {
+    const sizingMode = config.positionSizingMode || "FIXED";
+    const allocation = String(config.positionAllocationPercent || "25");
     if (sizingMode === "DYNAMIC") {
       els.positionSizing.value = ["25", "50", "75", "95"].includes(allocation)
         ? allocation
