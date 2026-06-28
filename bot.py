@@ -1647,6 +1647,12 @@ class EdgeWalkerStatus:
     position_owner: str | None
     high_water_mark: str | None
     trailing_exit_price: str | None
+    risk_exit_kind: str | None
+    risk_exit_label: str | None
+    risk_exit_price: str | None
+    risk_exit_pl: str | None
+    risk_exit_detail: str | None
+    risk_exit_trail_percent: str | None
     entry_block_reason: str | None
     specialist_gates: dict[str, Any] | None
     prior_close_status: str | None
@@ -3712,13 +3718,15 @@ class EdgeWalkerBot:
         position_owner = None
         high_water_mark = None
         trailing_exit_price = None
+        trail_percent = None
 
         if position_symbol:
             position_owner = self.state_store.get_position_owner(position_symbol)
             high_water_mark = self.state_store.get_high_water_mark(position_symbol)
             if high_water_mark is not None:
+                trail_percent = self._effective_trail_percent(position_symbol)
                 trailing_exit_price = high_water_mark * (
-                    Decimal("1") - (self.config.trail_percent / Decimal("100"))
+                    Decimal("1") - (trail_percent / Decimal("100"))
                 )
 
         day_pl, day_pl_percent = self._account_day_pl(account)
@@ -3729,6 +3737,14 @@ class EdgeWalkerBot:
         effective_directional_mode = self._current_effective_directional_mode()
         inverse_price = self._latest_status_price(SOXS)
         prior_close_status = self._prior_close_status_payload()
+        risk_exit = self._position_risk_exit_payload(
+            position_symbol,
+            position,
+            position_owner,
+            action_taken,
+            trailing_exit_price,
+            trail_percent,
+        )
         specialist_gates = self._specialist_gate_telemetry(
             signal,
             route,
@@ -3737,6 +3753,7 @@ class EdgeWalkerBot:
             position_owner,
             high_water_mark,
             trailing_exit_price,
+            risk_exit,
             entry_signal,
             action_taken,
             entry_block_reason,
@@ -3794,6 +3811,12 @@ class EdgeWalkerBot:
             position_owner=position_owner,
             high_water_mark=self._decimal_text(high_water_mark),
             trailing_exit_price=self._decimal_text(trailing_exit_price),
+            risk_exit_kind=risk_exit.get("kind"),
+            risk_exit_label=risk_exit.get("label"),
+            risk_exit_price=self._decimal_text(risk_exit.get("price")),
+            risk_exit_pl=self._decimal_text(risk_exit.get("pl")),
+            risk_exit_detail=risk_exit.get("detail"),
+            risk_exit_trail_percent=self._decimal_text(risk_exit.get("trail_percent")),
             entry_block_reason=entry_block_reason,
             specialist_gates=specialist_gates,
             prior_close_status=prior_close_status.get("status"),
@@ -3871,6 +3894,169 @@ class EdgeWalkerBot:
                     return {"status": "Loaded", "value": None}
         return {"status": "Pending", "value": None}
 
+    def _position_risk_exit_payload(
+        self,
+        position_symbol: str | None,
+        position: dict[str, Any] | None,
+        position_owner: str | None,
+        action_taken: str,
+        trailing_exit_price: Decimal | None,
+        trail_percent: Decimal | None,
+    ) -> dict[str, Any]:
+        if not position_symbol or not position:
+            return {}
+
+        kind = "trail"
+        label = "Trail"
+        detail = "The active bot-managed trailing stop is the next price-based exit."
+
+        if action_taken in {"market_close_liquidation", "wait_for_closeout_order"}:
+            kind = "closeout"
+            label = "Closeout"
+            detail = "Market-close liquidation is active and overrides trail state."
+        elif action_taken in {
+            "hold_inverse_cascade_route_invalidation_grace",
+            "hold_momentum_route_invalidation_grace",
+        }:
+            kind = "route_grace"
+            label = "Route Exit Pending"
+            detail = (
+                "Route is invalidated; Edgewalker is temporarily holding during "
+                "grace while price-based risk remains active."
+            )
+        elif action_taken in {
+            "hold_inverse_cascade_proven_route_suppressed",
+            "hold_momentum_proven_route_suppressed",
+        }:
+            kind = "proven_trail"
+            label = "Proven Trail"
+            detail = (
+                "Route invalidation is suppressed because this position is proven; "
+                "the effective trail remains the enforced price-based exit."
+            )
+        elif self._position_uses_proven_inverse_trail(position_symbol, position_owner):
+            kind = "proven_trail"
+            label = "Proven Trail"
+            detail = (
+                "Inverse Cascade is proven; the displayed exit uses the proven "
+                "Inverse trail doctrine, not the base trail."
+            )
+
+        risk_price = trailing_exit_price
+        profit_lock = self._stored_inverse_profit_lock_status(position_symbol, position)
+        if profit_lock and profit_lock.get("armed"):
+            floor_price = profit_lock.get("floor_price")
+            if floor_price is not None and (
+                risk_price is None or floor_price > risk_price
+            ):
+                risk_price = floor_price
+                kind = "profit_lock"
+                label = "Profit Lock"
+                floor_percent = profit_lock.get("floor_percent")
+                detail = (
+                    "Inverse Cascade profit lock is armed; the displayed exit "
+                    f"protects the locked +{self._decimal_text(floor_percent)}% floor."
+                )
+
+        qty = self._position_qty(position)
+        entry_price = self._position_optional_decimal(position, "avg_entry_price")
+        risk_pl = None
+        if risk_price is not None and entry_price is not None and qty > 0:
+            risk_pl = (risk_price - entry_price) * qty
+
+        if trail_percent is not None and risk_price is not None and kind != "profit_lock":
+            detail = f"{detail} Effective trail: {self._decimal_text(trail_percent)}%."
+
+        return {
+            "kind": kind,
+            "label": label,
+            "price": risk_price,
+            "pl": risk_pl,
+            "detail": detail,
+            "trail_percent": trail_percent,
+        }
+
+    def _effective_trail_percent(self, symbol: str) -> Decimal:
+        return TrailingStopBot(
+            config_for_symbol(self.config, symbol),
+            self.client,
+            self.state_store,
+            self.market_data,
+            self.lifecycle_ledger,
+        )._effective_trail_percent(symbol)
+
+    def _position_uses_proven_inverse_trail(
+        self,
+        position_symbol: str | None,
+        position_owner: str | None,
+    ) -> bool:
+        if position_symbol != SOXS or position_owner != INVERSE_BOT:
+            return False
+        state = self.state_store.get_inverse_cascade_state()
+        return bool(
+            state.get("mode") == INVERSE_CASCADE_MODE_SUSTAINED
+            and state.get("session_date") == self._inverse_cascade_session_date()
+            and state.get("entered_at")
+            and state.get("proven_at")
+        )
+
+    def _stored_inverse_profit_lock_status(
+        self,
+        position_symbol: str | None,
+        position: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if (
+            position_symbol != SOXS
+            or not position
+            or not self.config.inverse_cascade_proven_profit_lock_enabled
+            or self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+        ):
+            return None
+
+        entry_price = self._position_optional_decimal(position, "avg_entry_price")
+        current_price = self._position_optional_decimal(position, "current_price")
+        if entry_price is None or entry_price <= 0:
+            return None
+
+        state = self.state_store.get_inverse_cascade_state()
+        if (
+            state.get("mode") != INVERSE_CASCADE_MODE_SUSTAINED
+            or state.get("session_date") != self._inverse_cascade_session_date()
+            or not state.get("entered_at")
+            or not state.get("proven_at")
+        ):
+            return None
+
+        floor_percent = optional_decimal_from_api(
+            state.get("profit_lock_floor_percent"),
+            "inverse cascade profit lock floor",
+        )
+        if floor_percent is None:
+            return {"armed": False}
+
+        floor_price = optional_decimal_from_api(
+            state.get("profit_lock_floor_price"),
+            "inverse cascade profit lock floor price",
+        )
+        if floor_price is None:
+            floor_price = entry_price * (Decimal("1") + floor_percent / Decimal("100"))
+
+        current_pl_percent = None
+        breached = False
+        if current_price is not None:
+            current_pl_percent = (
+                (current_price - entry_price) / entry_price * Decimal("100")
+            )
+            breached = current_pl_percent <= floor_percent
+
+        return {
+            "armed": True,
+            "current_pl_percent": current_pl_percent,
+            "floor_percent": floor_percent,
+            "floor_price": floor_price,
+            "breached": breached,
+        }
+
     def _current_effective_directional_mode(self) -> str | None:
         if self.config.directional_mode == DIRECTIONAL_MODE_ADAPTIVE:
             if self._adaptive_posture is None:
@@ -3887,6 +4073,7 @@ class EdgeWalkerBot:
         position_owner: str | None,
         high_water_mark: Decimal | None,
         trailing_exit_price: Decimal | None,
+        risk_exit: dict[str, Any],
         entry_signal: bool | None,
         action_taken: str,
         entry_block_reason: str | None,
@@ -3901,6 +4088,7 @@ class EdgeWalkerBot:
                 position_owner,
                 high_water_mark,
                 trailing_exit_price,
+                risk_exit,
                 entry_signal,
                 action_taken,
                 entry_block_reason,
@@ -3918,6 +4106,7 @@ class EdgeWalkerBot:
         position_owner: str | None,
         high_water_mark: Decimal | None,
         trailing_exit_price: Decimal | None,
+        risk_exit: dict[str, Any],
         entry_signal: bool | None,
         action_taken: str,
         entry_block_reason: str | None,
@@ -3938,6 +4127,7 @@ class EdgeWalkerBot:
                 position,
                 high_water_mark,
                 trailing_exit_price,
+                risk_exit,
             )
             return {
                 "display_name": self._specialist_display_name(bot_name),
@@ -3950,6 +4140,7 @@ class EdgeWalkerBot:
                     position,
                     high_water_mark,
                     trailing_exit_price,
+                    risk_exit,
                 ),
                 "entry_gates": [],
                 "exit_gates": exit_gates,
@@ -4053,7 +4244,7 @@ class EdgeWalkerBot:
                 "Route",
                 "pass",
                 "required",
-                f"{self._specialist_display_name(bot_name)} owns the live route.",
+                "Route is currently assigned here.",
                 expected_symbol,
             )
         return self._specialist_gate(
@@ -4061,7 +4252,7 @@ class EdgeWalkerBot:
             "Route",
             "veto",
             "required",
-            "The live route does not point at this specialist.",
+            "Route is assigned elsewhere.",
             routed_symbol or "NONE",
         )
 
@@ -4110,7 +4301,7 @@ class EdgeWalkerBot:
                 "Authority",
                 "veto",
                 "hard_veto",
-                f"Closed because {self._gate_reason_label(reason)}.",
+                f"Authority is closed: {self._gate_reason_label(reason)}.",
             )
 
         if bot_name == CHOP_BOT:
@@ -4121,7 +4312,7 @@ class EdgeWalkerBot:
                     "Permission",
                     "veto",
                     "hard_veto",
-                    f"Closed because {self._gate_reason_label(reason)}.",
+                    f"Permission is closed: {self._gate_reason_label(reason)}.",
                     self.config.chop_permission_mode,
                 )
             return self._specialist_gate(
@@ -4129,7 +4320,7 @@ class EdgeWalkerBot:
                 "Permission",
                 "pass",
                 "hard_veto",
-                "Chop Reversion permission is clear.",
+                "Chop Reversion permission is open.",
                 self.config.chop_permission_mode,
             )
 
@@ -4302,7 +4493,7 @@ class EdgeWalkerBot:
                 "Setup",
                 "waiting",
                 "required",
-                f"Setup is not confirmed: {self._gate_reason_label(reasons[0])}.",
+                f"Setup is waiting: {self._gate_reason_label(reasons[0])}.",
             )
         return self._specialist_gate(
             "setup",
@@ -4363,7 +4554,7 @@ class EdgeWalkerBot:
                 "Path",
                 "veto",
                 "quality",
-                f"Path quality is not clean: {self._gate_reason_label(path_reasons[0])}.",
+                f"Path is not clean: {self._gate_reason_label(path_reasons[0])}.",
             )
         if context:
             return self._specialist_gate(
@@ -4404,7 +4595,7 @@ class EdgeWalkerBot:
                 "Entry Bar",
                 "veto",
                 "quality",
-                f"Entry bar confirmation failed: {self._gate_reason_label(entry_bar_reasons[0])}.",
+                f"Entry bar disagrees: {self._gate_reason_label(entry_bar_reasons[0])}.",
             )
         if context:
             return self._specialist_gate(
@@ -4513,7 +4704,7 @@ class EdgeWalkerBot:
             "Position",
             "pass",
             "required",
-            "No open position or pending order blocks entry.",
+            "Account is flat and no entry order is pending.",
         )
 
     def _specialist_exit_gates(
@@ -4524,6 +4715,7 @@ class EdgeWalkerBot:
         position: dict[str, Any] | None,
         high_water_mark: Decimal | None,
         trailing_exit_price: Decimal | None,
+        risk_exit: dict[str, Any],
     ) -> list[dict[str, Any]]:
         del high_water_mark
         route_valid = bool(
@@ -4531,18 +4723,24 @@ class EdgeWalkerBot:
             and route.active_bot == bot_name
             and route.routed_symbol == position_symbol
         )
+        risk_label = str(risk_exit.get("label") or "Trail")
+        risk_price = risk_exit.get("price") or trailing_exit_price
+        risk_detail = str(
+            risk_exit.get("detail")
+            or (
+                f"{risk_label} is active at ${self._decimal_text(risk_price)}."
+                if risk_price is not None
+                else "Waiting for a high-water mark before showing active risk protection."
+            )
+        )
         gates = [
             self._specialist_gate(
                 "trail",
-                "Trail",
-                "armed" if trailing_exit_price is not None else "waiting",
+                risk_label,
+                "armed" if risk_price is not None else "waiting",
                 "required",
-                (
-                    f"Trailing stop is active at ${self._decimal_text(trailing_exit_price)}."
-                    if trailing_exit_price is not None
-                    else "Waiting for a high-water mark before showing trail protection."
-                ),
-                self._decimal_text(trailing_exit_price),
+                risk_detail,
+                self._decimal_text(risk_price),
             ),
             self._specialist_gate(
                 "route",
@@ -4573,6 +4771,7 @@ class EdgeWalkerBot:
         position: dict[str, Any] | None,
         high_water_mark: Decimal | None,
         trailing_exit_price: Decimal | None,
+        risk_exit: dict[str, Any],
     ) -> dict[str, Any] | None:
         if not position_symbol or not position:
             return None
@@ -4606,6 +4805,14 @@ class EdgeWalkerBot:
             "high_water_mark": self._decimal_text(high_water_mark),
             "trail_price": self._decimal_text(trailing_exit_price),
             "trail_pl_dollars": self._decimal_text(trail_pl),
+            "risk_exit_kind": risk_exit.get("kind"),
+            "risk_exit_label": risk_exit.get("label"),
+            "risk_exit_price": self._decimal_text(risk_exit.get("price")),
+            "risk_exit_pl_dollars": self._decimal_text(risk_exit.get("pl")),
+            "risk_exit_detail": risk_exit.get("detail"),
+            "risk_exit_trail_percent": self._decimal_text(
+                risk_exit.get("trail_percent")
+            ),
             "mfe_percent": self._decimal_text(mfe_percent),
         }
 
@@ -4647,7 +4854,7 @@ class EdgeWalkerBot:
             else "soxl_pct_vs_prior_close_at_cascade_window_start"
         )
         value = context.get(key)
-        return f"{self._decimal_text(value)}%" if isinstance(value, Decimal) else None
+        return f"{self._display_percent_text(value)}%" if isinstance(value, Decimal) else None
 
     def _specialist_primary_message(
         self,
@@ -4687,34 +4894,34 @@ class EdgeWalkerBot:
     def _specialist_gate_requirement_detail(self, bot_name: str, gate_id: str) -> str:
         gate_details = {
             MOMENTUM_BOT: {
-                "route": "SOXL must be routed to Momentum Surge from an UPTREND or qualified surge override.",
-                "authority": "Momentum authority must be active, or the Surge lane must independently confirm.",
-                "prior_close": "The setup must pass its previous-session-close guard before a surge entry is allowed.",
-                "setup": "A sustained momentum setup window must qualify before the specialist can fire.",
-                "path": "SOXL path quality must show clean upside pressure instead of dirty tape.",
-                "entry_bar": "The latest entry bar must confirm the upside direction.",
-                "cooldown": "No directional cooldown or session lockout may be active.",
-                "position": "No open position or pending entry order may already be using the slot.",
+                "route": "Momentum Surge only trades SOXL when Edgewalker is routing upside exposure.",
+                "authority": "Looks for clean momentum authority, or a confirmed Surge override.",
+                "prior_close": "Checks the previous session close so it does not chase an overextended open.",
+                "setup": "Waits for a sustained upside window before joining strength.",
+                "path": "Checks whether SOXL is advancing cleanly instead of whipping around.",
+                "entry_bar": "Checks that the latest bar supports the upside move.",
+                "cooldown": "Waits out any directional cooldown or session lockout.",
+                "position": "Requires the account to be flat with no pending entry order.",
             },
             CHOP_BOT: {
-                "route": "SOXL must be routed to Chop Reversion from a SIDEWAYS regime.",
-                "permission": "Chop Reversion permission must allow mean-reversion entries in the current tape.",
+                "route": "Chop Reversion only trades SOXL when Edgewalker is routing sideways tape.",
+                "permission": "Allows mean-reversion only when trend pressure is quiet enough.",
                 "prior_close": "Chop Reversion does not use the previous-session-close gate.",
-                "setup": "SOXL must trade at the configured discount below its slow SMA.",
-                "path": "The active discount setup must remain compatible with chop behavior.",
+                "setup": "Looks for SOXL at a discount below its slow SMA.",
+                "path": "Checks that the active discount still looks like chop, not a directional break.",
                 "entry_bar": "Chop entries do not require a directional entry-bar confirmation.",
-                "cooldown": "No cooldown or session lockout may be active.",
-                "position": "No open position or pending entry order may already be using the slot.",
+                "cooldown": "Waits out any chop cooldown or session lockout.",
+                "position": "Requires the account to be flat with no pending entry order.",
             },
             INVERSE_BOT: {
-                "route": "SOXS must be routed to Inverse Cascade from a DOWNTREND or qualified cascade override.",
-                "authority": "No active Momentum authority may be suppressing inverse entries.",
-                "prior_close": "The cascade window must pass its previous-session-close guard before SOXS can enter.",
-                "setup": "A sustained SOXL selloff / SOXS strength window must qualify.",
-                "path": "SOXL path quality must show clean downside pressure instead of recovery noise.",
-                "entry_bar": "The latest entry bar must not contradict the cascade direction.",
-                "cooldown": "No cascade cooldown, re-entry lockout, or loss breaker may be active.",
-                "position": "No open position or pending entry order may already be using the slot.",
+                "route": "Inverse Cascade only trades SOXS when Edgewalker is routing downside exposure.",
+                "authority": "Stays closed when Momentum authority is reserving the tape for SOXL.",
+                "prior_close": "Checks the previous session close so it does not chase a polluted cascade.",
+                "setup": "Waits for sustained SOXL weakness with matching SOXS strength.",
+                "path": "Checks that the selloff is clean, not a quick recovery or noisy snapback.",
+                "entry_bar": "Checks that the latest bar does not contradict the cascade.",
+                "cooldown": "Waits out any cascade cooldown, re-entry lockout, or loss breaker.",
+                "position": "Requires the account to be flat with no pending entry order.",
             },
         }
         return gate_details.get(bot_name, {}).get(
@@ -4764,16 +4971,16 @@ class EdgeWalkerBot:
             V9_MOMENTUM_CONTEXT_ACTIVATION_REASON: "clean momentum tape has qualified",
             V9_MOMENTUM_CONTEXT_RECLAIM_REASON: "momentum has reclaimed enough strength after the open",
             V9_MOMENTUM_CONTEXT_INVALIDATION_REASON: "momentum authority was invalidated",
-            "soxl_below_v9_momentum_floor": "SOXL has not cleared the momentum threshold",
+            "soxl_below_v9_momentum_floor": "SOXL has not moved far enough above the open for clean momentum authority",
             "soxl_below_open_after_1030": "SOXL fell below the session open after the clean-momentum window",
-            "trend_trust_below_v9_minimum": "trend trust is below the required level",
+            "trend_trust_below_v9_minimum": "trend trust is not strong enough yet",
             "soxl_below_reclaim_floor": "SOXL has not reclaimed enough strength",
-            "trend_trust_below_reclaim_minimum": "trend trust is below the reclaim threshold",
+            "trend_trust_below_reclaim_minimum": "trend trust has not recovered enough yet",
             "first_30m_raw_transition_count_above_limit": "the early tape had too many regime flips",
             "first_30m_non_warmup_transition_count_not_zero": "the tape already flipped after warmup",
             "momentum_drawdown_with_dirty_tape": "momentum gave back too much ground in dirty tape",
             "v8_noisy_water_filter": "the tape is too noisy for a clean directional entry",
-            "v8_trend_trust_below_minimum": "trend trust is below the required level",
+            "v8_trend_trust_below_minimum": "trend trust is not strong enough yet",
             "trend_strength_weakening": "trend strength is weakening",
             "directional_strength_below_minimum": "directional strength is below the minimum",
             "already_extended_above_fast_sma": "price is already too extended above the fast SMA",
@@ -4781,7 +4988,7 @@ class EdgeWalkerBot:
             "discount_insufficient": "the discount is not deep enough for Chop Reversion",
             "source_prior_close_unavailable": "previous-session close is not available",
             "source_prior_close_above_surge_max": "SOXL started too high versus the previous close for a surge entry",
-            "source_prior_close_above_cascade_max": "SOXL started too high versus the previous close for a cascade entry",
+            "source_prior_close_above_cascade_max": "the cascade window started too far above the previous close",
             "sustained_window_insufficient_bars": "the setup window does not have enough completed bars yet",
             "momentum_surge_after_entry_window": "the Momentum Surge entry window has closed",
             "inverse_cascade_after_entry_window": "the Inverse Cascade entry window has closed",
@@ -4797,11 +5004,11 @@ class EdgeWalkerBot:
             "source_not_deepening_during_sustain": "the move is not deepening during the sustained window",
             "source_shallow_surge_current_below_min": "the current surge is too shallow",
             "source_drawdown_above_surge_max": "SOXL drawdown does not match the surge profile",
-            "source_current_above_cascade_max": "SOXL has not fallen far enough for cascade conditions",
-            "source_drawdown_above_cascade_max": "SOXL drawdown is not deep enough for cascade conditions",
-            "inverse_current_below_cascade_min": "SOXS strength is not high enough for cascade conditions",
-            "source_recovery_above_cascade_max": "SOXL has recovered too much for a clean cascade",
-            "source_velocity_above_cascade_max": "SOXL is not falling fast enough for cascade conditions",
+            "source_current_above_cascade_max": "SOXL has not pushed low enough inside the cascade window",
+            "source_drawdown_above_cascade_max": "SOXL drawdown inside the setup window is not deep enough",
+            "inverse_current_below_cascade_min": "SOXS has not strengthened enough inside the cascade window",
+            "source_recovery_above_cascade_max": "SOXL recovered too much during the cascade window",
+            "source_velocity_above_cascade_max": "SOXL is not falling quickly enough inside the cascade window",
             "source_not_sustained_below_cascade_max": "SOXL has not stayed weak long enough",
             "inverse_not_sustained_above_cascade_min": "SOXS has not stayed strong long enough",
             "source_new_low_pressure_below_min": "SOXL is not making enough fresh lows",
@@ -4816,7 +5023,7 @@ class EdgeWalkerBot:
             "chop_momentum_authority_active": "Momentum authority is active, so Chop Reversion stands down",
             "chop_early_transition_count_not_zero": "the early tape already changed regimes",
             "chop_source_directional_state_too_large": "SOXL is too directional for a chop entry",
-            "chop_firewall_context_unavailable": "the Chop Firewall does not have enough context yet",
+            "chop_firewall_context_unavailable": "Chop Reversion does not have enough context yet",
             "chop_negative_noisy_tape": "SOXL is negative with noisy post-warmup tape",
             "chop_source_drawdown_firewall": "SOXL drawdown is too deep for a safe chop entry",
             "chop_near_momentum_authority": "SOXL is close to clean momentum authority",

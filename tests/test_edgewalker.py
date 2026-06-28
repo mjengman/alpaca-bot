@@ -1899,6 +1899,13 @@ class EdgeWalkerBotTest(unittest.TestCase):
             status.action_taken,
             "hold_inverse_cascade_proven_route_suppressed",
         )
+        self.assertEqual(status.trailing_exit_price, "9.4")
+        self.assertEqual(status.risk_exit_label, "Proven Trail")
+        self.assertEqual(status.risk_exit_price, "9.4")
+        self.assertEqual(status.risk_exit_trail_percent, "6")
+        inverse = status.specialist_gates[INVERSE_BOT]
+        self.assertEqual(inverse["position"]["risk_exit_label"], "Proven Trail")
+        self.assertEqual(inverse["position"]["risk_exit_price"], "9.4")
 
     def test_inverse_cascade_unproven_route_invalidates_normally(self) -> None:
         current_time = datetime.now(timezone.utc)
@@ -2110,7 +2117,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(momentum["primary_message"], "Blocked by Authority")
         self.assertEqual(authority_gate["status"], "veto")
         self.assertEqual(authority_gate["tier"], "hard_veto")
-        self.assertIn("Closed because", authority_gate["detail"])
+        self.assertIn("Authority is closed", authority_gate["detail"])
         self.assertNotIn("no_authority", authority_gate["detail"])
 
         chop = status.specialist_gates[CHOP_BOT]
@@ -2134,7 +2141,7 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
         self.assertEqual(
             label,
-            "SOXL has not cleared the momentum threshold; trend trust is below the required level",
+            "SOXL has not moved far enough above the open for clean momentum authority; trend trust is not strong enough yet",
         )
         self.assertNotIn("v9", label.lower())
         self.assertNotIn("_", label)
@@ -2177,6 +2184,9 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(trail_gate["status"], "armed")
         self.assertEqual(momentum["position"]["symbol"], SOXL)
         self.assertEqual(momentum["position"]["trail_price"], "101.455")
+        self.assertEqual(momentum["position"]["risk_exit_label"], "Trail")
+        self.assertEqual(status.risk_exit_label, "Trail")
+        self.assertEqual(status.risk_exit_price, "101.455")
 
     def test_v9_active_momentum_context_suppresses_inverse_entry(self) -> None:
         def setup_state(state_store: BotStateStore) -> None:

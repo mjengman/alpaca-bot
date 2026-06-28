@@ -253,6 +253,7 @@ const els = {
   maxLossLabel: document.querySelector("#maxLossLabel"),
   maxLoss: document.querySelector("#maxLossValue"),
   entryPrice: document.querySelector("#entryPriceValue"),
+  riskExitLabel: document.querySelector("#riskExitLabel"),
   trailExit: document.querySelector("#trailExitValue"),
   orderSummary: document.querySelector("#orderSummaryValue"),
   orderEvents: document.querySelector("#orderEventsList"),
@@ -2138,13 +2139,16 @@ function renderEntryGateReadiness(row) {
 function renderManagingReadiness(row) {
   const position = row.position || {};
   const exitGates = Array.isArray(row.exit_gates) ? row.exit_gates : [];
+  const riskLabel = position.risk_exit_label || "Trail";
+  const riskPrice = position.risk_exit_price || position.trail_price;
+  const riskPl = position.risk_exit_pl_dollars || position.trail_pl_dollars;
   return `
     <div class="managing-readiness">
       <div class="managing-metrics">
         ${renderManagingMetric("P/L", formatManagingPl(position))}
         ${renderManagingMetric("MFE", formatPercentMaybe(position.mfe_percent))}
-        ${renderManagingMetric("Trail", formatPrice(position.trail_price))}
-        ${renderManagingMetric("Trail P/L", formatMoney(position.trail_pl_dollars))}
+        ${renderManagingMetric(riskLabel, formatPrice(riskPrice))}
+        ${renderManagingMetric(`${riskLabel} P/L`, formatMoney(riskPl))}
       </div>
       <div class="gate-strip is-exit" style="--gate-count: ${Math.max(
         exitGates.length,
@@ -2178,16 +2182,16 @@ function renderGateSegment(gate, bot = "") {
   const status = String(gate.status || "inactive").toLowerCase();
   const tier = String(gate.tier || "quality").toLowerCase();
   const label = gate.label || formatLabel(gate.id || "Gate");
-  const value = gate.value ? ` · ${gate.value}` : "";
   const requirement = gateRequirementDetail(bot, gate.id, label);
   const rawDetail = gate.detail || "";
   const staleInactiveDetail =
     rawDetail === "This specialist is not the current route." ||
     rawDetail === "Edgewalker has not completed a strategy check yet.";
+  const current = tidyGateDetail(rawDetail, gate.value);
   const detail =
-    status === "inactive" || !rawDetail || staleInactiveDetail
+    status === "inactive" || !current || staleInactiveDetail
       ? requirement
-      : `${requirement} Current status: ${rawDetail}${value}`;
+      : `${requirement} ${current}`;
   return `
     <span
       class="gate-segment is-${escapeHtml(status)} tier-${escapeHtml(tier)} has-tooltip"
@@ -2200,40 +2204,75 @@ function renderGateSegment(gate, bot = "") {
   `;
 }
 
+function tidyGateDetail(rawDetail, rawValue) {
+  const detail = String(rawDetail || "").trim();
+  const value = formatGateValue(rawValue);
+  const parts = [];
+  if (detail) {
+    parts.push(detail.endsWith(".") ? detail : `${detail}.`);
+  }
+  if (value) {
+    parts.push(`Reading: ${value}.`);
+  }
+  return parts.join(" ");
+}
+
+function formatGateValue(value) {
+  const text = String(value ?? "").trim();
+  if (!text || text === "--") {
+    return text;
+  }
+  const percent = text.match(/^([+-]?\d+(?:\.\d+)?)%$/);
+  if (percent) {
+    const parsed = Number(percent[1]);
+    return Number.isFinite(parsed) ? `${parsed.toFixed(2)}%` : text;
+  }
+  const dollars = text.match(/^\$([+-]?\d+(?:\.\d+)?)$/);
+  if (dollars) {
+    return formatPrice(dollars[1]);
+  }
+  const longDecimal = text.match(/^[+-]?\d+\.\d{5,}$/);
+  if (longDecimal) {
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed.toFixed(2) : text;
+  }
+  return text;
+}
+
 function gateRequirementDetail(bot, gateId, label) {
   const botName = String(bot || "");
   const id = String(gateId || "").toLowerCase();
   const details = {
     MomentumBot: {
-      route: "SOXL must route to Momentum Surge from UPTREND or a confirmed Surge override.",
-      authority: "Momentum authority must be active, or Surge must independently confirm.",
-      prior_close: "The setup must pass its previous-session-close guard before entry.",
-      setup: "A sustained momentum setup window must qualify.",
-      path: "SOXL path quality must show clean upside pressure instead of dirty tape.",
-      entry_bar: "The latest entry bar must confirm upside direction.",
-      cooldown: "No directional cooldown or session lockout can be active.",
-      position: "No open position or pending entry order can already occupy the slot.",
+      route: "Momentum Surge only trades SOXL when Edgewalker is routing upside exposure.",
+      authority: "Looks for clean momentum authority, or a confirmed Surge override.",
+      prior_close: "Checks the previous session close so it does not chase an overextended open.",
+      setup: "Waits for a sustained upside window before joining strength.",
+      path: "Checks whether SOXL is advancing cleanly instead of whipping around.",
+      entry_bar: "Checks that the latest bar supports the upside move.",
+      cooldown: "Waits out any directional cooldown or session lockout.",
+      position: "Requires the account to be flat with no pending entry order.",
     },
     ChopBot: {
-      route: "SOXL must route to Chop Reversion from a SIDEWAYS regime.",
-      authority: "Chop Reversion permission must allow mean-reversion entries in this tape.",
-      permission: "Chop Reversion permission must allow mean-reversion entries in this tape.",
+      route: "Chop Reversion only trades SOXL when Edgewalker is routing sideways tape.",
+      authority: "Allows mean-reversion only when trend pressure is quiet enough.",
+      permission: "Allows mean-reversion only when trend pressure is quiet enough.",
       prior_close: "Chop Reversion does not use the previous-session-close gate.",
-      setup: "SOXL must trade at the configured discount below its slow SMA.",
-      path: "The active discount setup must remain compatible with chop behavior.",
+      setup: "Looks for SOXL at a discount below its slow SMA.",
+      path: "Checks that the active discount still looks like chop, not a directional break.",
       entry_bar: "Chop entries do not require directional entry-bar confirmation.",
-      cooldown: "No cooldown or session lockout can be active.",
-      position: "No open position or pending entry order can already occupy the slot.",
+      cooldown: "Waits out any chop cooldown or session lockout.",
+      position: "Requires the account to be flat with no pending entry order.",
     },
     InverseBot: {
-      route: "SOXS must route to Inverse Cascade from DOWNTREND or a confirmed Cascade override.",
-      authority: "Momentum authority must not be suppressing inverse entries.",
-      prior_close: "The cascade window must pass its previous-session-close guard before SOXS can enter.",
-      setup: "A sustained SOXL selloff and SOXS strength window must qualify.",
-      path: "SOXL path quality must show clean downside pressure instead of recovery noise.",
-      entry_bar: "The latest entry bar must not contradict the cascade direction.",
-      cooldown: "No cascade cooldown, re-entry lockout, or loss breaker can be active.",
-      position: "No open position or pending entry order can already occupy the slot.",
+      route: "Inverse Cascade only trades SOXS when Edgewalker is routing downside exposure.",
+      authority: "Stays closed when Momentum authority is reserving the tape for SOXL.",
+      prior_close: "Checks the previous session close so it does not chase a polluted cascade.",
+      setup: "Waits for sustained SOXL weakness with matching SOXS strength.",
+      path: "Checks that the selloff is clean, not a quick recovery or noisy snapback.",
+      entry_bar: "Checks that the latest bar does not contradict the cascade.",
+      cooldown: "Waits out any cascade cooldown, re-entry lockout, or loss breaker.",
+      position: "Requires the account to be flat with no pending entry order.",
     },
   };
   return (
@@ -2503,12 +2542,20 @@ function positionSignature(status) {
 }
 
 function trailingExitPrice(status) {
-  return numberOrNull(status?.trailing_exit_price);
+  return riskExitPrice(status);
+}
+
+function riskExitPrice(status) {
+  return numberOrNull(status?.risk_exit_price ?? status?.trailing_exit_price);
+}
+
+function riskExitLabel(status) {
+  return status?.risk_exit_label || "Exit";
 }
 
 function trailProtectionState(status) {
   const entryPrice = numberOrNull(status?.position_avg_entry_price);
-  const trailPrice = numberOrNull(status?.trailing_exit_price);
+  const trailPrice = riskExitPrice(status);
   if (entryPrice === null || trailPrice === null) {
     return { label: "--", protected: false, active: false };
   }
@@ -2519,9 +2566,13 @@ function trailProtectionState(status) {
 }
 
 function projectedTrailPl(status) {
+  const reportedRiskPl = numberOrNull(status?.risk_exit_pl);
+  if (reportedRiskPl !== null) {
+    return reportedRiskPl;
+  }
   const qty = numberOrNull(status?.position_qty);
   const entryPrice = numberOrNull(status?.position_avg_entry_price);
-  const trailPrice = numberOrNull(status?.trailing_exit_price);
+  const trailPrice = riskExitPrice(status);
   if (!status?.position_symbol || qty === null || qty <= 0) {
     return null;
   }
@@ -6148,12 +6199,14 @@ function renderDecision(status, performance, presetAuthority = null) {
   setTone(els.positionPl, status.position_unrealized_pl);
 
   const projectedExitPl = projectedTrailPl(status);
-  const riskLabel = projectedExitPl !== null ? "Trail P/L" : "Max loss";
+  const activeRiskLabel = riskExitLabel(status);
+  const riskLabel = projectedExitPl !== null ? `${activeRiskLabel} P/L` : "Max loss";
   if (els.maxLossLabel) {
     els.maxLossLabel.textContent = riskLabel;
     els.maxLossLabel.dataset.tooltip =
       projectedExitPl !== null
-        ? "Approximate P/L if the current bot-managed trailing exit price fills as shown. Market orders can slip through that trigger."
+        ? status.risk_exit_detail ||
+          "Approximate P/L if the current bot-managed exit price fills as shown. Market orders can slip through that trigger."
         : "Approximate worst-case P/L if the current bot-managed exit price fills as shown. Market orders can slip through that trigger.";
   }
   els.maxLoss.textContent =
@@ -6170,8 +6223,16 @@ function renderDecision(status, performance, presetAuthority = null) {
   els.entryPrice.textContent = status.position_avg_entry_price
     ? formatPrice(status.position_avg_entry_price)
     : "--";
-  els.trailExit.textContent = status.trailing_exit_price
-    ? formatPrice(status.trailing_exit_price)
+  if (els.riskExitLabel) {
+    els.riskExitLabel.textContent =
+      activeRiskLabel === "Exit" ? "Exit price" : `${activeRiskLabel} price`;
+    els.riskExitLabel.dataset.tooltip =
+      status.risk_exit_detail ||
+      "Current bot-managed exit price for the open position, if there is one.";
+  }
+  const riskPrice = status.risk_exit_price || status.trailing_exit_price;
+  els.trailExit.textContent = riskPrice
+    ? formatPrice(riskPrice)
     : "--";
 }
 
