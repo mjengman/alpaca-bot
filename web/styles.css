@@ -357,6 +357,133 @@ h2 {
   padding: 8px 22px 22px;
 }
 
+.explain-state-modal {
+  width: min(860px, calc(100vw - 32px));
+}
+
+.explain-state-body {
+  overflow: auto;
+  padding: 18px 22px 22px;
+}
+
+.explain-state-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.explain-section {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input);
+}
+
+.explain-section h3 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.explain-section p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.explain-section .explain-note {
+  margin-top: 8px;
+  color: var(--muted);
+}
+
+.explain-empty {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.explain-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.explain-metric {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.explain-metric span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.explain-metric strong {
+  display: block;
+  color: var(--ink);
+  font-size: 0.92rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.explain-gate-list {
+  display: grid;
+  gap: 10px;
+}
+
+.explain-gate-row {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.explain-gate-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.explain-gate-title strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.explain-gate-title span {
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.explain-gate-details {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.explain-gate-details li + li {
+  margin-top: 4px;
+}
+
+.explain-gate-details strong {
+  color: var(--ink);
+}
+
 .settings-body {
   overflow: auto;
   padding: 18px 22px 22px;

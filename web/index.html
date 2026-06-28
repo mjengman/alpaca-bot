@@ -827,6 +827,14 @@
           <div class="section-actions">
             <strong>Live route</strong>
             <button
+              id="explainStateOpen"
+              type="button"
+              class="log-toggle has-tooltip"
+              data-tooltip="Explain the current route, gates, and active risk from live telemetry."
+            >
+              Explain
+            </button>
+            <button
               type="button"
               class="log-toggle panel-collapse-toggle has-tooltip"
               aria-expanded="true"
@@ -1230,6 +1238,33 @@
         </div>
       </section>
     </main>
+
+    <dialog
+      id="explainStateDialog"
+      class="guide-modal explain-state-modal"
+      aria-labelledby="explainStateTitle"
+    >
+      <div class="guide-card">
+        <div class="guide-head">
+          <div>
+            <p class="eyebrow">READ-ONLY SNAPSHOT</p>
+            <h2 id="explainStateTitle">Explain State</h2>
+          </div>
+          <button
+            id="explainStateClose"
+            type="button"
+            class="log-toggle"
+            aria-label="Close Explain State"
+          >
+            Close
+          </button>
+        </div>
+
+        <div id="explainStateContent" class="explain-state-body">
+          <p class="explain-empty">Waiting for Edgewalker status.</p>
+        </div>
+      </div>
+    </dialog>
 
     <dialog
       id="operatorGuideDialog"

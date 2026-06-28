@@ -9,6 +9,8 @@ const state = {
   fixedNotionalValue: "25",
   latestBuyingPower: null,
   latestAccountValue: null,
+  latestStatus: null,
+  latestPerformance: null,
   lastSizingValue: "FIXED",
   activeTab: "activity",
   narrativeTimeframe: "1D",
@@ -153,6 +155,10 @@ const els = {
   operatorGuideOpen: document.querySelector("#operatorGuideOpen"),
   operatorGuideDialog: document.querySelector("#operatorGuideDialog"),
   operatorGuideClose: document.querySelector("#operatorGuideClose"),
+  explainStateOpen: document.querySelector("#explainStateOpen"),
+  explainStateDialog: document.querySelector("#explainStateDialog"),
+  explainStateClose: document.querySelector("#explainStateClose"),
+  explainStateContent: document.querySelector("#explainStateContent"),
   themeToggle: document.querySelector("#themeToggle"),
   audioscapeToggle: document.querySelector("#audioscapeToggle"),
   researchMode: document.querySelector("#researchModeInput"),
@@ -2715,6 +2721,34 @@ function setupOperatorGuide() {
   els.operatorGuideDialog.addEventListener("click", (event) => {
     if (event.target === els.operatorGuideDialog) {
       closeGuide();
+    }
+  });
+}
+
+function setupExplainState() {
+  if (!els.explainStateDialog || !els.explainStateOpen) return;
+  const closeExplainState = () => {
+    if (els.explainStateDialog.open) {
+      els.explainStateDialog.close();
+    }
+  };
+
+  els.explainStateOpen.addEventListener("click", () => {
+    hideTooltip();
+    renderExplainStateSnapshot();
+    if (typeof els.explainStateDialog.showModal === "function") {
+      els.explainStateDialog.showModal();
+    } else {
+      els.explainStateDialog.setAttribute("open", "");
+    }
+  });
+
+  if (els.explainStateClose) {
+    els.explainStateClose.addEventListener("click", closeExplainState);
+  }
+  els.explainStateDialog.addEventListener("click", (event) => {
+    if (event.target === els.explainStateDialog) {
+      closeExplainState();
     }
   });
 }
@@ -6121,6 +6155,268 @@ function decisionReason(status) {
   };
 }
 
+function renderExplainStateSnapshot() {
+  if (!els.explainStateContent) {
+    return;
+  }
+  els.explainStateContent.innerHTML = buildExplainStateMarkup(
+    state.latestStatus,
+    state.latestPerformance,
+  );
+}
+
+function buildExplainStateMarkup(status, performance) {
+  if (!status) {
+    return `
+      <p class="explain-empty">
+        Edgewalker has not reported strategy telemetry yet. Start or check the bot to populate this snapshot.
+      </p>
+    `;
+  }
+
+  return `
+    <div class="explain-state-stack">
+      ${explainRouteSection(status)}
+      ${explainPositionSection(status, performance)}
+      ${explainGatesSection(status)}
+    </div>
+  `;
+}
+
+function explainSection(title, bodyMarkup) {
+  return `
+    <section class="explain-section">
+      <h3>${escapeHtml(title)}</h3>
+      ${bodyMarkup}
+    </section>
+  `;
+}
+
+function explainRouteSection(status) {
+  const reason = decisionReason(status);
+  const activeBot = status.active_bot ? formatLabel(status.active_bot) : "None";
+  const routed =
+    status.routed_symbol && status.routed_symbol !== "NONE"
+      ? status.routed_symbol
+      : "None";
+  const action = formatLabel(status.action_taken || "Waiting");
+  let summary = "";
+
+  if (status.position_symbol) {
+    summary = `Edgewalker is managing an open ${status.position_symbol} position. Entry gates stay informational until the account is flat.`;
+  } else if (status.market_open === false) {
+    summary = "The regular market is closed, so Edgewalker is armed or standing by rather than looking for a live entry.";
+  } else if (routed !== "None") {
+    summary = `Edgewalker is routing ${routed} through ${activeBot}. Latest action: ${action}.`;
+  } else {
+    summary = "No specialist route is currently cleared to place an entry.";
+  }
+
+  return explainSection(
+    "Route",
+    `
+      <p>${escapeHtml(summary)}</p>
+      <div class="explain-metrics">
+        ${explainMetric("Regime", formatLabel(status.regime || "Waiting"))}
+        ${explainMetric("Specialist", activeBot)}
+        ${explainMetric("Routed", routed)}
+        ${explainMetric("Action", action)}
+        ${explainMetric("Reason", reason.label)}
+      </div>
+      <p class="explain-note">${escapeHtml(reason.tooltip || "No route detail reported.")}</p>
+    `,
+  );
+}
+
+function explainPositionSection(status, performance) {
+  if (!status.position_symbol) {
+    const dayPl = strategyDayPl(status, performance);
+    return explainSection(
+      "Position And Exit",
+      `
+        <p>Edgewalker is flat. No position-level exit doctrine is active right now.</p>
+        <div class="explain-metrics">
+          ${explainMetric("Session P/L", formatMoney(dayPl.value), toneClassForValue(dayPl.value))}
+          ${explainMetric("Session %", formatPercent(dayPl.percent), toneClassForValue(dayPl.percent))}
+          ${explainMetric("Buying Power", formatMoney(status.buying_power))}
+        </div>
+      `,
+    );
+  }
+
+  const qty = formatPositionQty(status.position_qty) || "--";
+  const pl = numberOrNull(status.position_unrealized_pl);
+  const plText = `${formatMoney(status.position_unrealized_pl)} ${formatPercent(
+    status.position_unrealized_pl_percent,
+    { fraction: true },
+  )}`;
+  const riskLabel = riskExitLabel(status);
+  const riskPrice = riskExitPrice(status);
+  const riskPl = projectedTrailPl(status);
+  const riskDetail =
+    status.risk_exit_detail ||
+    "Telemetry does not currently include a sentence for the active exit doctrine.";
+  const riskPriceText = riskPrice === null ? "--" : formatPrice(riskPrice);
+  const riskPlText = riskPl === null ? "--" : formatMoney(riskPl);
+
+  return explainSection(
+    "Position And Exit",
+    `
+      <p>
+        Edgewalker is holding ${escapeHtml(qty)} ${escapeHtml(
+          status.position_symbol,
+        )}. The active enforced label is ${escapeHtml(riskLabel)}.
+      </p>
+      <div class="explain-metrics">
+        ${explainMetric("Owner", formatLabel(status.position_owner || status.active_bot || "Unknown"))}
+        ${explainMetric("Entry", formatPrice(status.position_avg_entry_price))}
+        ${explainMetric("Position P/L", plText, toneClassForValue(pl))}
+        ${explainMetric(`${riskLabel} price`, riskPriceText)}
+        ${explainMetric(`${riskLabel} P/L`, riskPlText, toneClassForValue(riskPl))}
+      </div>
+      <p class="explain-note">${escapeHtml(riskDetail)}</p>
+    `,
+  );
+}
+
+function explainGatesSection(status) {
+  const gates = status.specialist_gates;
+  const rows = gates && typeof gates === "object" ? Object.entries(gates) : [];
+  if (!rows.length) {
+    return explainSection(
+      "Strategy Gates",
+      '<p>Strategy gate telemetry is not available in the latest status payload.</p>',
+    );
+  }
+
+  const specialists = rows
+    .map(([bot, payload]) => ({ bot, ...(payload || {}) }))
+    .sort(readinessLeadSort);
+
+  return explainSection(
+    "Strategy Gates",
+    `
+      <div class="explain-gate-list">
+        ${specialists.map(explainGateRow).join("")}
+      </div>
+    `,
+  );
+}
+
+function explainGateRow(row) {
+  const displayName = row.display_name || formatLabel(row.bot || "Specialist");
+  const gates =
+    row.state === "Managing"
+      ? Array.isArray(row.exit_gates)
+        ? row.exit_gates
+        : []
+      : Array.isArray(row.entry_gates)
+      ? row.entry_gates
+      : [];
+  const summary = summarizeGateStatuses(gates);
+  const details = explainGateDetails(gates, row.bot);
+  const stateLabel = row.state || "Waiting";
+  const primary =
+    row.primary_message && row.primary_message !== stateLabel
+      ? `<p class="explain-note">${escapeHtml(row.primary_message)}</p>`
+      : "";
+
+  return `
+    <article class="explain-gate-row">
+      <div class="explain-gate-title">
+        <strong>${escapeHtml(displayName)}</strong>
+        <span class="${escapeHtml(readinessToneClass(stateLabel))}">${escapeHtml(stateLabel)}</span>
+      </div>
+      ${primary}
+      <p>${escapeHtml(summary)}</p>
+      ${details}
+    </article>
+  `;
+}
+
+function summarizeGateStatuses(gates) {
+  if (!gates.length) {
+    return "No gate telemetry reported for this strategy state.";
+  }
+  const vetoes = gates.filter((gate) => gateStatusBucket(gate.status) === "veto");
+  const waits = gates.filter((gate) => gateStatusBucket(gate.status) === "wait");
+  const passes = gates.filter((gate) => gateStatusBucket(gate.status) === "pass");
+  const inactive = gates.filter((gate) => gateStatusBucket(gate.status) === "inactive");
+  const parts = [];
+  if (vetoes.length) {
+    parts.push(`Blocked: ${gateLabelList(vetoes)}`);
+  }
+  if (waits.length) {
+    parts.push(`Waiting: ${gateLabelList(waits)}`);
+  }
+  if (passes.length) {
+    parts.push(`Passing: ${gateLabelList(passes)}`);
+  }
+  if (inactive.length && parts.length === 0) {
+    parts.push(`Idle: ${gateLabelList(inactive)}`);
+  }
+  return parts.join(". ");
+}
+
+function gateStatusBucket(status) {
+  const normalized = String(status || "inactive").toLowerCase();
+  if (["veto", "blocked", "fail", "failed"].includes(normalized)) {
+    return "veto";
+  }
+  if (["waiting", "wait", "pending"].includes(normalized)) {
+    return "wait";
+  }
+  if (["pass", "passed", "ready", "armed"].includes(normalized)) {
+    return "pass";
+  }
+  return "inactive";
+}
+
+function gateLabelList(gates) {
+  return gates.map((gate) => gate.label || formatLabel(gate.id || "Gate")).join(", ");
+}
+
+function explainGateDetails(gates, bot) {
+  const focused = gates
+    .filter((gate) => ["veto", "wait"].includes(gateStatusBucket(gate.status)))
+    .slice(0, 4);
+  if (!focused.length) {
+    return "";
+  }
+  return `
+    <ul class="explain-gate-details">
+      ${focused
+        .map((gate) => {
+          const label = gate.label || formatLabel(gate.id || "Gate");
+          const requirement = gateRequirementDetail(bot, gate.id, label);
+          const detail = tidyGateDetail(gate.detail || "", gate.value);
+          return `<li><strong>${escapeHtml(label)}:</strong> ${escapeHtml(
+            detail || requirement || "No gate detail reported.",
+          )}</li>`;
+        })
+        .join("")}
+    </ul>
+  `;
+}
+
+function explainMetric(label, value, toneClass = "") {
+  const className = toneClass ? ` class="${escapeHtml(toneClass)}"` : "";
+  return `
+    <div class="explain-metric">
+      <span>${escapeHtml(label)}</span>
+      <strong${className}>${escapeHtml(value || "--")}</strong>
+    </div>
+  `;
+}
+
+function toneClassForValue(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null || parsed === 0) {
+    return "is-neutral";
+  }
+  return parsed > 0 ? "is-positive" : "is-negative";
+}
+
 function setTone(element, value) {
   if (!element) {
     return;
@@ -6511,6 +6807,8 @@ function render(data) {
   state.activeEnvironment = data.active_environment || state.activeEnvironment;
   state.liveTradingArmed = Boolean(data.live_trading_armed);
   state.liveCredentialsReady = Boolean(data.live_credentials_ready);
+  state.latestStatus = data.edgewalker_status || null;
+  state.latestPerformance = data.performance || null;
   const latestBuyingPower = buyingPowerFromData(data);
   if (latestBuyingPower !== null) {
     state.latestBuyingPower = latestBuyingPower;
@@ -6593,6 +6891,9 @@ function render(data) {
   );
   renderPositionSizeSummary(state.running ? data.edgewalker_status : null);
   renderLog(data);
+  if (els.explainStateDialog?.open) {
+    renderExplainStateSnapshot();
+  }
   handleRuntimeSounds(data, wasRunning);
 }
 
@@ -6831,6 +7132,7 @@ setupSettingsModal();
 setupOperatorSpreadsheetModal();
 setupNotificationsModal();
 setupOperatorGuide();
+setupExplainState();
 setupCollapsibleSections();
 setupActivityLog();
 setupTooltips();
