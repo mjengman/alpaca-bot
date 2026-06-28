@@ -1,6 +1,6 @@
 # EdgeWalker Tuning Log
 
-Last updated: 2026-06-13
+Last updated: 2026-06-27
 
 Initial go-live: 2026-06-04
 
@@ -101,26 +101,29 @@ Working doctrine:
 - Specialist improvements should be judged by roster-level impact, not by
   isolated bot P/L alone.
 
-Latest rolling YTD reference from a `$350` starting balance:
+Latest rolling YTD references from a `$350` starting balance:
 
 - Candidate at `25%`: ending equity about `$390.01`, `+11.43%`, max drawdown
-  about `1.72%`.
+  about `1.72%` in the pre-correction promotion run.
 - Prior baseline at `25%`: ending equity about `$379.96`, `+8.56%`, max
-  drawdown about `2.35%`.
-- Candidate at `95%`: ending equity about `$522.71`, `+49.35%`, max drawdown
-  about `6.51%`.
+  drawdown about `2.35%` in the pre-correction promotion run.
+- Candidate at `95%`: pre-correction ending equity was about `$522.71`
+  (`+49.35%`, max drawdown about `6.51%`). After the 2026-06-27 harness
+  honesty pass, the corrected reference is about `$517.37` (`+47.82%`, max
+  drawdown about `9.66%`).
 - Prior baseline at `95%`: ending equity about `$473.78`, `+35.37%`, max
-  drawdown about `8.77%`.
+  drawdown about `8.77%` in the pre-correction promotion run.
 
 Research caveat: these are replay results, not expected live returns. They are
 evidence that the specialist stack improved the historical fingerprint without
-raising drawdown in the tested YTD window.
+erasing its broad edge after the harness became more realistic.
 
 Current V1 assumptions:
 
 - Historical data source: Alpaca one-minute bars.
 - Perception model: completed prior bars.
-- Fill model: `next_bar_open`.
+- Fill model: `next_bar_open` by default, with `live_audit` available for
+  parity reconstruction from actual broker fills.
 - Slippage: explicit basis-point field.
 - Output: research spreadsheet rows without daily narrative generation.
 - Research rows should be compared to live rows by behavioral fingerprint
@@ -128,6 +131,72 @@ Current V1 assumptions:
   remains one-minute bars.
 - Research rows should capture an explicit starting account so P/L, bot P/L,
   and exit-reason P/L can be scaled consistently against live rows.
+
+## 2026-06-27 Research Update: Harness Honesty And Strategy Patience
+
+The June live-observation stretch produced painful drawdowns, but the research
+conclusion is not "change strategy now." The main finding is that the research
+harness needed to become more honest before any strategy tuning could be
+trusted.
+
+Harness/parity fixes now considered part of the research baseline:
+
+- Timestamp alignment is per symbol before any replay lookup. This prevents
+  SOXL and SOXS bars from drifting apart on sparse-bar cascade days.
+- Open-position proven-state replay can use intrabar high/low reachability for
+  proof detection. This models what the live 5-second risk loop can observe
+  while managing a position without granting fantasy fills.
+- Live-audit fill mode can reconstruct live economics when given actual broker
+  fills. The June audit dates reconciled to live P/L, proving the strategy
+  behavior model is now aligned closely enough for tuning research.
+
+The harness changes were not a strategy rescue. They made the replay harsher
+and more realistic in the exact places where the old harness was too optimistic
+or too pessimistic. The current 95% sizing rolling YTD replay, starting from a
+simulated `$350` balance with no outside deposits, now ends at about `$517.37`
+through 2026-06-09 (`+47.82%`, max drawdown about `9.66%`). Before the harness
+honesty pass, the comparable headline was about `$522.71` (`+49.35%`). The edge
+survived the correction, which is an argument for patience rather than
+reactive tuning.
+
+Corrected YTD reference, current locked roster, 95% sizing:
+
+| Setup | Ending Equity | Return | Max DD | Trades | Green/Red/Flat | Momentum | Chop | Inverse |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Corrected base | `$517.37` | `+47.82%` | `-9.66%` | `267` | `59/37/13` | `+$3.21` | `+$45.86` | `+$118.29` |
+
+Live-week audit-fill comparison also showed that the current strategy can
+reconstruct the actual live week. A proposed Inverse Proven Profit Lock helped
+the single worst live day but failed the broader YTD test:
+
+| Date | Live/Base Audit | Profit-Lock Variant |
+| --- | ---: | ---: |
+| 2026-06-15 | `+$2.64` | `+$2.64` |
+| 2026-06-16 | `-$2.78` | `-$2.78` |
+| 2026-06-17 | `+$0.37` | `+$0.37` |
+| 2026-06-18 | `+$1.43` | `+$1.43` |
+| 2026-06-23 | `-$7.75` | `-$7.75` |
+| 2026-06-24 | `-$14.56` | `-$1.27` |
+| 2026-06-25 | `$0.00` | `$0.00` |
+| 2026-06-26 | `+$3.75` | `+$3.75` |
+
+Profit-lock YTD reference, same 95% sizing:
+
+| Setup | Ending Equity | Return | Max DD | Trades | Green/Red/Flat | Momentum | Chop | Inverse | Profit-Lock Exits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Inverse Proven Profit Lock | `$400.48` | `+14.42%` | `-4.19%` | `267` | `55/38/16` | `+$3.22` | `+$39.47` | `+$7.79` | `16` |
+
+Interpretation:
+
+- The profit-lock idea is valid as a research lane, but the tested ladder is
+  too aggressive. It prevents one ugly giveback while removing most of the
+  Inverse Cascade edge.
+- The current locked strategy should remain untouched in live operation until a
+  repeated live pattern survives the corrected research ladder.
+- Live pain from a few sessions is not enough evidence to override a corrected,
+  still-positive YTD replay.
+- Future gain-capture ideas should be tested against corrected replay, live
+  audit fills, and out-of-sample periods before any production promotion.
 
 ## Current Instrumentation Baseline
 

@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
@@ -43,8 +44,23 @@ from trade_metrics import (
 
 NY_TZ = ZoneInfo("America/New_York")
 RESEARCH_FILL_MODEL_NEXT_BAR_OPEN = "next_bar_open"
-RESEARCH_FILL_MODELS = {RESEARCH_FILL_MODEL_NEXT_BAR_OPEN}
+RESEARCH_FILL_MODEL_STRESSED = "stressed"
+RESEARCH_FILL_MODEL_LIVE_AUDIT = "live_audit"
+RESEARCH_FILL_MODELS = {
+    RESEARCH_FILL_MODEL_LIVE_AUDIT,
+    RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
+    RESEARCH_FILL_MODEL_STRESSED,
+}
 _PREVIOUS_SESSION_CLOSE_CACHE: dict[tuple[str, str, str], dict[str, Decimal]] = {}
+
+
+@dataclass(frozen=True)
+class ResearchFillOverride:
+    symbol: str
+    side: str
+    price: Decimal
+    filled_at: datetime | None = None
+    max_time_delta_seconds: Decimal = Decimal("90")
 
 
 @dataclass(frozen=True)
@@ -53,6 +69,8 @@ class ResearchRunRequest:
     data_feed: str
     fill_model: str = RESEARCH_FILL_MODEL_NEXT_BAR_OPEN
     slippage_bps: Decimal = Decimal("0")
+    slippage_cents: Decimal = Decimal("0")
+    fill_overrides: tuple[ResearchFillOverride, ...] = ()
     preset_name: str = "Current Controls"
     preset_version: str = "v1"
     starting_account_value: Decimal = Decimal("100000")
@@ -253,15 +271,51 @@ class ReplayMarketData:
         self.data_feed = data_feed
         self.previous_session_closes = previous_session_closes or {}
         self.current_index = 0
+        self.current_time: datetime | None = None
+        self._bar_times_by_symbol: dict[str, list[datetime]] = {}
+        for symbol, bars in bars_by_symbol.items():
+            times: list[datetime] = []
+            for bar in bars:
+                timestamp = parse_market_timestamp(bar.get("t"))
+                if timestamp is None:
+                    continue
+                times.append(timestamp)
+            self._bar_times_by_symbol[symbol] = times
 
     def set_index(self, index: int) -> None:
         self.current_index = max(index, 0)
+        source_bars = self.bars_by_symbol.get(SOXL) or []
+        if self.current_index >= len(source_bars):
+            self.current_time = None
+            return
+        self.current_time = parse_market_timestamp(source_bars[self.current_index].get("t"))
+
+    def set_time(self, current_time: datetime) -> None:
+        self.current_time = current_time.astimezone(timezone.utc)
+        source_times = self._bar_times_by_symbol.get(SOXL) or []
+        self.current_index = max(bisect_right(source_times, self.current_time) - 1, 0)
+
+    def _current_bar_index(self, symbol: str) -> int | None:
+        if self.current_time is None:
+            return None
+        times = self._bar_times_by_symbol.get(symbol) or []
+        index = bisect_right(times, self.current_time) - 1
+        if index < 0:
+            return None
+        return index
+
+    def _completed_bar_count(self, symbol: str) -> int:
+        if self.current_time is None:
+            return 0
+        times = self._bar_times_by_symbol.get(symbol) or []
+        return bisect_left(times, self.current_time)
 
     def current_bar(self, symbol: str) -> dict[str, Any] | None:
         bars = self.bars_by_symbol.get(symbol) or []
-        if self.current_index >= len(bars):
+        index = self._current_bar_index(symbol)
+        if index is None or index >= len(bars):
             return None
-        return bars[self.current_index]
+        return bars[index]
 
     def current_price(self, symbol: str) -> Decimal | None:
         bar = self.current_bar(symbol)
@@ -274,8 +328,22 @@ class ReplayMarketData:
 
     def get_recent_bars(self, symbol: str, minutes: int) -> list[dict[str, Any]]:
         bars = self.bars_by_symbol.get(symbol) or []
-        visible = bars[: self.current_index]
+        visible = bars[: self._completed_bar_count(symbol)]
         return visible[-minutes:]
+
+    def get_recent_bars_for_proven_state(
+        self,
+        symbol: str,
+        minutes: int,
+    ) -> list[dict[str, Any]]:
+        bars = self.bars_by_symbol.get(symbol) or []
+        if self.current_time is None:
+            return []
+        visible = bars[: bisect_right(self._bar_times_by_symbol.get(symbol) or [], self.current_time)]
+        return visible[-minutes:]
+
+    def proven_state_source(self) -> str:
+        return "replay_intrabar_high"
 
     def get_previous_session_close(self, symbol: str) -> Decimal | None:
         return self.previous_session_closes.get(symbol)
@@ -295,9 +363,10 @@ class ReplayMarketData:
         return {"bp": format_decimal(price), "ap": format_decimal(price), "t": bar.get("t")}
 
     def status(self, symbol: str, required_bars: int | None = None) -> dict[str, Any]:
-        visible = self.bars_by_symbol.get(symbol, [])[: self.current_index]
+        visible = self.bars_by_symbol.get(symbol, [])[: self._completed_bar_count(symbol)]
         latest = visible[-1] if visible else None
         latest_time = parse_market_timestamp(latest.get("t")) if latest else None
+        current_bar = self.current_bar(symbol)
         return {
             "data_source": "research",
             "data_feed": self.data_feed,
@@ -312,10 +381,10 @@ class ReplayMarketData:
                 latest_time.isoformat().replace("+00:00", "Z") if latest_time else None
             ),
             "bar_age_seconds": 0 if latest_time else None,
-            "latest_trade_time": self.current_bar(symbol).get("t") if self.current_bar(symbol) else None,
-            "trade_age_seconds": 0 if self.current_bar(symbol) else None,
-            "latest_quote_time": self.current_bar(symbol).get("t") if self.current_bar(symbol) else None,
-            "quote_age_seconds": 0 if self.current_bar(symbol) else None,
+            "latest_trade_time": current_bar.get("t") if current_bar else None,
+            "trade_age_seconds": 0 if current_bar else None,
+            "latest_quote_time": current_bar.get("t") if current_bar else None,
+            "quote_age_seconds": 0 if current_bar else None,
         }
 
 
@@ -328,7 +397,10 @@ class SimulatedBroker:
         start: datetime,
         end: datetime,
         starting_account_value: Decimal,
+        fill_model: str,
         slippage_bps: Decimal,
+        slippage_cents: Decimal,
+        fill_overrides: tuple[ResearchFillOverride, ...] = (),
     ) -> None:
         self.config = config
         self.market_data = market_data
@@ -340,7 +412,10 @@ class SimulatedBroker:
         self.positions: dict[str, dict[str, Decimal]] = {}
         self.orders: dict[str, dict[str, Any]] = {}
         self.order_count = 0
+        self.fill_model = fill_model
         self.slippage_bps = slippage_bps
+        self.slippage_cents = slippage_cents
+        self.fill_overrides = list(fill_overrides)
 
     def set_time(self, current_time: datetime) -> None:
         self.current_time = current_time.astimezone(timezone.utc)
@@ -445,13 +520,33 @@ class SimulatedBroker:
         return order
 
     def _fill_price(self, symbol: str, side: str) -> Decimal:
+        if self.fill_model == RESEARCH_FILL_MODEL_LIVE_AUDIT:
+            price = self._fill_override_price(symbol, side)
+            if price is not None:
+                return price
         price = self._mark(symbol)
         adjustment = self.slippage_bps / Decimal("10000")
-        if adjustment <= 0:
+        cents = self.slippage_cents / Decimal("100")
+        if adjustment <= 0 and cents <= 0:
             return price
         if side == "buy":
-            return price * (Decimal("1") + adjustment)
-        return price * (Decimal("1") - adjustment)
+            return price * (Decimal("1") + adjustment) + cents
+        return price * (Decimal("1") - adjustment) - cents
+
+    def _fill_override_price(self, symbol: str, side: str) -> Decimal | None:
+        side = side.lower()
+        for index, override in enumerate(self.fill_overrides):
+            if override.symbol != symbol or override.side.lower() != side:
+                continue
+            if override.filled_at is not None:
+                delta_seconds = Decimal(
+                    str(abs((override.filled_at - self.current_time).total_seconds()))
+                )
+                if delta_seconds > override.max_time_delta_seconds:
+                    continue
+            self.fill_overrides.pop(index)
+            return override.price
+        return None
 
     def _mark(self, symbol: str) -> Decimal:
         price = self.market_data.current_price(symbol)
@@ -981,7 +1076,9 @@ def _config_value(config: BotConfig, key: str) -> Any:
 def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dict[str, Any]:
     date_text = _validate_date(request.date)
     if request.fill_model not in RESEARCH_FILL_MODELS:
-        raise BotError("Research fill model must be next_bar_open.")
+        raise BotError(
+            "Research fill model must be live_audit, next_bar_open, or stressed."
+        )
 
     symbols = (SOXL, SOXS)
     bars_by_symbol = fetch_historical_bars(config, symbols, date_text)
@@ -998,22 +1095,25 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         start=start,
         end=end,
         starting_account_value=request.starting_account_value,
+        fill_model=request.fill_model,
         slippage_bps=request.slippage_bps,
+        slippage_cents=request.slippage_cents,
+        fill_overrides=request.fill_overrides,
     )
     records: list[dict[str, Any]] = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
         state_store = BotStateStore(Path(tmpdir) / "research_state.json")
         lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "research_lifecycle.jsonl")
-        max_cycles = min(len(bars_by_symbol[SOXL]), len(bars_by_symbol[SOXS]))
+        max_cycles = len(bars_by_symbol[SOXL])
         previous_regime: str | None = None
         for index in range(max_cycles):
             current_bar = bars_by_symbol[SOXL][index]
-            inverse_bar = bars_by_symbol[SOXS][index]
             current_time = parse_market_timestamp(current_bar.get("t"))
             if current_time is None:
                 continue
-            market_data.set_index(index)
+            market_data.set_time(current_time)
+            inverse_bar = market_data.current_bar(SOXS) or {}
             client.set_time(current_time)
             output = io.StringIO()
             edgewalker_status = None
@@ -1171,6 +1271,7 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "backtest_date": date_text,
         "fill_model": request.fill_model,
         "slippage_bps": _rounded(request.slippage_bps),
+        "slippage_cents": _rounded(request.slippage_cents),
         "preset_name": request.preset_name,
         "preset_version": request.preset_version,
         "entry_regime_age_median": _rounded(metrics["entry_regime_age_median"]),

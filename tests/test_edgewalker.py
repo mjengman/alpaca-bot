@@ -50,6 +50,7 @@ from bot import (
     POSITION_LIFECYCLE_OPENING,
     SOXL,
     SOXS,
+    TrailingStopBot,
     V10_AUTHORITY_STATE_MOMENTUM,
     V10_AUTHORITY_STATE_NONE,
     V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
@@ -1606,6 +1607,183 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(client.sells, [])
         self.assertIn("trail=3.50%", output)
         self.assertEqual(status.action_taken, "manage_open_position")
+
+    def test_inverse_cascade_default_proven_trail_behavior_stays_disabled(
+        self,
+    ) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "proven_at": (current_time - timedelta(minutes=5)).isoformat(),
+                    "max_favorable_excursion_percent": "3.00",
+                }
+            )
+            bot = TrailingStopBot(
+                replace(
+                    config(),
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_trail_percent=Decimal("3.50"),
+                    inverse_cascade_proven_trail_percent=Decimal("6.00"),
+                    inverse_cascade_proven_trail_tighten_mfe_percent=Decimal("4.00"),
+                ),
+                FakeClient({"SOXL": [], "SOXS": []}),
+                state_store,
+            )
+
+            self.assertEqual(bot._effective_trail_percent(SOXS), Decimal("6.00"))
+
+            state = state_store.get_inverse_cascade_state()
+            state["max_favorable_excursion_percent"] = "4.00"
+            state_store.set_inverse_cascade_state(state)
+
+            self.assertEqual(bot._effective_trail_percent(SOXS), Decimal("3.50"))
+
+    def test_inverse_cascade_tiered_proven_trail_uses_mfe_ladder(self) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "proven_at": (current_time - timedelta(minutes=5)).isoformat(),
+                    "max_favorable_excursion_percent": "0.99",
+                }
+            )
+            bot = TrailingStopBot(
+                replace(
+                    config(),
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_tiered_proven_trail_enabled=True,
+                    inverse_cascade_tiered_proven_trail_low_mfe_percent=Decimal("1.00"),
+                    inverse_cascade_tiered_proven_trail_low_trail_percent=Decimal("6.00"),
+                    inverse_cascade_tiered_proven_trail_mid_mfe_percent=Decimal("2.00"),
+                    inverse_cascade_tiered_proven_trail_mid_trail_percent=Decimal("3.00"),
+                    inverse_cascade_tiered_proven_trail_high_trail_percent=Decimal("1.50"),
+                ),
+                FakeClient({"SOXL": [], "SOXS": []}),
+                state_store,
+            )
+
+            self.assertEqual(bot._effective_trail_percent(SOXS), Decimal("6.00"))
+
+            state = state_store.get_inverse_cascade_state()
+            state["max_favorable_excursion_percent"] = "1.50"
+            state_store.set_inverse_cascade_state(state)
+            self.assertEqual(bot._effective_trail_percent(SOXS), Decimal("3.00"))
+
+            state = state_store.get_inverse_cascade_state()
+            state["max_favorable_excursion_percent"] = "2.00"
+            state_store.set_inverse_cascade_state(state)
+            self.assertEqual(bot._effective_trail_percent(SOXS), Decimal("1.50"))
+
+    def test_inverse_cascade_profit_lock_ratchets_one_way(self) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "proven_at": (current_time - timedelta(minutes=5)).isoformat(),
+                }
+            )
+            bot = TrailingStopBot(
+                replace(
+                    config(),
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_proven_profit_lock_enabled=True,
+                ),
+                FakeClient({"SOXL": [], "SOXS": []}),
+                state_store,
+            )
+
+            status = bot._inverse_cascade_profit_lock_status(
+                SOXS,
+                Decimal("100"),
+                Decimal("104"),
+            )
+            self.assertEqual(status["floor_percent"], Decimal("1.50"))
+            self.assertEqual(status["breached"], False)
+
+            status = bot._inverse_cascade_profit_lock_status(
+                SOXS,
+                Decimal("100"),
+                Decimal("102"),
+            )
+            self.assertEqual(status["floor_percent"], Decimal("1.50"))
+            self.assertEqual(status["breached"], False)
+
+            status = bot._inverse_cascade_profit_lock_status(
+                SOXS,
+                Decimal("100"),
+                Decimal("101.40"),
+            )
+            self.assertEqual(status["floor_percent"], Decimal("1.50"))
+            self.assertEqual(status["breached"], True)
+
+    def test_inverse_cascade_profit_lock_submits_distinct_exit(self) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "proven_at": (current_time - timedelta(minutes=5)).isoformat(),
+                    "profit_lock_floor_percent": "1.50",
+                }
+            )
+            client = FakeClient(
+                {"SOXS": bars("100", "101.40", latest_at=current_time)},
+                positions={
+                    SOXS: {
+                        "symbol": SOXS,
+                        "qty": "1",
+                        "avg_entry_price": "100",
+                    }
+                },
+            )
+            bot = TrailingStopBot(
+                replace(
+                    config(),
+                    symbol=SOXS,
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_proven_profit_lock_enabled=True,
+                    inverse_cascade_proven_trail_percent=Decimal("6.00"),
+                ),
+                client,
+                state_store,
+                lifecycle_ledger=ledger,
+            )
+
+            bot._manage_trailing_stop(SOXS, client.positions[SOXS], [])
+
+            self.assertEqual(client.sells, [(SOXS, Decimal("1.000000000"))])
+            records = ledger.read_all()
+            self.assertEqual(records[1]["event_type"], LIFECYCLE_INTENDED_EXIT)
+            self.assertEqual(
+                records[1]["reason"],
+                "inverse_proven_profit_lock_exit",
+            )
+            self.assertEqual(records[2]["reason"], "inverse_proven_profit_lock_exit")
 
     def test_inverse_cascade_intrabar_mfe_marks_proven_state(self) -> None:
         current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)

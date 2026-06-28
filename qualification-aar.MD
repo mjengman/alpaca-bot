@@ -1,6 +1,6 @@
 # EdgeWalker Qualification AAR
 
-Last updated: 2026-06-10
+Last updated: 2026-06-27
 
 This file captures qualification and early-live observations before they become
 tuning decisions. During the first full rotation through Conservative,
@@ -58,9 +58,12 @@ Current operator framing:
 Latest research validation reference:
 
 - Rolling YTD from `$350`, current candidate at `25%`: about `$390.01`
-  ending equity, `+11.43%`, max drawdown about `1.72%`.
-- Rolling YTD from `$350`, current candidate at `95%`: about `$522.71`
-  ending equity, `+49.35%`, max drawdown about `6.51%`.
+  ending equity, `+11.43%`, max drawdown about `1.72%` in the pre-correction
+  promotion run.
+- Rolling YTD from `$350`, current candidate at `95%`: about `$517.37`
+  ending equity, `+47.82%`, max drawdown about `9.66%` after the 2026-06-27
+  harness honesty pass. The earlier pre-correction headline was about
+  `$522.71` / `+49.35%`.
 - Active-day proxy from the same YTD run: `93/109` green-or-red days and
   `16/109` flat days.
 

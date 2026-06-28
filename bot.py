@@ -112,6 +112,22 @@ INVERSE_CASCADE_PROVEN_MFE_PERCENT = Decimal("0.50")
 INVERSE_CASCADE_PROVEN_TRAIL_PERCENT = Decimal("6.00")
 INVERSE_CASCADE_PROVEN_TRAIL_TIGHTEN_MFE_PERCENT = Decimal("4.00")
 INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT = Decimal("0.00")
+INVERSE_CASCADE_TIERED_PROVEN_TRAIL_ENABLED = False
+INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_MFE_PERCENT = Decimal("1.00")
+INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_TRAIL_PERCENT = Decimal("6.00")
+INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_MFE_PERCENT = Decimal("2.00")
+INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_TRAIL_PERCENT = Decimal("3.00")
+INVERSE_CASCADE_TIERED_PROVEN_TRAIL_HIGH_TRAIL_PERCENT = Decimal("1.50")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_EXIT_REASON = "inverse_proven_profit_lock_exit"
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_ENABLED = False
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_1_PERCENT = Decimal("1.00")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_1_PERCENT = Decimal("0.00")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_2_PERCENT = Decimal("2.00")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_2_PERCENT = Decimal("0.75")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_3_PERCENT = Decimal("3.00")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_3_PERCENT = Decimal("1.50")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_4_PERCENT = Decimal("5.00")
+INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_4_PERCENT = Decimal("3.00")
 MOMENTUM_SURGE_MODE_OFF = "OFF"
 MOMENTUM_SURGE_MODE_SUSTAINED = "SUSTAINED"
 MOMENTUM_SURGE_MODES = {
@@ -393,6 +409,51 @@ class BotConfig:
     inverse_cascade_proven_route_recovery_min_source_percent: Decimal = (
         INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT
     )
+    inverse_cascade_tiered_proven_trail_enabled: bool = (
+        INVERSE_CASCADE_TIERED_PROVEN_TRAIL_ENABLED
+    )
+    inverse_cascade_tiered_proven_trail_low_mfe_percent: Decimal = (
+        INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_MFE_PERCENT
+    )
+    inverse_cascade_tiered_proven_trail_low_trail_percent: Decimal = (
+        INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_TRAIL_PERCENT
+    )
+    inverse_cascade_tiered_proven_trail_mid_mfe_percent: Decimal = (
+        INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_MFE_PERCENT
+    )
+    inverse_cascade_tiered_proven_trail_mid_trail_percent: Decimal = (
+        INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_TRAIL_PERCENT
+    )
+    inverse_cascade_tiered_proven_trail_high_trail_percent: Decimal = (
+        INVERSE_CASCADE_TIERED_PROVEN_TRAIL_HIGH_TRAIL_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_enabled: bool = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_ENABLED
+    )
+    inverse_cascade_proven_profit_lock_trigger_1_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_1_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_floor_1_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_1_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_trigger_2_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_2_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_floor_2_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_2_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_trigger_3_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_3_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_floor_3_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_3_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_trigger_4_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_4_PERCENT
+    )
+    inverse_cascade_proven_profit_lock_floor_4_percent: Decimal = (
+        INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_4_PERCENT
+    )
     momentum_surge_mode: str = MOMENTUM_SURGE_MODE_SUSTAINED
     momentum_surge_sustain_minutes: int = MOMENTUM_SURGE_SUSTAIN_MINUTES
     momentum_authority_required: bool = False
@@ -627,6 +688,138 @@ class BotConfig:
             "INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT",
             str(INVERSE_CASCADE_PROVEN_ROUTE_RECOVERY_MIN_SOURCE_PERCENT),
         )
+        inverse_cascade_tiered_proven_trail_enabled = env_bool(
+            "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_ENABLED",
+            INVERSE_CASCADE_TIERED_PROVEN_TRAIL_ENABLED,
+        )
+        inverse_cascade_tiered_proven_trail_low_mfe_percent = env_decimal(
+            "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_MFE_PERCENT",
+            str(INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_MFE_PERCENT),
+        )
+        if inverse_cascade_tiered_proven_trail_low_mfe_percent < 0:
+            raise BotError(
+                "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_MFE_PERCENT must be at least 0"
+            )
+        inverse_cascade_tiered_proven_trail_low_trail_percent = env_decimal(
+            "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_TRAIL_PERCENT",
+            str(INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_TRAIL_PERCENT),
+        )
+        if inverse_cascade_tiered_proven_trail_low_trail_percent <= 0:
+            raise BotError(
+                "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_LOW_TRAIL_PERCENT must be greater than 0"
+            )
+        inverse_cascade_tiered_proven_trail_mid_mfe_percent = env_decimal(
+            "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_MFE_PERCENT",
+            str(INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_MFE_PERCENT),
+        )
+        if inverse_cascade_tiered_proven_trail_mid_mfe_percent <= (
+            inverse_cascade_tiered_proven_trail_low_mfe_percent
+        ):
+            raise BotError(
+                "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_MFE_PERCENT must be greater than LOW_MFE"
+            )
+        inverse_cascade_tiered_proven_trail_mid_trail_percent = env_decimal(
+            "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_TRAIL_PERCENT",
+            str(INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_TRAIL_PERCENT),
+        )
+        if inverse_cascade_tiered_proven_trail_mid_trail_percent <= 0:
+            raise BotError(
+                "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_MID_TRAIL_PERCENT must be greater than 0"
+            )
+        inverse_cascade_tiered_proven_trail_high_trail_percent = env_decimal(
+            "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_HIGH_TRAIL_PERCENT",
+            str(INVERSE_CASCADE_TIERED_PROVEN_TRAIL_HIGH_TRAIL_PERCENT),
+        )
+        if inverse_cascade_tiered_proven_trail_high_trail_percent <= 0:
+            raise BotError(
+                "INVERSE_CASCADE_TIERED_PROVEN_TRAIL_HIGH_TRAIL_PERCENT must be greater than 0"
+            )
+        inverse_cascade_proven_profit_lock_enabled = env_bool(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_ENABLED",
+            INVERSE_CASCADE_PROVEN_PROFIT_LOCK_ENABLED,
+        )
+        inverse_cascade_proven_profit_lock_trigger_1_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_1_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_1_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_floor_1_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_1_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_1_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_trigger_2_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_2_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_2_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_floor_2_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_2_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_2_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_trigger_3_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_3_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_3_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_floor_3_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_3_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_3_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_trigger_4_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_4_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_4_PERCENT),
+        )
+        inverse_cascade_proven_profit_lock_floor_4_percent = env_decimal(
+            "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_4_PERCENT",
+            str(INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_4_PERCENT),
+        )
+        profit_lock_rungs = (
+            (
+                inverse_cascade_proven_profit_lock_trigger_1_percent,
+                inverse_cascade_proven_profit_lock_floor_1_percent,
+                "1",
+            ),
+            (
+                inverse_cascade_proven_profit_lock_trigger_2_percent,
+                inverse_cascade_proven_profit_lock_floor_2_percent,
+                "2",
+            ),
+            (
+                inverse_cascade_proven_profit_lock_trigger_3_percent,
+                inverse_cascade_proven_profit_lock_floor_3_percent,
+                "3",
+            ),
+            (
+                inverse_cascade_proven_profit_lock_trigger_4_percent,
+                inverse_cascade_proven_profit_lock_floor_4_percent,
+                "4",
+            ),
+        )
+        previous_trigger: Decimal | None = None
+        previous_floor: Decimal | None = None
+        for trigger, floor, rung in profit_lock_rungs:
+            if trigger <= 0:
+                raise BotError(
+                    "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER_"
+                    f"{rung}_PERCENT must be greater than 0"
+                )
+            if floor < 0:
+                raise BotError(
+                    "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_"
+                    f"{rung}_PERCENT must be at least 0"
+                )
+            if floor >= trigger:
+                raise BotError(
+                    "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR_"
+                    f"{rung}_PERCENT must be below its trigger"
+                )
+            if previous_trigger is not None and trigger <= previous_trigger:
+                raise BotError(
+                    "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_TRIGGER values must increase"
+                )
+            if previous_floor is not None and floor < previous_floor:
+                raise BotError(
+                    "INVERSE_CASCADE_PROVEN_PROFIT_LOCK_FLOOR values must not decrease"
+                )
+            previous_trigger = trigger
+            previous_floor = floor
         momentum_surge_mode = os.environ.get(
             "MOMENTUM_SURGE_MODE",
             MOMENTUM_SURGE_MODE_SUSTAINED,
@@ -698,6 +891,51 @@ class BotConfig:
             ),
             inverse_cascade_proven_route_recovery_min_source_percent=(
                 inverse_cascade_proven_route_recovery_min_source_percent
+            ),
+            inverse_cascade_tiered_proven_trail_enabled=(
+                inverse_cascade_tiered_proven_trail_enabled
+            ),
+            inverse_cascade_tiered_proven_trail_low_mfe_percent=(
+                inverse_cascade_tiered_proven_trail_low_mfe_percent
+            ),
+            inverse_cascade_tiered_proven_trail_low_trail_percent=(
+                inverse_cascade_tiered_proven_trail_low_trail_percent
+            ),
+            inverse_cascade_tiered_proven_trail_mid_mfe_percent=(
+                inverse_cascade_tiered_proven_trail_mid_mfe_percent
+            ),
+            inverse_cascade_tiered_proven_trail_mid_trail_percent=(
+                inverse_cascade_tiered_proven_trail_mid_trail_percent
+            ),
+            inverse_cascade_tiered_proven_trail_high_trail_percent=(
+                inverse_cascade_tiered_proven_trail_high_trail_percent
+            ),
+            inverse_cascade_proven_profit_lock_enabled=(
+                inverse_cascade_proven_profit_lock_enabled
+            ),
+            inverse_cascade_proven_profit_lock_trigger_1_percent=(
+                inverse_cascade_proven_profit_lock_trigger_1_percent
+            ),
+            inverse_cascade_proven_profit_lock_floor_1_percent=(
+                inverse_cascade_proven_profit_lock_floor_1_percent
+            ),
+            inverse_cascade_proven_profit_lock_trigger_2_percent=(
+                inverse_cascade_proven_profit_lock_trigger_2_percent
+            ),
+            inverse_cascade_proven_profit_lock_floor_2_percent=(
+                inverse_cascade_proven_profit_lock_floor_2_percent
+            ),
+            inverse_cascade_proven_profit_lock_trigger_3_percent=(
+                inverse_cascade_proven_profit_lock_trigger_3_percent
+            ),
+            inverse_cascade_proven_profit_lock_floor_3_percent=(
+                inverse_cascade_proven_profit_lock_floor_3_percent
+            ),
+            inverse_cascade_proven_profit_lock_trigger_4_percent=(
+                inverse_cascade_proven_profit_lock_trigger_4_percent
+            ),
+            inverse_cascade_proven_profit_lock_floor_4_percent=(
+                inverse_cascade_proven_profit_lock_floor_4_percent
             ),
             momentum_surge_mode=momentum_surge_mode,
             momentum_surge_sustain_minutes=momentum_surge_sustain_minutes,
@@ -1032,6 +1270,13 @@ class AlpacaClient:
 def format_decimal(value: Decimal) -> str:
     normalized = value.normalize()
     return format(normalized, "f")
+
+
+def format_decimal_places(value: Decimal, places: int) -> str:
+    if places < 0:
+        raise ValueError("places must be at least 0")
+    quant = Decimal("1").scaleb(-places)
+    return format(value.quantize(quant), f".{places}f")
 
 
 def decimal_from_api(value: Any, field_name: str) -> Decimal:
@@ -2169,6 +2414,11 @@ class TrailingStopBot:
             position.get("avg_entry_price", current_price), "avg entry price"
         )
         self._maybe_update_inverse_cascade_proven_state(symbol, avg_entry_price)
+        profit_lock_status = self._inverse_cascade_profit_lock_status(
+            symbol,
+            avg_entry_price,
+            current_price,
+        )
         high_water_mark = self.state_store.get_high_water_mark(symbol)
         reference_price = max(current_price, avg_entry_price)
 
@@ -2187,6 +2437,9 @@ class TrailingStopBot:
             f"hwm={high_water_mark:.4f} trail={trail_percent}% bot_stop={stop_price:.4f}"
         )
         stop_breached = current_price <= stop_price
+        profit_lock_breached = bool(
+            profit_lock_status and profit_lock_status.get("breached")
+        )
         self._record_lifecycle(
             LIFECYCLE_POSITION_MANAGED,
             symbol=symbol,
@@ -2199,21 +2452,44 @@ class TrailingStopBot:
             trail_percent=trail_percent,
             stop_breached=stop_breached,
             require_live_mark=require_live_mark,
+            profit_lock_armed=(
+                bool(profit_lock_status and profit_lock_status.get("armed"))
+            ),
+            profit_lock_current_pl_percent=(
+                (profit_lock_status or {}).get("current_pl_percent")
+            ),
+            profit_lock_floor_percent=(
+                (profit_lock_status or {}).get("floor_percent")
+            ),
+            profit_lock_floor_price=(profit_lock_status or {}).get("floor_price"),
+            profit_lock_breached=profit_lock_breached,
         )
 
-        if stop_breached:
+        exit_reason = None
+        if profit_lock_breached:
+            exit_reason = INVERSE_CASCADE_PROVEN_PROFIT_LOCK_EXIT_REASON
+            floor = (profit_lock_status or {}).get("floor_percent")
+            print(
+                f"[RISK] {symbol}: proven profit lock breached; "
+                f"floor={floor}% submitting fractional market sell."
+            )
+        elif stop_breached:
+            exit_reason = "trailing_stop_breached"
             print(f"[RISK] {symbol}: trailing stop breached; submitting fractional market sell.")
             self._mark_inverse_cascade_trailing_stop_lockout(symbol)
+
+        if exit_reason:
             self._record_lifecycle(
                 LIFECYCLE_INTENDED_EXIT,
                 symbol=symbol,
                 side="sell",
                 qty=qty,
-                reason="trailing_stop_breached",
+                reason=exit_reason,
                 current_price=current_price,
                 stop_price=stop_price,
                 trail_percent=trail_percent,
                 high_water_mark=high_water_mark,
+                profit_lock_status=profit_lock_status,
             )
             try:
                 order = self.client.submit_market_sell_qty(symbol, qty)
@@ -2223,9 +2499,10 @@ class TrailingStopBot:
                     symbol=symbol,
                     side="sell",
                     qty=qty,
-                    reason="trailing_stop_breached",
+                    reason=exit_reason,
                     error=str(exc),
                     broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
+                    profit_lock_status=profit_lock_status,
                 )
                 raise
             self._record_lifecycle(
@@ -2233,13 +2510,14 @@ class TrailingStopBot:
                 symbol=symbol,
                 side="sell",
                 qty=qty,
-                reason="trailing_stop_breached",
+                reason=exit_reason,
                 order=order,
+                profit_lock_status=profit_lock_status,
             )
             self.order_tracker.track_submitted_order(
                 order,
                 None,
-                "trailing_stop_breached",
+                exit_reason,
             )
             self.state_store.clear_symbol(symbol)
         else:
@@ -2265,6 +2543,119 @@ class TrailingStopBot:
         state["invalidation_started_at"] = None
         self.state_store.set_inverse_cascade_state(state)
 
+    def _inverse_cascade_tiered_proven_trail_percent(
+        self,
+        max_mfe_percent: Decimal | None,
+    ) -> Decimal:
+        if (
+            max_mfe_percent is None
+            or max_mfe_percent
+            < self.config.inverse_cascade_tiered_proven_trail_low_mfe_percent
+        ):
+            return self.config.inverse_cascade_tiered_proven_trail_low_trail_percent
+        if (
+            max_mfe_percent
+            < self.config.inverse_cascade_tiered_proven_trail_mid_mfe_percent
+        ):
+            return self.config.inverse_cascade_tiered_proven_trail_mid_trail_percent
+        return self.config.inverse_cascade_tiered_proven_trail_high_trail_percent
+
+    def _inverse_cascade_profit_lock_floor_for_pl(
+        self,
+        current_pl_percent: Decimal,
+    ) -> Decimal | None:
+        rungs = (
+            (
+                self.config.inverse_cascade_proven_profit_lock_trigger_1_percent,
+                self.config.inverse_cascade_proven_profit_lock_floor_1_percent,
+            ),
+            (
+                self.config.inverse_cascade_proven_profit_lock_trigger_2_percent,
+                self.config.inverse_cascade_proven_profit_lock_floor_2_percent,
+            ),
+            (
+                self.config.inverse_cascade_proven_profit_lock_trigger_3_percent,
+                self.config.inverse_cascade_proven_profit_lock_floor_3_percent,
+            ),
+            (
+                self.config.inverse_cascade_proven_profit_lock_trigger_4_percent,
+                self.config.inverse_cascade_proven_profit_lock_floor_4_percent,
+            ),
+        )
+        floor = None
+        for trigger, rung_floor in rungs:
+            if current_pl_percent >= trigger:
+                floor = rung_floor
+        return floor
+
+    def _inverse_cascade_profit_lock_status(
+        self,
+        symbol: str,
+        avg_entry_price: Decimal,
+        current_price: Decimal,
+    ) -> dict[str, Any] | None:
+        if (
+            not self.config.inverse_cascade_proven_profit_lock_enabled
+            or self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or symbol != SOXS
+            or avg_entry_price <= 0
+        ):
+            return None
+
+        state = self.state_store.get_inverse_cascade_state()
+        session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+        if (
+            state.get("mode") != INVERSE_CASCADE_MODE_SUSTAINED
+            or state.get("session_date") != session_date
+            or not state.get("entered_at")
+            or not state.get("proven_at")
+        ):
+            return None
+
+        current_pl_percent = (
+            (current_price - avg_entry_price) / avg_entry_price * Decimal("100")
+        )
+        candidate_floor = self._inverse_cascade_profit_lock_floor_for_pl(
+            current_pl_percent
+        )
+        locked_floor = optional_decimal_from_api(
+            state.get("profit_lock_floor_percent"),
+            "inverse cascade profit lock floor",
+        )
+        if candidate_floor is not None and (
+            locked_floor is None or candidate_floor > locked_floor
+        ):
+            locked_floor = candidate_floor
+            state["profit_lock_floor_percent"] = format_decimal(locked_floor)
+            state["profit_lock_floor_price"] = format_decimal(
+                avg_entry_price * (Decimal("1") + locked_floor / Decimal("100"))
+            )
+            state["profit_lock_triggered_at"] = datetime.now(timezone.utc).isoformat()
+            state["profit_lock_trigger_pl_percent"] = format_decimal(
+                current_pl_percent
+            )
+            self.state_store.set_inverse_cascade_state(state)
+
+        if locked_floor is None:
+            return {
+                "armed": False,
+                "current_pl_percent": current_pl_percent,
+                "floor_percent": None,
+                "floor_price": None,
+                "breached": False,
+            }
+
+        floor_price = avg_entry_price * (
+            Decimal("1") + locked_floor / Decimal("100")
+        )
+        return {
+            "armed": True,
+            "current_pl_percent": current_pl_percent,
+            "floor_percent": locked_floor,
+            "floor_price": floor_price,
+            "breached": current_pl_percent <= locked_floor,
+        }
+
     def _effective_trail_percent(self, symbol: str) -> Decimal:
         if (
             symbol == SOXS
@@ -2282,6 +2673,10 @@ class TrailingStopBot:
                         state.get("max_favorable_excursion_percent"),
                         "inverse cascade max favorable excursion",
                     )
+                    if self.config.inverse_cascade_tiered_proven_trail_enabled:
+                        return self._inverse_cascade_tiered_proven_trail_percent(
+                            max_mfe
+                        )
                     if (
                         max_mfe is None
                         or max_mfe
@@ -2374,7 +2769,7 @@ class TrailingStopBot:
 
         highs = [
             value
-            for bar in self._session_bars(symbol)
+            for bar in self._proven_session_bars(symbol)
             if (value := self._bar_decimal(bar, "h", "c", "o")) is not None
         ]
         if not highs:
@@ -2403,6 +2798,7 @@ class TrailingStopBot:
             state["proven_threshold_percent"] = format_decimal(
                 self.config.inverse_cascade_proven_mfe_percent
             )
+            state["proven_source"] = self._proven_source_label()
             changed = True
 
         if changed:
@@ -2416,6 +2812,31 @@ class TrailingStopBot:
             for bar in self._recent_bars(symbol, 420)
             if self._record_date(bar.get("t")) == session_date
         ]
+
+    def _proven_session_bars(self, symbol: str) -> list[dict[str, Any]]:
+        data_source = self.market_data or self.client
+        getter = getattr(data_source, "get_recent_bars_for_proven_state", None)
+        if not callable(getter):
+            return self._session_bars(symbol)
+
+        session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+        try:
+            bars = getter(symbol, 420)
+        except (BotError, KeyError):
+            return []
+        return [
+            bar
+            for bar in bars
+            if self._record_date(bar.get("t")) == session_date
+        ]
+
+    def _proven_source_label(self) -> str:
+        data_source = self.market_data or self.client
+        getter = getattr(data_source, "proven_state_source", None)
+        if not callable(getter):
+            return "session_high"
+        value = getter()
+        return str(value or "session_high")
 
     def _record_date(self, value: Any) -> str | None:
         parsed = parse_market_timestamp(value)
@@ -3814,7 +4235,7 @@ class EdgeWalkerBot:
                 * Decimal("100")
             )
             required_discount = self.config.chop_entry_discount_percent
-            discount_value = f"{self._decimal_text(discount_percent)}%"
+            discount_value = f"{self._display_percent_text(discount_percent)}%"
             if discount_percent >= required_discount:
                 return self._specialist_gate(
                     "setup",
@@ -4681,6 +5102,11 @@ class EdgeWalkerBot:
         if value is None:
             return None
         return format_decimal(value)
+
+    def _display_percent_text(self, value: Decimal | None, places: int = 2) -> str | None:
+        if value is None:
+            return None
+        return format_decimal_places(value, places)
 
     def _regime_strength(self, signal: RegimeSignal) -> str:
         return self._strength_for_gap(signal.regime, signal.gap_percent)
@@ -5834,7 +6260,7 @@ class EdgeWalkerBot:
         ):
             return state
 
-        session_bars = self._symbol_session_bars(symbol)
+        session_bars = self._proven_session_bars(symbol)
         highs = [
             value
             for bar in session_bars
@@ -5866,6 +6292,7 @@ class EdgeWalkerBot:
             state["proven_threshold_percent"] = format_decimal(
                 self.config.inverse_cascade_proven_mfe_percent
             )
+            state["proven_source"] = self._proven_source_label()
             changed = True
 
         if changed:
@@ -5887,7 +6314,7 @@ class EdgeWalkerBot:
         if not state.get("entered_at"):
             return state
 
-        session_bars = self._symbol_session_bars(symbol)
+        session_bars = self._proven_session_bars(symbol)
         highs = [
             value
             for bar in session_bars
@@ -5919,6 +6346,7 @@ class EdgeWalkerBot:
             state["proven_threshold_percent"] = format_decimal(
                 self.config.momentum_proven_mfe_percent
             )
+            state["proven_source"] = self._proven_source_label()
             changed = True
 
         if changed:
@@ -7032,6 +7460,31 @@ class EdgeWalkerBot:
             if self._v7_record_date(bar.get("t")) == session_date
         ]
 
+    def _proven_session_bars(self, symbol: str) -> list[dict[str, Any]]:
+        data_source = self.market_data or self.client
+        getter = getattr(data_source, "get_recent_bars_for_proven_state", None)
+        if not callable(getter):
+            return self._symbol_session_bars(symbol)
+        try:
+            bars = getter(symbol, 420)
+        except (BotError, KeyError):
+            return []
+
+        session_date = self._v7_session_date()
+        return [
+            bar
+            for bar in bars
+            if self._v7_record_date(bar.get("t")) == session_date
+        ]
+
+    def _proven_source_label(self) -> str:
+        data_source = self.market_data or self.client
+        getter = getattr(data_source, "proven_state_source", None)
+        if not callable(getter):
+            return "session_high"
+        value = getter()
+        return str(value or "session_high")
+
     def _symbol_previous_session_close(self, symbol: str) -> Decimal | None:
         data_source = self.market_data or self.client
         getter = getattr(data_source, "get_previous_session_close", None)
@@ -7543,6 +7996,10 @@ class EdgeWalkerBot:
                 "proven_threshold_percent": format_decimal(
                     self.config.inverse_cascade_proven_mfe_percent
                 ),
+                "profit_lock_floor_percent": None,
+                "profit_lock_floor_price": None,
+                "profit_lock_triggered_at": None,
+                "profit_lock_trigger_pl_percent": None,
             }
         )
 

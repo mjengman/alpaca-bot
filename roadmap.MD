@@ -1,6 +1,6 @@
 # EdgeWalker Roadmap
 
-Last updated: 2026-06-13
+Last updated: 2026-06-27
 
 EdgeWalker is becoming a proper operator-facing trading app. This roadmap keeps
 the backlog ordered around one principle: make the system safer, clearer, and
@@ -1395,11 +1395,18 @@ Authority boundary:
   context to avoid poaching InverseBot's downside habitat.
 - ChopBot remains the steady mean-reversion lane and fallback workhorse.
 - Rolling YTD validation from a `$350` starting balance showed the current
-  candidate improving both return and drawdown versus the prior baseline:
+  candidate improving both return and drawdown versus the prior baseline in the
+  pre-correction promotion run:
   - `25%` sizing: ending equity about `$390.01`, total `+$40.01`,
     `+11.43%`, max drawdown about `1.72%`.
   - `95%` sizing: ending equity about `$522.71`, total `+$172.71`,
     `+49.35%`, max drawdown about `6.51%`.
+- The 2026-06-27 harness honesty pass corrected multi-symbol timestamp
+  alignment, intrabar proven-state reachability, and live-audit fill
+  reconstruction. After those fixes, the current 95% corrected reference is
+  about `$517.37` from `$350` (`+47.82%`, max drawdown about `9.66%`). The
+  edge survived the more realistic replay, so the current roadmap posture is
+  to keep the live strategy unchanged while collecting more live evidence.
 - Approximate active-day footprint from the YTD rolling test was `93/109`
   green-or-red days, or about `85.3%`, with `16/109` flat days. This is a
   research/backtest activation proxy, not a live-trading promise.

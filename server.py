@@ -5963,6 +5963,17 @@ def research_request_from_payload(payload: dict[str, Any], config: BotConfig) ->
         raise BotError("slippage_bps must be a number.") from exc
     if slippage_bps < 0:
         raise BotError("slippage_bps must be at least 0.")
+    slippage_cents_raw = payload.get("slippage_cents")
+    if slippage_cents_raw is None:
+        slippage_cents_raw = payload.get("slippageCents")
+    try:
+        slippage_cents = Decimal(
+            str(slippage_cents_raw if slippage_cents_raw not in (None, "") else 0)
+        )
+    except InvalidOperation as exc:
+        raise BotError("slippage_cents must be a number.") from exc
+    if slippage_cents < 0:
+        raise BotError("slippage_cents must be at least 0.")
 
     starting_raw = payload.get("starting_account_value")
     if starting_raw is None:
@@ -5981,6 +5992,7 @@ def research_request_from_payload(payload: dict[str, Any], config: BotConfig) ->
         data_feed=config.data_feed,
         fill_model=fill_model,
         slippage_bps=slippage_bps,
+        slippage_cents=slippage_cents,
         preset_name=_optional_text(payload.get("preset_name") or payload.get("presetName"))
         or "Current Controls",
         preset_version=_optional_text(

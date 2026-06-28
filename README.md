@@ -120,11 +120,34 @@ full specialist roster. A few concepts are now part of the project vocabulary:
 - Previous-session close is preloaded during startup/warmup for the specialist
   gates that require it. The UI reports whether that anchor is loaded, pending,
   or unavailable.
-- Recent rolling YTD research on the current production candidate showed the
-  specialist stack improving return and drawdown versus the prior baseline:
-  25% sizing ended at about `$390.01` from `$350` (`+11.43%`, max drawdown
-  `1.72%`), while 95% sizing ended at about `$522.71` (`+49.35%`, max drawdown
-  `6.51%`). These are research results, not promises.
+- Recent rolling YTD research on the current production candidate remains
+  constructive after the harness honesty pass. With corrected timestamp
+  alignment and live-parity fixes, the 95% sizing replay from a simulated
+  `$350` starting balance ended at about `$517.37` through 2026-06-09
+  (`+47.82%`, max drawdown about `9.66%`). This does not include outside
+  account deposits. It is research evidence, not a promise.
+- Earlier pre-harness-correction research showed about `$522.71` (`+49.35%`).
+  The corrected replay shaved roughly `$5.34` / `1.53` return points from the
+  old result, which suggests the replay became more realistic without erasing
+  the broad YTD edge.
+
+### Live Observation Watchlist
+
+The current operating posture is to collect live data without changing strategy
+code. The latest parity work supports patience: the live sample remains small,
+the corrected YTD replay is still positive, and one-week pain has not justified
+strategy mutation. Keep these observations as review items for the next
+research/hardening cycle:
+
+- 2026-06-23: Momentum Surge entered SOXL and closed eight seconds later via
+  `momentum_authority_revoked_exit`. Snapshot: entry `$252.5999`, exit
+  `$252.0718`, quantity `2.154078049`, realized P/L `-$1.14`, MFE `0%`, MAE
+  `-0.2091%`. Working hypothesis: Surge can correctly qualify through its own
+  sustained-confirmation override while the legacy Momentum authority state is
+  still closed, then the open-position authority-revoke guard treats the Surge
+  position like a regular authority-based Momentum entry. This may be a policy
+  mismatch, but it should be confirmed with more live evidence before changing
+  strategy code.
 
 ## Research Mode
 
@@ -145,7 +168,8 @@ V1 assumptions:
 
 - Historical bars come from Alpaca one-minute bars.
 - Strategy perception uses completed prior bars.
-- Simulated fills use `next_bar_open`.
+- Simulated fills use `next_bar_open` by default. Parity research can also use
+  live-audit fill overrides from broker lifecycle records.
 - Slippage is explicit and recorded in the research row.
 - Research rows do not generate a daily narrative.
 - Research runs are blocked while the live/paper loop is running.
