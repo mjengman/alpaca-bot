@@ -39,6 +39,21 @@ connection tests, active environment selection, live-trading
 arming/disarming, notification settings, and operator spreadsheet settings.
 The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
 
+### Bank Day
+
+While the repeating bot is running and the market is open, `Bank Day` is an
+operator safety control that cancels pending entry orders, flattens any SOXL or
+SOXS position, and blocks new entries for the rest of that New York trading
+session. If an order is still resolving, the runner keeps enforcing the bank on
+subsequent cycles until the account is flat. Bot-managed risk remains active
+until the flattening exit actually fills.
+
+The status distinguishes an exit request from a completed fill. Before a fill,
+any displayed P/L is labeled as the press-time dashboard snapshot. After the
+lifecycle ledger reconciles the fill, the UI displays the realized trade result.
+The bank event also records its route, position, MFE, and timestamp as an anchor
+for later counterfactual replay; it does not claim that replay is automatic.
+
 ## Strategy
 
 Current production posture: full-roster EdgeWalker Router.

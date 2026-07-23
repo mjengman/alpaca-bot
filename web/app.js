@@ -46,6 +46,7 @@ const state = {
   researchProgressLabel: "",
   lastResearchResult: null,
   activeStrategyConfig: null,
+  operatorBankStatus: null,
   tooltipsSetup: false,
 };
 
@@ -223,6 +224,8 @@ const els = {
   researchResults: document.querySelector("#researchResults"),
   applyGoLiveRouter: document.querySelector("#applyGoLiveRouterButton"),
   liveStrategyBadge: document.querySelector("#liveStrategyBadge"),
+  bankDay: document.querySelector("#bankDayButton"),
+  bankDayStatus: document.querySelector("#bankDayStatus"),
   runOnce: document.querySelector("#runOnceButton"),
   toggle: document.querySelector("#toggleButton"),
   edgeRunState: document.querySelector("#edgeRunStateValue"),
@@ -607,6 +610,86 @@ function renderPositionSizeSummary(status = null) {
     effectiveNotional === null || effectiveNotional === undefined
       ? `${allocation}% BP`
       : `${allocation}% BP · ${dollars}`;
+}
+
+function renderBankDayStatus(data) {
+  const status = data.operator_bank_status || {};
+  state.operatorBankStatus = status;
+  const active = Boolean(status.active || status.operator_banked);
+  const marketOpen = Boolean(data.edgewalker_status?.market_open);
+  const shouldShowButton =
+    state.running && marketOpen && !active && !state.researchModeEnabled;
+
+  if (els.bankDay) {
+    els.bankDay.hidden = !shouldShowButton;
+    els.bankDay.disabled = state.busy || !shouldShowButton;
+  }
+
+  if (!els.bankDayStatus) {
+    return;
+  }
+  if (!active) {
+    els.bankDayStatus.hidden = true;
+    els.bankDayStatus.textContent = "";
+    delete els.bankDayStatus.dataset.tooltip;
+    return;
+  }
+
+  const timeText = formatTime(status.banked_at, "--");
+  const flattenStatus = status.flatten_status || "pending";
+  const detailParts = [];
+  const hasBankedTradePl =
+    status.banked_trade_pl !== undefined &&
+    status.banked_trade_pl !== null &&
+    status.banked_trade_pl !== "";
+  if (hasBankedTradePl) {
+    const realizedParts = [formatMoney(status.banked_trade_pl)];
+    if (
+      status.banked_trade_pl_percent !== undefined &&
+      status.banked_trade_pl_percent !== null &&
+      status.banked_trade_pl_percent !== ""
+    ) {
+      realizedParts.push(formatPercent(status.banked_trade_pl_percent));
+    }
+    detailParts.push(`Realized ${realizedParts.join(" ")}`);
+  } else if (flattenStatus === "filled" && status.exit_price) {
+    detailParts.push(`Filled @ ${formatMoney(status.exit_price)}`);
+  } else if (flattenStatus === "flat") {
+    detailParts.push("Flat");
+  } else if (flattenStatus === "dry_run") {
+    detailParts.push("Dry run");
+  } else if (flattenStatus === "error") {
+    detailParts.push("Needs attention");
+  } else {
+    detailParts.push("Exit pending");
+  }
+
+  const pressParts = [];
+  if (
+    status.press_day_pl !== undefined &&
+    status.press_day_pl !== null &&
+    status.press_day_pl !== ""
+  ) {
+    pressParts.push(formatMoney(status.press_day_pl));
+  }
+  if (
+    status.press_day_pl_percent !== undefined &&
+    status.press_day_pl_percent !== null &&
+    status.press_day_pl_percent !== ""
+  ) {
+    pressParts.push(formatPercent(status.press_day_pl_percent));
+  }
+  if (pressParts.length && !hasBankedTradePl) {
+    detailParts.push(`Press snapshot ${pressParts.join(" ")}`);
+  }
+
+  els.bankDayStatus.hidden = false;
+  els.bankDayStatus.textContent = `Bank Day at ${timeText}${
+    detailParts.length ? ` · ${detailParts.join(" · ")}` : ""
+  }`;
+  els.bankDayStatus.dataset.tooltip =
+    status.message ||
+    "New entries are halted until the next regular market session.";
 }
 
 function validateAllocationPercent(value) {
@@ -6845,6 +6928,7 @@ function render(data) {
   els.toggle.classList.toggle("is-stop", state.running);
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
+  renderBankDayStatus(data);
   const settingsLocked = state.running || state.busy;
   lockedStrategyInputs.forEach((input) => {
     input.disabled = true;
@@ -6918,6 +7002,9 @@ async function postAction(path) {
   state.busy = true;
   els.toggle.disabled = true;
   els.runOnce.disabled = true;
+  if (els.bankDay) {
+    els.bankDay.disabled = true;
+  }
   try {
     const shouldPlayStartCueAfterRender =
       path === "/api/start" && !state.running && !state.audioHydrated;
@@ -6935,6 +7022,16 @@ async function postAction(path) {
     state.busy = false;
     await refresh();
   }
+}
+
+async function bankDay() {
+  const confirmed = window.confirm(
+    "Bank the day? Edgewalker will flatten any open position now and halt new entries until the next session.",
+  );
+  if (!confirmed) {
+    return;
+  }
+  await postAction("/api/bank-day");
 }
 
 function showTooltip(target) {
@@ -7006,6 +7103,10 @@ els.toggle.addEventListener("click", () => {
 els.runOnce.addEventListener("click", () => {
   postAction("/api/run-once");
 });
+
+if (els.bankDay) {
+  els.bankDay.addEventListener("click", bankDay);
+}
 
 if (els.runBacktest) {
   els.runBacktest.addEventListener("click", runBacktest);

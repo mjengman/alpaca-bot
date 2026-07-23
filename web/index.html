@@ -243,8 +243,22 @@
               <div class="status-action-copy">
                 <span>Controls</span>
                 <small>Check or run the locked build.</small>
+                <small
+                  id="bankDayStatus"
+                  class="bank-day-status has-tooltip"
+                  hidden
+                ></small>
               </div>
               <div class="status-action-buttons">
+                <button
+                  id="bankDayButton"
+                  type="button"
+                  class="bank-day-button has-tooltip"
+                  data-tooltip="Flatten any open position and halt new entries for the rest of the session."
+                  hidden
+                >
+                  Bank Day
+                </button>
                 <button
                   id="runOnceButton"
                   type="button"

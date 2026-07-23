@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,10 +32,13 @@ from bot import (
     DATA_BASE_URL_DEFAULT,
     EDGEWALKER_BOTS,
     EdgeWalkerBot,
+    FRACTIONAL_QTY_STEP,
     INVERSE_BOT,
     INVERSE_CASCADE_MODE_SUSTAINED,
     INVERSE_CASCADE_MODES,
+    LIFECYCLE_INTENDED_EXIT,
     LIFECYCLE_FULL_FILL,
+    LIFECYCLE_OPERATOR_BANK_DAY,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_REJECTED,
     LIFECYCLE_ORDER_SUBMITTED,
@@ -43,6 +46,7 @@ from bot import (
     LifecycleLedger,
     LIVE_TRADING_BASE_URL_DEFAULT,
     MOMENTUM_BOT,
+    OrderLifecycleTracker,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
     POSITION_LIFECYCLE_CLOSED,
@@ -85,6 +89,7 @@ ACTIVE_SCAN_SECONDS = 5
 ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 OPERATOR_SPREADSHEET_POST_STATE_PATH = PROJECT_ROOT / ".operator_spreadsheet_posts.json"
 NOTIFICATION_STATE_PATH = PROJECT_ROOT / ".notification_events.json"
+OPERATOR_BANK_STATE_PATH = PROJECT_ROOT / ".operator_bank_day.json"
 NARRATIVE_CACHE_PATH = PROJECT_ROOT / ".narrative_cache.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
@@ -100,7 +105,9 @@ LOCKED_FULL_ROSTER_PROFILE = "FULL_ROSTER_LOCKED"
 UNKNOWN_MARKET_ENVIRONMENT = ""
 NOTIFICATION_PROVIDER_APPS_SCRIPT = "apps_script"
 NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
+NOTIFICATION_SEND_TIMEOUT_SECONDS = 30
 NOTIFICATION_SENT_EVENT_LIMIT = 500
+OPERATOR_BANK_DAY_EXIT_REASON = "operator_bank_day"
 NARRATIVE_GROUNDING_VERSION = "deterministic-daily-v4"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
@@ -350,6 +357,7 @@ class RunnerSnapshot:
     order_state: dict[str, Any]
     preset_authority: dict[str, Any] | None
     notification_status: dict[str, Any]
+    operator_bank_status: dict[str, Any]
     last_error: str | None
 
 
@@ -381,9 +389,12 @@ class BotRunner:
         self._spreadsheet_auto_posted_dates = self._load_spreadsheet_posted_dates()
         self._spreadsheet_auto_post_attempted_dates: set[str] = set()
         self._notification_state = _load_notification_state()
+        self._operator_bank_state = _load_operator_bank_state()
+        self._operator_bank_enforcement_lock = threading.Lock()
         self._preset_authority_plan: dict[str, Any] | None = None
         self._preset_authority_state: dict[str, Any] = {}
         self._prior_close_preload_keys: set[tuple[str, str, str]] = set()
+        self._daily_close_actions_lock = threading.Lock()
 
     def _initial_config(self) -> tuple[BotConfig, str | None]:
         try:
@@ -398,6 +409,7 @@ class BotRunner:
             return fallback, f"Live environment incomplete: {exc}"
 
     def snapshot(self) -> RunnerSnapshot:
+        self._trigger_daily_close_actions_if_due()
         with self._lock:
             return self._snapshot_locked()
 
@@ -473,7 +485,7 @@ class BotRunner:
             self._market_data.ensure_running(launch_config)
             self._prior_close_preload_keys = set()
         self._preload_previous_session_close(launch_config)
-        self._run_cycle(launch_config)
+        self._run_cycle(launch_config, send_warmup_notifications=False)
         return self.snapshot()
 
     def _preset_authority_launch_config(
@@ -618,8 +630,7 @@ class BotRunner:
                 self._append_activity_locked([line])
                 self._market_idle_logged_for = idle_key
 
-        self._maybe_auto_post_operator_spreadsheet(next_open)
-        self._maybe_send_daily_summary_notification(next_open)
+        self._run_daily_close_actions_if_due(next_open)
 
         wait_seconds = config.poll_seconds
         if next_open is not None:
@@ -629,6 +640,47 @@ class BotRunner:
             )
             wait_seconds = min(config.poll_seconds, seconds_to_open)
         stop_event.wait(wait_seconds)
+
+    def _daily_close_lock(self) -> threading.Lock:
+        lock = getattr(self, "_daily_close_actions_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._daily_close_actions_lock = lock
+        return lock
+
+    def _run_daily_close_actions_if_due(
+        self,
+        next_open: datetime | None = None,
+    ) -> bool:
+        close_lock = self._daily_close_lock()
+        if not close_lock.acquire(blocking=False):
+            return False
+        try:
+            self._maybe_auto_post_operator_spreadsheet(next_open)
+            self._maybe_send_daily_summary_notification(next_open)
+        finally:
+            close_lock.release()
+        return True
+
+    def _trigger_daily_close_actions_if_due(self) -> None:
+        if not _regular_session_close_elapsed(datetime.now(NY_TZ)):
+            return
+        close_lock = self._daily_close_lock()
+        if not close_lock.acquire(blocking=False):
+            return
+
+        def worker() -> None:
+            try:
+                self._maybe_auto_post_operator_spreadsheet(None)
+                self._maybe_send_daily_summary_notification(None)
+            finally:
+                close_lock.release()
+
+        threading.Thread(
+            target=worker,
+            name="edgewalker-daily-close-recovery",
+            daemon=True,
+        ).start()
 
     def _record_scheduler_error(self, config: BotConfig, exc: BotError) -> None:
         next_run = datetime.now() + timedelta(seconds=config.poll_seconds)
@@ -1465,7 +1517,12 @@ class BotRunner:
             f"reason={state.get('authority_reason') or '--'}"
         )
 
-    def _run_cycle(self, config: BotConfig) -> None:
+    def _run_cycle(
+        self,
+        config: BotConfig,
+        *,
+        send_warmup_notifications: bool = True,
+    ) -> None:
         output = io.StringIO()
         error: str | None = None
         edgewalker_status: dict[str, Any] | None = None
@@ -1483,14 +1540,20 @@ class BotRunner:
                     self._market_data.ensure_running(effective_config)
                 for line in authority_lines:
                     print(line)
+                client = AlpacaClient(effective_config)
                 status = EdgeWalkerBot(
                     effective_config,
-                    AlpacaClient(effective_config),
+                    client,
                     market_data=self._market_data,
+                    entry_halt=self._operator_entry_halt_payload(run_timestamp),
                 ).run_once()
                 edgewalker_status = asdict(status)
                 if authority_state:
                     edgewalker_status["preset_authority"] = authority_state
+                self._continue_operator_bank_enforcement(
+                    effective_config,
+                    client,
+                )
         except BotError as exc:
             error = str(exc)
             broker_state = self._broker_state_for_cycle_error(error, run_timestamp)
@@ -1527,11 +1590,12 @@ class BotRunner:
                 broker_state=broker_state,
                 regime_transition=regime_transition,
             )
-        self._maybe_send_warmup_notification(
-            edgewalker_status,
-            regime_transition,
-            run_timestamp,
-        )
+        if send_warmup_notifications:
+            self._maybe_send_warmup_notification(
+                edgewalker_status,
+                regime_transition,
+                run_timestamp,
+            )
         self._maybe_send_lifecycle_notifications(run_timestamp)
         if error:
             self._maybe_send_error_notification(
@@ -1539,6 +1603,527 @@ class BotRunner:
                 subject="Edgewalker cycle error",
                 body=f"Edgewalker hit a cycle error:\n\n{error}",
             )
+
+    def bank_day(self) -> RunnerSnapshot:
+        with self._lock:
+            if not self._running:
+                raise BotError("Start Edgewalker before banking the day.")
+            if _operator_bank_state_active(self._operator_bank_state):
+                return self._snapshot_locked()
+            config = self._config
+            edgewalker_status = copy.deepcopy(self._edgewalker_status) or {}
+
+        client = AlpacaClient(config)
+        clock = client.get_clock()
+        if not bool(clock.get("is_open")):
+            raise BotError("Bank Day is available only while the market is open.")
+
+        with self._operator_bank_guard():
+            with self._lock:
+                if _operator_bank_state_active(self._operator_bank_state):
+                    return self._snapshot_locked()
+            banked_at = self._execute_operator_bank(
+                config,
+                client,
+                edgewalker_status,
+            )
+
+        self._maybe_send_lifecycle_notifications(banked_at)
+        return self.snapshot()
+
+    def _operator_bank_guard(self) -> threading.Lock:
+        lock = getattr(self, "_operator_bank_enforcement_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._operator_bank_enforcement_lock = lock
+        return lock
+
+    def _execute_operator_bank(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+        edgewalker_status: dict[str, Any],
+    ) -> datetime:
+        account = client.get_account()
+        orders = client.list_open_orders()
+        positions = {
+            symbol: client.get_position(symbol)
+            for symbol in (SOXL, SOXS)
+        }
+        state_store = BotStateStore()
+        banked_at = datetime.now(timezone.utc)
+        context = self._operator_bank_context(
+            account,
+            positions,
+            orders,
+            edgewalker_status,
+            state_store,
+            banked_at,
+        )
+
+        LifecycleLedger().record(
+            LIFECYCLE_OPERATOR_BANK_DAY,
+            runtime="Operator",
+            dry_run=config.dry_run,
+            reason=OPERATOR_BANK_DAY_EXIT_REASON,
+            lifecycle_context=context,
+            **self._operator_bank_event_fields(context),
+        )
+
+        with self._lock:
+            self._operator_bank_state = self._operator_bank_state_from_context(context)
+            self._save_operator_bank_state_locked()
+            self._append_activity_locked(
+                [self._operator_bank_activity_line(context)]
+            )
+
+        try:
+            enforcement = self._enforce_operator_bank(
+                config,
+                client,
+                positions,
+                orders,
+                state_store,
+                context,
+            )
+        except BotError as exc:
+            with self._lock:
+                self._operator_bank_state.update(
+                    {
+                        "flatten_status": "error",
+                        "flatten_error": str(exc),
+                    }
+                )
+                self._save_operator_bank_state_locked()
+            raise
+
+        with self._lock:
+            self._operator_bank_state.update(enforcement)
+            self._save_operator_bank_state_locked()
+        return banked_at
+
+    def _continue_operator_bank_enforcement(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+    ) -> None:
+        with self._lock:
+            operator_bank_state = getattr(self, "_operator_bank_state", {})
+            if not _operator_bank_state_active(operator_bank_state):
+                return
+            if operator_bank_state.get("flatten_status") == "dry_run":
+                return
+            context = operator_bank_state.get("lifecycle_context")
+            context = copy.deepcopy(context) if isinstance(context, dict) else {}
+
+        guard = self._operator_bank_guard()
+        if not guard.acquire(blocking=False):
+            return
+        try:
+            positions = {
+                symbol: client.get_position(symbol)
+                for symbol in (SOXL, SOXS)
+            }
+            orders = client.list_open_orders()
+            try:
+                enforcement = self._enforce_operator_bank(
+                    config,
+                    client,
+                    positions,
+                    orders,
+                    BotStateStore(),
+                    context,
+                )
+            except BotError as exc:
+                with self._lock:
+                    self._operator_bank_state.update(
+                        {
+                            "flatten_status": "error",
+                            "flatten_error": str(exc),
+                        }
+                    )
+                    self._save_operator_bank_state_locked()
+                raise
+            with self._lock:
+                self._operator_bank_state.update(enforcement)
+                self._save_operator_bank_state_locked()
+        finally:
+            guard.release()
+
+    def _operator_bank_context(
+        self,
+        account: dict[str, Any],
+        positions: dict[str, dict[str, Any] | None],
+        orders: list[dict[str, Any]],
+        edgewalker_status: dict[str, Any],
+        state_store: BotStateStore,
+        banked_at: datetime,
+    ) -> dict[str, Any]:
+        active_symbol, active_position = self._operator_active_position(positions)
+        day_pl = _optional_text(edgewalker_status.get("day_pl"))
+        day_pl_percent = _optional_text(edgewalker_status.get("day_pl_percent"))
+        account_equity = _optional_text(
+            account.get("portfolio_value") or account.get("equity")
+        )
+        context: dict[str, Any] = {
+            "event": OPERATOR_BANK_DAY_EXIT_REASON,
+            "banked_at": banked_at.isoformat(timespec="seconds"),
+            "session_date": _operator_session_date(banked_at),
+            "account_equity": account_equity,
+            "buying_power": _optional_text(account.get("buying_power")),
+            "day_pl": day_pl,
+            "day_pl_percent": day_pl_percent,
+            "regime": _optional_text(edgewalker_status.get("regime")),
+            "route_active_bot": _optional_text(edgewalker_status.get("active_bot")),
+            "routed_symbol": _optional_text(edgewalker_status.get("routed_symbol")),
+            "trend_trust_score": self._operator_trend_trust_score(edgewalker_status),
+            "pending_order_count": len(orders),
+            "counterfactual_hook": {
+                "session_date": _operator_session_date(banked_at),
+                "banked_at": banked_at.isoformat(timespec="seconds"),
+                "requires_post_bank_replay": True,
+            },
+        }
+        if active_symbol and active_position:
+            qty = _decimal_from_value(active_position.get("qty"))
+            entry_price = _decimal_from_value(active_position.get("avg_entry_price"))
+            current_price = _decimal_from_value(active_position.get("current_price"))
+            high_water_mark = state_store.get_high_water_mark(active_symbol)
+            mfe_percent = None
+            if high_water_mark is not None and entry_price and entry_price > 0:
+                mfe_percent = (high_water_mark - entry_price) / entry_price * Decimal(
+                    "100"
+                )
+            owner = state_store.get_position_owner(active_symbol)
+            inverse_state = (
+                state_store.get_inverse_cascade_state()
+                if active_symbol == SOXS
+                else {}
+            )
+            context["position"] = {
+                "symbol": active_symbol,
+                "qty": format_decimal(qty) if qty is not None else None,
+                "entry_price": format_decimal(entry_price)
+                if entry_price is not None
+                else None,
+                "mark_at_press": format_decimal(current_price)
+                if current_price is not None
+                else None,
+                "unrealized_pl": _optional_text(active_position.get("unrealized_pl")),
+                "unrealized_pl_percent": _optional_text(
+                    active_position.get("unrealized_plpc")
+                ),
+                "mfe_percent": format_decimal(mfe_percent)
+                if mfe_percent is not None
+                else None,
+                "owner": owner,
+                "inverse_proven": bool(inverse_state.get("proven_at")),
+                "inverse_state": inverse_state if active_symbol == SOXS else None,
+            }
+        else:
+            context["position"] = None
+        return context
+
+    def _operator_bank_event_fields(self, context: dict[str, Any]) -> dict[str, Any]:
+        position = context.get("position") if isinstance(context.get("position"), dict) else {}
+        return {
+            "banked_at": context.get("banked_at"),
+            "session_date": context.get("session_date"),
+            "account_equity": context.get("account_equity"),
+            "day_pl": context.get("day_pl"),
+            "day_pl_percent": context.get("day_pl_percent"),
+            "regime": context.get("regime"),
+            "route_active_bot": context.get("route_active_bot"),
+            "routed_symbol": context.get("routed_symbol"),
+            "trend_trust_score": context.get("trend_trust_score"),
+            "position_symbol": position.get("symbol"),
+            "position_qty": position.get("qty"),
+            "position_owner": position.get("owner"),
+            "mark_at_press": position.get("mark_at_press"),
+            "position_unrealized_pl": position.get("unrealized_pl"),
+            "position_unrealized_pl_percent": position.get("unrealized_pl_percent"),
+        }
+
+    def _operator_bank_state_from_context(
+        self,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = {
+            "operator_banked": True,
+            "active": True,
+            "reason": OPERATOR_BANK_DAY_EXIT_REASON,
+            "session_date": context.get("session_date"),
+            "banked_at": context.get("banked_at"),
+            "account_equity": context.get("account_equity"),
+            "press_day_pl": context.get("day_pl"),
+            "press_day_pl_percent": context.get("day_pl_percent"),
+            "day_pl": context.get("day_pl"),
+            "day_pl_percent": context.get("day_pl_percent"),
+            "flatten_status": (
+                "pending"
+                if isinstance(context.get("position"), dict)
+                else "flat"
+            ),
+            "counterfactual_hook": context.get("counterfactual_hook"),
+            "lifecycle_context": context,
+        }
+        position = context.get("position")
+        if isinstance(position, dict):
+            state.update(
+                {
+                    "position_symbol": position.get("symbol"),
+                    "position_qty": position.get("qty"),
+                    "position_owner": position.get("owner"),
+                    "position_unrealized_pl": position.get("unrealized_pl"),
+                    "position_unrealized_pl_percent": position.get(
+                        "unrealized_pl_percent"
+                    ),
+                    "mark_at_press": position.get("mark_at_press"),
+                }
+            )
+        return state
+
+    def _operator_bank_activity_line(self, context: dict[str, Any]) -> str:
+        pl = context.get("day_pl")
+        pct = context.get("day_pl_percent")
+        position = context.get("position")
+        if isinstance(position, dict) and position.get("symbol"):
+            target = f"flattening {position.get('symbol')}"
+        else:
+            target = "flat account"
+        pl_text = f" day_pl={pl}" if pl not in (None, "") else ""
+        pct_text = f" ({pct}%)" if pct not in (None, "") else ""
+        return f"[OPERATOR] Bank Day pressed; {target}; new entries halted{pl_text}{pct_text}."
+
+    def _operator_trend_trust_score(
+        self,
+        edgewalker_status: dict[str, Any],
+    ) -> Any:
+        trend_trust = edgewalker_status.get("trend_trust")
+        if isinstance(trend_trust, dict):
+            return trend_trust.get("score")
+        return None
+
+    def _operator_active_position(
+        self,
+        positions: dict[str, dict[str, Any] | None],
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        for symbol in (SOXL, SOXS):
+            position = positions.get(symbol)
+            if not position:
+                continue
+            qty = _decimal_from_value(position.get("qty"))
+            if qty and qty > 0:
+                return symbol, position
+        return None, None
+
+    def _enforce_operator_bank(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+        positions: dict[str, dict[str, Any] | None],
+        orders: list[dict[str, Any]],
+        state_store: BotStateStore,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        open_entry_orders = [
+            order
+            for order in orders
+            if str(order.get("side") or "").lower() == "buy" and order.get("id")
+        ]
+        if open_entry_orders:
+            canceled_order_ids = []
+            for order in open_entry_orders:
+                order_id = str(order["id"])
+                client.cancel_order(order_id)
+                canceled_order_ids.append(order_id)
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        "[OPERATOR] Bank Day canceled pending entry order(s): "
+                        + ", ".join(canceled_order_ids)
+                        + "."
+                    ]
+                )
+            return {
+                "flatten_status": "canceling_entry_orders",
+                "canceled_entry_order_ids": canceled_order_ids,
+                "flatten_error": None,
+            }
+
+        pending_orders = state_store.get_pending_orders()
+        if pending_orders or orders:
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        "[OPERATOR] Bank Day waiting for pending order resolution; no duplicate sell submitted."
+                    ]
+                )
+            return {
+                "flatten_status": "pending",
+                "flatten_error": None,
+            }
+
+        active_symbol, active_position = self._operator_active_position(positions)
+        if not active_symbol or not active_position:
+            self._clear_operator_bank_position_state(state_store)
+            with self._lock:
+                self._append_activity_locked(
+                    ["[OPERATOR] Bank Day confirmed the account is flat."]
+                )
+            return {
+                "flatten_status": "flat",
+                "flatten_error": None,
+            }
+
+        qty = _decimal_from_value(active_position.get("qty"))
+        if qty is None or qty <= 0:
+            raise BotError(
+                f"Bank Day could not flatten {active_symbol}: position quantity is unavailable."
+            )
+        qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
+        if qty <= 0:
+            raise BotError(
+                f"Bank Day could not flatten {active_symbol}: position quantity rounds to zero."
+            )
+
+        owner = state_store.get_position_owner(active_symbol) or (
+            context.get("position", {}).get("owner")
+            if isinstance(context.get("position"), dict)
+            else None
+        ) or "Operator"
+        ledger = LifecycleLedger()
+        ledger.record(
+            LIFECYCLE_INTENDED_EXIT,
+            runtime="Operator",
+            dry_run=config.dry_run,
+            bot=owner,
+            symbol=active_symbol,
+            side="sell",
+            qty=qty,
+            reason=OPERATOR_BANK_DAY_EXIT_REASON,
+            lifecycle_context=context,
+        )
+        try:
+            order = client.submit_market_sell_qty(active_symbol, qty)
+        except BotError as exc:
+            ledger.record(
+                LIFECYCLE_ORDER_REJECTED,
+                runtime="Operator",
+                dry_run=config.dry_run,
+                bot=owner,
+                symbol=active_symbol,
+                side="sell",
+                qty=qty,
+                reason=OPERATOR_BANK_DAY_EXIT_REASON,
+                lifecycle_context=context,
+                error=str(exc),
+                broker_constraint=broker_constraint_payload(
+                    classify_broker_error(str(exc), side="sell", symbol=active_symbol)
+                ),
+            )
+            raise
+
+        ledger.record(
+            LIFECYCLE_ORDER_SUBMITTED,
+            runtime="Operator",
+            dry_run=config.dry_run,
+            bot=owner,
+            symbol=active_symbol,
+            side="sell",
+            qty=qty,
+            reason=OPERATOR_BANK_DAY_EXIT_REASON,
+            lifecycle_context=context,
+            order=order,
+        )
+        OrderLifecycleTracker(
+            client,
+            state_store,
+            ledger,
+            "Operator",
+            config.dry_run,
+        ).track_submitted_order(
+            order,
+            owner,
+            OPERATOR_BANK_DAY_EXIT_REASON,
+            lifecycle_context=context,
+        )
+        if config.dry_run and order is None:
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        f"[OPERATOR] Bank Day dry run simulated market sell for "
+                        f"{active_symbol} qty={format_decimal(qty)}."
+                    ]
+                )
+            return {
+                "flatten_status": "dry_run",
+                "flatten_error": None,
+                "exit_order_id": None,
+                "exit_price": None,
+                "filled_qty": None,
+            }
+
+        order_status = str((order or {}).get("status") or "submitted").lower()
+        if order_status == "filled":
+            self._clear_operator_bank_position_state(state_store)
+        exit_order_id = _optional_text((order or {}).get("id"))
+        exit_price = _optional_text((order or {}).get("filled_avg_price"))
+        filled_qty = _optional_text((order or {}).get("filled_qty"))
+        with self._lock:
+            self._append_activity_locked(
+                [
+                    f"[OPERATOR] Bank Day {order_status} market sell for "
+                    f"{active_symbol} qty={format_decimal(qty)}."
+                ]
+            )
+        return {
+            "flatten_status": "filled" if order_status == "filled" else "pending",
+            "flatten_error": None,
+            "exit_order_id": exit_order_id,
+            "exit_price": exit_price,
+            "filled_qty": filled_qty,
+        }
+
+    def _clear_operator_bank_position_state(
+        self,
+        state_store: BotStateStore,
+    ) -> None:
+        for symbol in (SOXL, SOXS):
+            state_store.clear_symbol(symbol)
+        clear_inverse = getattr(state_store, "clear_inverse_cascade_state", None)
+        if callable(clear_inverse):
+            clear_inverse()
+        clear_momentum = getattr(state_store, "clear_momentum_state", None)
+        if callable(clear_momentum):
+            clear_momentum()
+
+    def _operator_bank_status_locked(
+        self,
+        performance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status = _operator_bank_status_from_state(self._operator_bank_state)
+        return _operator_bank_status_with_performance(status, performance or {})
+
+    def _save_operator_bank_state_locked(self) -> None:
+        _save_operator_bank_state(self._operator_bank_state)
+
+    def _operator_entry_halt_payload(
+        self,
+        run_timestamp: datetime,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            state = copy.deepcopy(self._operator_bank_state)
+        status = _operator_bank_status_from_state(state, run_timestamp)
+        if not status.get("active"):
+            return None
+        return {
+            "active": True,
+            "reason": "operator_banked",
+            "banked_at": status.get("banked_at"),
+            "day_pl": status.get("day_pl"),
+            "day_pl_percent": status.get("day_pl_percent"),
+        }
 
     def _broker_state_for_cycle_error(
         self,
@@ -1690,6 +2275,7 @@ class BotRunner:
             required_bars=self._config.slow_sma_minutes,
         )
         lifecycle_records = LifecycleLedger().read_all()
+        performance = lifecycle_performance_summary(lifecycle_records)
         return RunnerSnapshot(
             running=self._running,
             symbol=self._config.symbol,
@@ -1772,13 +2358,14 @@ class BotRunner:
             edgewalker_status=self._edgewalker_status,
             market_data_status=market_data_status,
             broker_state=self._broker_state,
-            performance=lifecycle_performance_summary(lifecycle_records),
+            performance=performance,
             order_state=order_visibility_summary(
                 lifecycle_records,
                 BotStateStore().get_pending_orders(),
             ),
             preset_authority=self._preset_authority_snapshot_locked(),
             notification_status=self._notification_delivery_status_locked(),
+            operator_bank_status=self._operator_bank_status_locked(performance),
             last_error=self._last_error,
         )
 
@@ -2695,6 +3282,166 @@ def save_alpaca_environment_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return settings
 
 
+def _operator_session_date(now: datetime | None = None) -> str:
+    current = now or datetime.now(NY_TZ)
+    local = current.astimezone(NY_TZ) if current.tzinfo else current.replace(tzinfo=NY_TZ)
+    return local.date().isoformat()
+
+
+def _load_operator_bank_state(path: Path = OPERATOR_BANK_STATE_PATH) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_operator_bank_state(
+    state: dict[str, Any],
+    path: Path = OPERATOR_BANK_STATE_PATH,
+) -> None:
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _operator_bank_state_active(
+    state: dict[str, Any],
+    now: datetime | None = None,
+) -> bool:
+    return bool(state.get("operator_banked") or state.get("active")) and (
+        _optional_text(state.get("session_date")) == _operator_session_date(now)
+    )
+
+
+def _operator_bank_status_from_state(
+    state: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    session_date = _operator_session_date(now)
+    active = _operator_bank_state_active(state, now)
+    status: dict[str, Any] = {
+        "active": active,
+        "operator_banked": active,
+        "session_date": session_date,
+    }
+    if not active:
+        return status
+
+    for key in (
+        "banked_at",
+        "reason",
+        "account_equity",
+        "press_day_pl",
+        "press_day_pl_percent",
+        "day_pl",
+        "day_pl_percent",
+        "position_symbol",
+        "position_qty",
+        "position_owner",
+        "position_unrealized_pl",
+        "position_unrealized_pl_percent",
+        "mark_at_press",
+        "flatten_status",
+        "flatten_error",
+        "exit_order_id",
+        "exit_price",
+        "filled_qty",
+        "counterfactual_hook",
+    ):
+        if key in state:
+            status[key] = state[key]
+    status.setdefault("press_day_pl", status.get("day_pl"))
+    status.setdefault("press_day_pl_percent", status.get("day_pl_percent"))
+    status["message"] = "Bank Day is active; new entries are halted until the next session."
+    return status
+
+
+def _operator_bank_status_with_performance(
+    status: dict[str, Any],
+    performance: dict[str, Any],
+) -> dict[str, Any]:
+    if not status.get("active"):
+        return status
+
+    result = dict(status)
+    banked_at = _parse_optional_datetime(result.get("banked_at"))
+    banked_trade = None
+    realized_trades = performance.get("realized_trades")
+    if isinstance(realized_trades, list):
+        for trade in reversed(realized_trades):
+            if not isinstance(trade, dict):
+                continue
+            if trade.get("exit_reason") != OPERATOR_BANK_DAY_EXIT_REASON:
+                continue
+            closed_at = _parse_optional_datetime(trade.get("closed_at"))
+            if banked_at and closed_at and closed_at < banked_at:
+                continue
+            banked_trade = trade
+            break
+
+    if banked_trade:
+        result.update(
+            {
+                "flatten_status": "filled",
+                "exit_price": banked_trade.get("exit_price"),
+                "filled_qty": banked_trade.get("qty"),
+                "banked_trade_pl": banked_trade.get("realized_pl"),
+                "banked_trade_pl_percent": banked_trade.get(
+                    "realized_pl_percent"
+                ),
+                "session_realized_pl": performance.get("session_realized_pl"),
+                "message": (
+                    "The Bank Day exit filled; new entries are halted until "
+                    "the next session."
+                ),
+            }
+        )
+        return result
+
+    flatten_status = _optional_text(result.get("flatten_status")) or "pending"
+    if flatten_status == "flat":
+        result["message"] = (
+            "The account is flat and new entries are halted until the next session."
+        )
+    elif flatten_status == "dry_run":
+        result["message"] = (
+            "Dry run only: no live exit was submitted; new entries are halted "
+            "until the next session."
+        )
+    elif flatten_status == "canceling_entry_orders":
+        result["message"] = (
+            "Pending entry orders are being canceled before flattening; new "
+            "entries are halted."
+        )
+    elif flatten_status == "error":
+        error = _optional_text(result.get("flatten_error"))
+        result["message"] = (
+            f"Bank Day flattening needs attention: {error}"
+            if error
+            else "Bank Day flattening needs attention; new entries remain halted."
+        )
+    else:
+        result["message"] = (
+            "The flatten request is pending; new entries are halted until the "
+            "next session."
+        )
+    return result
+
+
+def _parse_optional_datetime(value: Any) -> datetime | None:
+    text = _optional_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _load_notification_state() -> dict[str, Any]:
     empty_state: dict[str, Any] = {
         "sent_event_ids": [],
@@ -2870,7 +3617,10 @@ def send_notification_email(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=NOTIFICATION_SEND_TIMEOUT_SECONDS,
+        ) as response:
             response_body = response.read().decode("utf-8")
             try:
                 parsed = json.loads(response_body) if response_body else {}
@@ -2892,6 +3642,8 @@ def send_notification_email(
         raise BotError(f"Notification send failed: {exc.reason}") from exc
     except TimeoutError as exc:
         raise BotError("Notification send timed out.") from exc
+    except OSError as exc:
+        raise BotError(f"Notification send failed: {exc}") from exc
 
 
 def send_test_notification_email() -> dict[str, Any]:
@@ -4683,6 +5435,106 @@ def _deterministic_bot_narrative_sections(
     return sections
 
 
+def _operator_bank_summary_from_records(
+    lifecycle_records: list[dict[str, Any]],
+    log_date: str,
+) -> dict[str, Any] | None:
+    bank_records = [
+        record
+        for record in _lifecycle_records_for_date(lifecycle_records, log_date)
+        if record.get("event_type") == LIFECYCLE_OPERATOR_BANK_DAY
+    ]
+    if not bank_records:
+        return None
+
+    record = bank_records[-1]
+    context = (
+        record.get("lifecycle_context")
+        if isinstance(record.get("lifecycle_context"), dict)
+        else {}
+    )
+    position = context.get("position") if isinstance(context.get("position"), dict) else {}
+    counterfactual_hook = (
+        context.get("counterfactual_hook")
+        if isinstance(context.get("counterfactual_hook"), dict)
+        else {}
+    )
+    return {
+        "banked_at": context.get("banked_at") or record.get("timestamp"),
+        "account_equity": context.get("account_equity") or record.get("account_equity"),
+        "press_day_pl": context.get("day_pl") or record.get("day_pl"),
+        "press_day_pl_percent": context.get("day_pl_percent")
+        or record.get("day_pl_percent"),
+        "position_symbol": position.get("symbol") or record.get("position_symbol"),
+        "position_qty": position.get("qty") or record.get("position_qty"),
+        "position_owner": position.get("owner") or record.get("position_owner"),
+        "mark_at_press": position.get("mark_at_press")
+        or record.get("mark_at_press"),
+        "counterfactual_hook": counterfactual_hook,
+    }
+
+
+def _operator_bank_note_from_records(
+    lifecycle_records: list[dict[str, Any]],
+    log_date: str,
+) -> str:
+    summary = _operator_bank_summary_from_records(lifecycle_records, log_date)
+    if not summary:
+        return ""
+
+    parts = ["operator_banked=true"]
+    for key in (
+        "banked_at",
+        "press_day_pl",
+        "press_day_pl_percent",
+        "position_symbol",
+        "position_qty",
+        "position_owner",
+        "mark_at_press",
+    ):
+        value = _optional_text(summary.get(key))
+        if value:
+            parts.append(f"{key}={value}")
+    if summary.get("counterfactual_hook"):
+        parts.append("counterfactual_hook=available")
+    return "; ".join(parts)
+
+
+def _operator_bank_narrative_note(operator_bank: dict[str, Any]) -> str:
+    if not operator_bank:
+        return ""
+
+    banked_at = _optional_text(operator_bank.get("banked_at"))
+    banked_text = ""
+    if banked_at:
+        try:
+            parsed = datetime.fromisoformat(banked_at.replace("Z", "+00:00"))
+            banked_text = f" at {parsed.astimezone(NY_TZ).strftime('%-I:%M %p')}"
+        except ValueError:
+            banked_text = f" at {banked_at}"
+
+    day_pl = _decimal_from_value(operator_bank.get("press_day_pl"))
+    day_pl_percent = _decimal_from_value(operator_bank.get("press_day_pl_percent"))
+    pl_parts = []
+    if day_pl is not None:
+        pl_parts.append(_narrative_money(day_pl))
+    if day_pl_percent is not None:
+        pl_parts.append(_narrative_percent(day_pl_percent))
+    pl_text = (
+        f" with a press-time dashboard snapshot of {' '.join(pl_parts)}"
+        if pl_parts
+        else ""
+    )
+
+    symbol = _optional_text(operator_bank.get("position_symbol"))
+    position_text = f" while {symbol} was open" if symbol else " while flat"
+    return (
+        f"Operator Bank Day was pressed{banked_text}{pl_text}{position_text}; "
+        "new entries were halted for the rest of the session and the ledger "
+        "captured an anchor for later counterfactual replay."
+    )
+
+
 def _live_session_count_through(target_date: str) -> int | None:
     try:
         paths = sorted(LOGS_ROOT.glob("edgewalker-*.jsonl"))
@@ -4770,6 +5622,11 @@ def _deterministic_daily_narrative_sections(
     route_exits = int(metrics.get("route_invalidation_exit_count") or 0)
     trail_exits = int(metrics.get("trailing_stop_exit_count") or 0)
     session_count = _live_session_count_through(date_text) if date_text else None
+    operator_bank = (
+        context.get("operator_bank")
+        if isinstance(context.get("operator_bank"), dict)
+        else {}
+    )
 
     trust_text = (
         f"average trend trust {trust_score:.1f} ({trust_tier})"
@@ -4871,6 +5728,9 @@ def _deterministic_daily_narrative_sections(
         )
     else:
         operational = "No broker, order, or data issues were noted."
+    operator_bank_note = _operator_bank_narrative_note(operator_bank)
+    if operator_bank_note:
+        operational = f"{operational} {operator_bank_note}"
 
     if result_status == "RED" and (transitions >= 20 or (trust_score is not None and trust_score < 45)):
         verdict = _narrative_variant(
@@ -4936,6 +5796,10 @@ def _deterministic_daily_narrative_sections(
                     "This is still early live data collection, so the right move is observation.",
                 ],
             )
+        )
+    if operator_bank_note:
+        analysis_parts.append(
+            "Operator banking halted new entries for the rest of the session; use the ledger hook later to compare the intervention against autonomous follow-through."
         )
 
     bottom_line = _narrative_variant(
@@ -5549,6 +6413,18 @@ def build_operator_spreadsheet_daily_row(
         target_date,
     )
     realized_trades = _realized_trades_for_date(lifecycle_records, target_date)
+    operator_bank_note = _operator_bank_note_from_records(
+        lifecycle_records,
+        target_date,
+    )
+    operator_notes_value = " | ".join(
+        part
+        for part in (
+            _optional_text(operator_notes),
+            operator_bank_note,
+        )
+        if part
+    )
 
     first = export_records[0]
     last = export_records[-1]
@@ -5806,7 +6682,7 @@ def build_operator_spreadsheet_daily_row(
         "route_reason_summary": _route_reason_summary(last),
         "prior_close_status": _prior_close_status(export_records),
         "data_feed": _config_snapshot_text(last_config, "data_feed"),
-        "operator_notes": operator_notes,
+        "operator_notes": operator_notes_value,
         "daily_narrative": daily_narrative,
     }
 
@@ -8484,6 +9360,10 @@ def _extract_session_context(
         "error_samples": error_samples,
         "performance": perf,
         "session_metrics": session_metrics,
+        "operator_bank": _operator_bank_summary_from_records(
+            lifecycle_records or [],
+            log_date,
+        ),
         "final_state": {
             "portfolio_value": last.get("portfolio_value") or last.get("account_value"),
             "buying_power": last.get("buying_power"),
@@ -9434,6 +10314,10 @@ class AppHandler(BaseHTTPRequestHandler):
             if self.path == "/api/notifications/daily-summary":
                 self.require_local_ui_request("notification recovery requests")
                 self.send_json(self.runner.send_daily_summary_notification())
+                return
+            if self.path == "/api/bank-day":
+                self.require_local_ui_request("bank day requests")
+                self.send_json(asdict(self.runner.bank_day()))
                 return
             if self.path == "/api/spreadsheet/row":
                 self.require_local_ui_request("operator spreadsheet requests")

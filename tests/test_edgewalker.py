@@ -3887,6 +3887,23 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
 
 class AlpacaClientTest(unittest.TestCase):
+    def test_cancel_order_uses_delete_endpoint(self) -> None:
+        client = AlpacaClient(replace(config(), dry_run=False))
+        calls: list[tuple[str, str]] = []
+
+        def fake_trading_request(
+            method: str,
+            path: str,
+            **_kwargs: Any,
+        ) -> None:
+            calls.append((method, path))
+
+        client._trading_request = fake_trading_request
+
+        client.cancel_order("order-123")
+
+        self.assertEqual(calls, [("DELETE", "/orders/order-123")])
+
     def test_last_completed_bar_end_excludes_in_progress_minute(self) -> None:
         now = datetime(2026, 5, 21, 13, 50, 12, 345678, tzinfo=timezone.utc)
 

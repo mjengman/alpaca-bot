@@ -187,6 +187,7 @@ LIFECYCLE_FULL_FILL = "FULL_FILL"
 LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
 LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
+LIFECYCLE_OPERATOR_BANK_DAY = "OPERATOR_BANK_DAY"
 LIFECYCLE_ADAPTIVE_POSTURE_SELECTED = "ADAPTIVE_POSTURE_SELECTED"
 LIFECYCLE_SHADOW_ENTRY_SUPPRESSED = "SHADOW_ENTRY_SUPPRESSED"
 POSITION_LIFECYCLE_OPENING = "OPENING"
@@ -1183,6 +1184,12 @@ class AlpacaClient:
         if not isinstance(order, dict):
             raise BotError(f"Unexpected order response: {order!r}")
         return order
+
+    def cancel_order(self, order_id: str) -> None:
+        if self.config.dry_run:
+            print(f"[dry-run] Would cancel order: {order_id}")
+            return
+        self._trading_request("DELETE", f"/orders/{order_id}")
 
     def submit_trailing_stop_sell(
         self, symbol: str, qty: Decimal, trail_percent: Decimal
@@ -2235,12 +2242,14 @@ class TrailingStopBot:
         state_store: BotStateStore | None = None,
         market_data: Any | None = None,
         lifecycle_ledger: LifecycleLedger | None = None,
+        entry_halt: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.client = client
         self.state_store = state_store or BotStateStore()
         self.market_data = market_data
         self.lifecycle_ledger = lifecycle_ledger or LifecycleLedger()
+        self.entry_halt = entry_halt or {}
         self.order_tracker = OrderLifecycleTracker(
             self.client,
             self.state_store,
@@ -3010,6 +3019,7 @@ class EdgeWalkerBot:
         state_store: BotStateStore | None = None,
         market_data: Any | None = None,
         lifecycle_ledger: LifecycleLedger | None = None,
+        entry_halt: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.client = client
@@ -3028,6 +3038,7 @@ class EdgeWalkerBot:
         self._trend_trust: dict[str, Any] | None = None
         self._inverse_cascade_context: dict[str, Any] | None = None
         self._momentum_surge_context: dict[str, Any] | None = None
+        self.entry_halt = entry_halt or {}
 
     def _record_lifecycle(self, event_type: str, **fields: Any) -> None:
         payload = {
@@ -3550,6 +3561,28 @@ class EdgeWalkerBot:
                 False,
                 "no_entry_signal",
                 entry_block_reason=entry_decision.reason,
+            )
+
+        entry_halt_reason = self._entry_halt_reason()
+        if entry_halt_reason:
+            print(
+                f"[ENTRY] BLOCKED bot={route.active_bot} "
+                f"symbol={route.routed_symbol} reason={entry_halt_reason} "
+                f"mode={self._directional_mode_for_route(route)}"
+            )
+            print(f"entry_signal=False action_taken={entry_halt_reason}")
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                entry_halt_reason,
+                entry_block_reason=entry_halt_reason,
             )
 
         asset = self.client.get_asset(route.routed_symbol)
@@ -4674,6 +4707,14 @@ class EdgeWalkerBot:
         action_taken: str,
         entry_block_reason: str | None,
     ) -> dict[str, Any]:
+        if entry_block_reason == "operator_banked" or action_taken == "operator_banked":
+            return self._specialist_gate(
+                "position",
+                "Position",
+                "veto",
+                "required",
+                "The operator banked the session; new entries are halted until the next session.",
+            )
         if position_symbol:
             return self._specialist_gate(
                 "position",
@@ -4706,6 +4747,14 @@ class EdgeWalkerBot:
             "required",
             "Account is flat and no entry order is pending.",
         )
+
+    def _entry_halt_reason(self) -> str | None:
+        if not isinstance(self.entry_halt, dict):
+            return None
+        if not self.entry_halt.get("active"):
+            return None
+        reason = self.entry_halt.get("reason") or "operator_banked"
+        return str(reason)
 
     def _specialist_exit_gates(
         self,

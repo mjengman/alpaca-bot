@@ -6,7 +6,7 @@ import threading
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -16,8 +16,12 @@ from bot import (
     BotError,
     CHOP_BOT,
     EDGEWALKER_BOTS,
+    EdgeWalkerBot,
+    FRACTIONAL_QTY_STEP,
     INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
+    LIFECYCLE_INTENDED_EXIT,
+    LIFECYCLE_OPERATOR_BANK_DAY,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
@@ -29,6 +33,7 @@ from bot import (
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
     SOXL,
+    SOXS,
     V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
     broker_constraint_ok,
     broker_constraint_payload,
@@ -37,6 +42,7 @@ from server import (
     ACTIVE_SCAN_SECONDS,
     BotRunner,
     NY_TZ,
+    OPERATOR_BANK_DAY_EXIT_REASON,
     _append_daily_jsonl,
     _build_summary_prompt,
     _current_ny_activity,
@@ -53,6 +59,10 @@ from server import (
     _is_allowed_ui_origin,
     _most_recent_log_date,
     _parse_narrative_response,
+    _operator_bank_state_active,
+    _operator_bank_status_from_state,
+    _operator_bank_status_with_performance,
+    _operator_session_date,
     _prior_close_status,
     _research_chop_specialist_summary,
     _research_compare_date_summary,
@@ -3570,6 +3580,59 @@ class ServerLoggingTest(unittest.TestCase):
                 "2026-06-12",
             )
 
+    def test_status_snapshot_triggers_daily_close_recovery_after_close(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        calls: list[tuple[str, object | None]] = []
+        runner._lock = threading.Lock()
+        runner._daily_close_actions_lock = threading.Lock()
+        runner._maybe_auto_post_operator_spreadsheet = (
+            lambda next_open: calls.append(("spreadsheet", next_open))
+        )
+        runner._maybe_send_daily_summary_notification = (
+            lambda next_open: calls.append(("notification", next_open))
+        )
+        runner._snapshot_locked = lambda: "snapshot"
+
+        class ImmediateThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self) -> None:
+                self.target()
+
+        with (
+            patch("server.datetime", FrozenServerDateTime),
+            patch("server.threading.Thread", ImmediateThread),
+        ):
+            FrozenServerDateTime.current = datetime(
+                2026,
+                6,
+                12,
+                15,
+                59,
+                tzinfo=NY_TZ,
+            )
+            self.assertEqual(runner.snapshot(), "snapshot")
+            self.assertEqual(calls, [])
+
+            FrozenServerDateTime.current = datetime(
+                2026,
+                6,
+                12,
+                16,
+                1,
+                tzinfo=NY_TZ,
+            )
+            self.assertEqual(runner.snapshot(), "snapshot")
+
+        self.assertEqual(
+            calls,
+            [
+                ("spreadsheet", None),
+                ("notification", None),
+            ],
+        )
+
     def test_notification_event_dedupes_and_records_activity(self) -> None:
         runner = BotRunner.__new__(BotRunner)
         runner._lock = threading.Lock()
@@ -3708,6 +3771,39 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(payload["html_body"], "<p>Trade entered.</p>")
         self.assertEqual(payload["shared_secret"], "notify-secret")
 
+    def test_notification_email_wraps_read_timeout_as_bot_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "NOTIFICATIONS_ENABLED=true",
+                        "NOTIFICATION_EMAIL=operator@example.com",
+                        "NOTIFICATION_PROVIDER=apps_script",
+                        "NOTIFICATION_APPS_SCRIPT_URL=https://script.google.com/macros/s/example/exec",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("server.ENV_PATH", env_path),
+                patch(
+                    "server.urllib.request.urlopen",
+                    side_effect=OSError("The read operation timed out"),
+                ),
+            ):
+                with self.assertRaises(BotError) as raised:
+                    send_notification_email(
+                        subject="Edgewalker daily summary",
+                        text="summary",
+                    )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Notification send failed: The read operation timed out",
+        )
+
     def test_daily_summary_email_content_uses_narrative_sections(self) -> None:
         row = {
             "realized_pl_dollars": "-1.21",
@@ -3818,6 +3914,74 @@ class ServerLoggingTest(unittest.TestCase):
             runner._notification_state["sent_event_ids"],
             ["warmup-started:2026-06-11", "warmup-ended:2026-06-11"],
         )
+
+    def test_manual_run_cycle_does_not_send_warmup_notification(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._cycle_count = 0
+        runner._last_output = []
+        runner._last_error = None
+        runner._activity_log = []
+        runner._edgewalker_status = None
+        runner._broker_state = broker_constraint_payload(broker_constraint_ok())
+        runner._market_data = type(
+            "MarketDataStub",
+            (),
+            {"ensure_running": lambda self, _config: None},
+        )()
+        runner._preset_authority_effective_config = (
+            lambda _config, _timestamp: (_config, [], None)
+        )
+        runner._regime_transition_locked = lambda _status: None
+        runner._append_activity_locked = lambda _lines: None
+        runner._append_cycle_log_locked = lambda **_kwargs: None
+
+        with (
+            patch("server.AlpacaClient"),
+            patch("server.EdgeWalkerBot") as edgewalker_bot,
+            patch("server.asdict", return_value={"regime": "WARMUP"}),
+            patch.object(runner, "_maybe_send_warmup_notification") as warmup_notify,
+            patch.object(runner, "_maybe_send_lifecycle_notifications"),
+            patch.object(runner, "_maybe_send_error_notification"),
+        ):
+            edgewalker_bot.return_value.run_once.return_value = object()
+            runner._run_cycle(config(), send_warmup_notifications=False)
+
+        warmup_notify.assert_not_called()
+
+    def test_scheduled_run_cycle_can_send_warmup_notification(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._cycle_count = 0
+        runner._last_output = []
+        runner._last_error = None
+        runner._activity_log = []
+        runner._edgewalker_status = None
+        runner._broker_state = broker_constraint_payload(broker_constraint_ok())
+        runner._market_data = type(
+            "MarketDataStub",
+            (),
+            {"ensure_running": lambda self, _config: None},
+        )()
+        runner._preset_authority_effective_config = (
+            lambda _config, _timestamp: (_config, [], None)
+        )
+        runner._regime_transition_locked = lambda _status: None
+        runner._append_activity_locked = lambda _lines: None
+        runner._append_cycle_log_locked = lambda **_kwargs: None
+
+        with (
+            patch("server.AlpacaClient"),
+            patch("server.EdgeWalkerBot") as edgewalker_bot,
+            patch("server.asdict", return_value={"regime": "WARMUP"}),
+            patch.object(runner, "_maybe_send_warmup_notification") as warmup_notify,
+            patch.object(runner, "_maybe_send_lifecycle_notifications"),
+            patch.object(runner, "_maybe_send_error_notification"),
+        ):
+            edgewalker_bot.return_value.run_once.return_value = object()
+            runner._run_cycle(config())
+
+        warmup_notify.assert_called_once()
 
     def test_notification_error_uses_cooldown_on_failure(self) -> None:
         runner = BotRunner.__new__(BotRunner)
@@ -4125,6 +4289,450 @@ class ServerLoggingTest(unittest.TestCase):
         )
         self.assertEqual(parsed.directional_min_strength, "WEAK")
         self.assertEqual(parsed.directional_cooldown_minutes, 2)
+
+    def test_operator_bank_state_expires_next_session(self) -> None:
+        now = datetime(2026, 7, 7, 14, 0, 0, tzinfo=timezone.utc)
+        state = {
+            "operator_banked": True,
+            "active": True,
+            "session_date": _operator_session_date(now),
+            "banked_at": now.isoformat(),
+            "day_pl": "12.34",
+            "day_pl_percent": "2.10",
+        }
+
+        self.assertTrue(_operator_bank_state_active(state, now))
+        status = _operator_bank_status_from_state(state, now)
+        self.assertTrue(status["active"])
+        self.assertEqual(status["operator_banked"], True)
+        self.assertEqual(status["day_pl"], "12.34")
+        self.assertIn("halted", status["message"])
+
+        self.assertFalse(
+            _operator_bank_state_active(state, now + timedelta(days=1))
+        )
+        next_status = _operator_bank_status_from_state(
+            state,
+            now + timedelta(days=1),
+        )
+        self.assertFalse(next_status["active"])
+
+    def test_operator_bank_status_reconciles_realized_fill(self) -> None:
+        now = datetime(2026, 7, 7, 14, 0, 0, tzinfo=timezone.utc)
+        status = _operator_bank_status_from_state(
+            {
+                "operator_banked": True,
+                "active": True,
+                "session_date": _operator_session_date(now),
+                "banked_at": now.isoformat(),
+                "press_day_pl": "12.34",
+                "press_day_pl_percent": "2.10",
+                "position_symbol": SOXS,
+                "flatten_status": "pending",
+            },
+            now,
+        )
+        performance = {
+            "session_realized_pl": "7.25",
+            "realized_trades": [
+                {
+                    "symbol": SOXS,
+                    "qty": "2.5",
+                    "exit_price": "4.18",
+                    "realized_pl": "0.45",
+                    "realized_pl_percent": "4.5",
+                    "exit_reason": OPERATOR_BANK_DAY_EXIT_REASON,
+                    "closed_at": (
+                        now + timedelta(seconds=5)
+                    ).isoformat(),
+                }
+            ],
+        }
+
+        reconciled = _operator_bank_status_with_performance(status, performance)
+
+        self.assertEqual(reconciled["flatten_status"], "filled")
+        self.assertEqual(reconciled["banked_trade_pl"], "0.45")
+        self.assertEqual(reconciled["banked_trade_pl_percent"], "4.5")
+        self.assertEqual(reconciled["session_realized_pl"], "7.25")
+        self.assertEqual(reconciled["press_day_pl"], "12.34")
+        self.assertIn("filled", reconciled["message"])
+
+    def test_edgewalker_operator_bank_halts_new_entries(self) -> None:
+        bot = EdgeWalkerBot.__new__(EdgeWalkerBot)
+        bot.entry_halt = {"active": True, "reason": "operator_banked"}
+
+        self.assertEqual(bot._entry_halt_reason(), "operator_banked")
+        gate = bot._position_clear_gate(
+            None,
+            action_taken="operator_banked",
+            entry_block_reason="operator_banked",
+        )
+
+        self.assertEqual(gate["id"], "position")
+        self.assertEqual(gate["status"], "veto")
+        self.assertIn("operator banked", gate["detail"].lower())
+
+    def test_runner_bank_day_records_operator_event_and_sell_reason(self) -> None:
+        records: list[dict[str, object]] = []
+        submitted_orders: list[tuple[str, Decimal]] = []
+
+        class FakeLifecycleLedger:
+            def record(self, event_type: str, **fields: object) -> None:
+                records.append({"event_type": event_type, **fields})
+
+            def read_all(self) -> list[dict[str, object]]:
+                return list(records)
+
+        class FakeStateStore:
+            def __init__(self) -> None:
+                self._orders: dict[str, dict[str, object]] = {}
+
+            def get_pending_orders(self) -> dict[str, dict[str, object]]:
+                return dict(self._orders)
+
+            def track_order(self, order_id: str, metadata: dict[str, object]) -> None:
+                self._orders[order_id] = metadata
+
+            def get_pending_order(self, order_id: str) -> dict[str, object] | None:
+                return self._orders.get(order_id)
+
+            def clear_order(self, order_id: str) -> None:
+                self._orders.pop(order_id, None)
+
+            def clear_symbol(self, symbol: str) -> None:
+                self.cleared_symbol = symbol
+
+            def get_position_owner(self, symbol: str) -> str:
+                return INVERSE_BOT
+
+            def get_high_water_mark(self, symbol: str) -> Decimal:
+                return Decimal("4.25")
+
+            def get_inverse_cascade_state(self) -> dict[str, object]:
+                return {"proven_at": "2026-07-07T14:05:00+00:00"}
+
+        class FakeAlpacaClient:
+            def __init__(self, _config: BotConfig) -> None:
+                self.order = {
+                    "id": "bank-sell-1",
+                    "symbol": SOXS,
+                    "side": "sell",
+                    "status": "filled",
+                    "qty": "2.5",
+                    "filled_qty": "2.5",
+                    "filled_avg_price": "4.18",
+                    "bot": INVERSE_BOT,
+                    "reason": OPERATOR_BANK_DAY_EXIT_REASON,
+                }
+
+            def get_clock(self) -> dict[str, object]:
+                return {"is_open": True}
+
+            def get_account(self) -> dict[str, object]:
+                return {
+                    "portfolio_value": "552.12",
+                    "equity": "552.12",
+                    "buying_power": "30.00",
+                }
+
+            def list_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def get_position(self, symbol: str) -> dict[str, object] | None:
+                if symbol != SOXS:
+                    return None
+                return {
+                    "symbol": SOXS,
+                    "qty": "2.5",
+                    "avg_entry_price": "4.00",
+                    "current_price": "4.20",
+                    "unrealized_pl": "0.50",
+                    "unrealized_plpc": "0.05",
+                }
+
+            def submit_market_sell_qty(
+                self,
+                symbol: str,
+                qty: Decimal,
+            ) -> dict[str, object]:
+                submitted_orders.append((symbol, qty))
+                return dict(self.order)
+
+            def get_order(self, _order_id: str) -> dict[str, object]:
+                return dict(self.order)
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._running = True
+        runner._config = replace(config(), dry_run=False)
+        runner._operator_bank_state = {}
+        runner._edgewalker_status = {
+            "day_pl": "14.25",
+            "day_pl_percent": "2.58",
+            "regime": "DOWNTREND",
+            "active_bot": INVERSE_BOT,
+            "routed_symbol": SOXS,
+            "trend_trust": {"score": 71},
+        }
+        runner._activity_log = []
+        runner._last_error = None
+        runner._save_activity_log = lambda: None
+        runner._maybe_send_lifecycle_notifications = lambda _timestamp: None
+        runner.snapshot = lambda: {"ok": True}
+
+        with patch("server.AlpacaClient", FakeAlpacaClient), patch(
+            "server.BotStateStore",
+            FakeStateStore,
+        ), patch("server.LifecycleLedger", FakeLifecycleLedger), patch(
+            "server._save_operator_bank_state",
+            lambda _state: None,
+        ):
+            result = runner.bank_day()
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(submitted_orders, [(SOXS, Decimal("2.5"))])
+        self.assertTrue(runner._operator_bank_state["operator_banked"])
+        self.assertEqual(
+            runner._operator_bank_state["reason"],
+            OPERATOR_BANK_DAY_EXIT_REASON,
+        )
+        event_types = [record["event_type"] for record in records]
+        self.assertIn(LIFECYCLE_OPERATOR_BANK_DAY, event_types)
+        self.assertIn(LIFECYCLE_INTENDED_EXIT, event_types)
+        self.assertIn(LIFECYCLE_FULL_FILL, event_types)
+        sell_events = [
+            record
+            for record in records
+            if record["event_type"] in {LIFECYCLE_INTENDED_EXIT, LIFECYCLE_FULL_FILL}
+        ]
+        self.assertTrue(
+            all(
+                record.get("reason") == OPERATOR_BANK_DAY_EXIT_REASON
+                for record in sell_events
+            )
+        )
+        bank_event = next(
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_OPERATOR_BANK_DAY
+        )
+        self.assertEqual(bank_event["position_symbol"], SOXS)
+        self.assertEqual(bank_event["position_owner"], INVERSE_BOT)
+        self.assertEqual(bank_event["mark_at_press"], "4.2")
+        self.assertEqual(bank_event["day_pl"], "14.25")
+        self.assertEqual(runner._operator_bank_state["flatten_status"], "filled")
+        self.assertEqual(runner._operator_bank_state["exit_price"], "4.18")
+        self.assertEqual(runner._operator_bank_state["filled_qty"], "2.5")
+
+    def test_operator_bank_cancels_pending_entry_before_exit(self) -> None:
+        canceled_order_ids: list[str] = []
+
+        class FakeClient:
+            def cancel_order(self, order_id: str) -> None:
+                canceled_order_ids.append(order_id)
+
+        class FakeStateStore:
+            def get_pending_orders(self) -> dict[str, dict[str, object]]:
+                return {}
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+        outcome = runner._enforce_operator_bank(
+            replace(config(), dry_run=False),
+            FakeClient(),
+            {
+                SOXL: None,
+                SOXS: {
+                    "symbol": SOXS,
+                    "qty": "2.5",
+                    "avg_entry_price": "4.00",
+                },
+            },
+            [
+                {
+                    "id": "pending-buy-1",
+                    "symbol": SOXS,
+                    "side": "buy",
+                    "status": "new",
+                }
+            ],
+            FakeStateStore(),
+            {},
+        )
+
+        self.assertEqual(canceled_order_ids, ["pending-buy-1"])
+        self.assertEqual(outcome["flatten_status"], "canceling_entry_orders")
+
+    def test_operator_bank_preserves_risk_state_until_exit_fills(self) -> None:
+        class FakeClient:
+            def submit_market_sell_qty(
+                self,
+                symbol: str,
+                qty: Decimal,
+            ) -> dict[str, object]:
+                return {
+                    "id": "pending-sell-1",
+                    "symbol": symbol,
+                    "side": "sell",
+                    "status": "pending_new",
+                    "qty": str(qty),
+                    "filled_qty": "0",
+                }
+
+        class FakeStateStore:
+            def __init__(self) -> None:
+                self._orders: dict[str, dict[str, object]] = {}
+                self.cleared_symbols: list[str] = []
+
+            def get_pending_orders(self) -> dict[str, dict[str, object]]:
+                return dict(self._orders)
+
+            def track_order(self, order_id: str, metadata: dict[str, object]) -> None:
+                self._orders[order_id] = metadata
+
+            def get_pending_order(self, order_id: str) -> dict[str, object] | None:
+                return self._orders.get(order_id)
+
+            def clear_order(self, order_id: str) -> None:
+                self._orders.pop(order_id, None)
+
+            def clear_symbol(self, symbol: str) -> None:
+                self.cleared_symbols.append(symbol)
+
+            def get_position_owner(self, symbol: str) -> str:
+                return INVERSE_BOT
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+        state_store = FakeStateStore()
+        with patch("server.LifecycleLedger") as ledger_class:
+            ledger_class.return_value.record = lambda *_args, **_kwargs: None
+            outcome = runner._enforce_operator_bank(
+                replace(config(), dry_run=False),
+                FakeClient(),
+                {
+                    SOXL: None,
+                    SOXS: {
+                        "symbol": SOXS,
+                        "qty": "2.5",
+                        "avg_entry_price": "4.00",
+                    },
+                },
+                [],
+                state_store,
+                {"position": {"owner": INVERSE_BOT}},
+            )
+
+        self.assertEqual(outcome["flatten_status"], "pending")
+        self.assertEqual(outcome["exit_order_id"], "pending-sell-1")
+        self.assertEqual(state_store.cleared_symbols, [])
+        self.assertIn("pending-sell-1", state_store.get_pending_orders())
+
+    def test_operator_bank_continues_enforcement_until_flat(self) -> None:
+        now = datetime.now(timezone.utc)
+
+        class FakeClient:
+            def get_position(self, symbol: str) -> dict[str, object] | None:
+                if symbol != SOXS:
+                    return None
+                return {
+                    "symbol": SOXS,
+                    "qty": "2.5",
+                    "avg_entry_price": "4.00",
+                }
+
+            def list_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def submit_market_sell_qty(
+                self,
+                symbol: str,
+                qty: Decimal,
+            ) -> dict[str, object]:
+                return {
+                    "id": "retry-sell-1",
+                    "symbol": symbol,
+                    "side": "sell",
+                    "status": "filled",
+                    "qty": str(qty),
+                    "filled_qty": str(qty),
+                    "filled_avg_price": "4.18",
+                }
+
+        class FakeStateStore:
+            def get_pending_orders(self) -> dict[str, dict[str, object]]:
+                return {}
+
+            def get_position_owner(self, symbol: str) -> str:
+                return INVERSE_BOT
+
+            def track_order(self, order_id: str, metadata: dict[str, object]) -> None:
+                self.order_id = order_id
+
+            def get_pending_order(self, order_id: str) -> dict[str, object] | None:
+                return None
+
+            def clear_order(self, order_id: str) -> None:
+                return None
+
+            def clear_symbol(self, symbol: str) -> None:
+                return None
+
+            def clear_inverse_cascade_state(self) -> None:
+                return None
+
+            def clear_momentum_state(self) -> None:
+                return None
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._operator_bank_enforcement_lock = threading.Lock()
+        runner._operator_bank_state = {
+            "operator_banked": True,
+            "active": True,
+            "session_date": _operator_session_date(now),
+            "banked_at": now.isoformat(),
+            "flatten_status": "pending",
+            "lifecycle_context": {
+                "banked_at": now.isoformat(),
+                "position": {"owner": INVERSE_BOT},
+            },
+        }
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+        runner._save_operator_bank_state_locked = lambda: None
+
+        with patch("server.BotStateStore", FakeStateStore), patch(
+            "server.LifecycleLedger"
+        ) as ledger_class:
+            ledger_class.return_value.record = lambda *_args, **_kwargs: None
+            runner._continue_operator_bank_enforcement(
+                replace(config(), dry_run=False),
+                FakeClient(),
+            )
+
+        self.assertEqual(runner._operator_bank_state["flatten_status"], "filled")
+        self.assertEqual(
+            runner._operator_bank_state["exit_order_id"],
+            "retry-sell-1",
+        )
+        self.assertEqual(runner._operator_bank_state["exit_price"], "4.18")
+
+    def test_operator_entry_halt_payload_is_none_when_not_banked(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._operator_bank_state = {}
+
+        payload = runner._operator_entry_halt_payload(
+            datetime(2026, 7, 7, 14, 0, 0, tzinfo=timezone.utc)
+        )
+
+        self.assertIsNone(payload)
 
 
 if __name__ == "__main__":

@@ -891,7 +891,13 @@ h2 {
 .status-action-buttons {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
+}
+
+.bank-day-status {
+  color: var(--amber);
 }
 
 .status-sizing-controls {
@@ -1522,6 +1528,18 @@ button:disabled {
 
 .primary.is-stop {
   background: var(--danger);
+}
+
+.bank-day-button {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--line));
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.bank-day-button:hover:not(:disabled) {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber-soft) 72%, var(--amber));
+  color: var(--ink);
 }
 
 .secondary {
