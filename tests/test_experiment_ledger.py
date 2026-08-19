@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from experiment_ledger import (
+    COHORT_ID,
     COHORT_STATUS_COMPLETE,
     COHORT_STATUS_ACTIVE,
     GitProvenance,
@@ -237,7 +238,7 @@ class GrowthCohortLedgerTest(unittest.TestCase):
                     ) VALUES (?, ?, ?, ?, 1, ?, ?)
                     """,
                     (
-                        "edgewalker-growth-cohort-1",
+                        COHORT_ID,
                         session_date,
                         "2026-10-01T14:00:00Z",
                         "2026-10-01T20:00:00Z",
@@ -250,7 +251,7 @@ class GrowthCohortLedgerTest(unittest.TestCase):
                 UPDATE cohort_sessions SET completed = 0
                 WHERE cohort_id = ? AND session_date = ?
                 """,
-                ("edgewalker-growth-cohort-1", "2026-10-60"),
+                (COHORT_ID, "2026-10-60"),
             )
 
         self.assertTrue(

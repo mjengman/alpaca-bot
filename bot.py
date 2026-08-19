@@ -107,6 +107,19 @@ INVERSE_CASCADE_DEFAULTS = {
 INVERSE_CASCADE_VELOCITY_WINDOW_MINUTES = 10
 INVERSE_CASCADE_SUSTAIN_MINUTES = 5
 INVERSE_CASCADE_TRAIL_PERCENT = Decimal("3.50")
+OPENING_IMPULSE_WINDOW_MINUTES = 20
+OPENING_IMPULSE_MIN_BARS = 6
+OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT = Decimal("-2.00")
+OPENING_IMPULSE_SOURCE_DRAWDOWN_MAX_PERCENT = Decimal("-2.50")
+OPENING_IMPULSE_INVERSE_CURRENT_MIN_PERCENT = Decimal("1.50")
+OPENING_IMPULSE_LATE_CONFIRMATION_START_MINUTES = 15
+OPENING_IMPULSE_LATE_INVERSE_CURRENT_MIN_PERCENT = Decimal("3.00")
+OPENING_IMPULSE_SOURCE_VELOCITY_MAX_PERCENT = Decimal("-1.00")
+OPENING_IMPULSE_SOURCE_VELOCITY_MIN_PERCENT = Decimal("-3.50")
+OPENING_IMPULSE_SOURCE_RECOVERY_MAX_PERCENT = Decimal("1.25")
+OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT = Decimal("-9.00")
+OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN = 2
+OPENING_IMPULSE_ENTRY_REASON = "inverse_cascade_opening_impulse_confirmed"
 INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES = 5
 INVERSE_CASCADE_PROVEN_MFE_PERCENT = Decimal("0.50")
 INVERSE_CASCADE_PROVEN_TRAIL_PERCENT = Decimal("6.00")
@@ -407,6 +420,39 @@ class BotConfig:
     )
     inverse_cascade_sustain_minutes: int = INVERSE_CASCADE_SUSTAIN_MINUTES
     inverse_cascade_trail_percent: Decimal = INVERSE_CASCADE_TRAIL_PERCENT
+    opening_impulse_enabled: bool = False
+    opening_impulse_window_minutes: int = OPENING_IMPULSE_WINDOW_MINUTES
+    opening_impulse_min_bars: int = OPENING_IMPULSE_MIN_BARS
+    opening_impulse_source_current_max_percent: Decimal = (
+        OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT
+    )
+    opening_impulse_source_drawdown_max_percent: Decimal = (
+        OPENING_IMPULSE_SOURCE_DRAWDOWN_MAX_PERCENT
+    )
+    opening_impulse_inverse_current_min_percent: Decimal = (
+        OPENING_IMPULSE_INVERSE_CURRENT_MIN_PERCENT
+    )
+    opening_impulse_late_confirmation_start_minutes: int = (
+        OPENING_IMPULSE_LATE_CONFIRMATION_START_MINUTES
+    )
+    opening_impulse_late_inverse_current_min_percent: Decimal = (
+        OPENING_IMPULSE_LATE_INVERSE_CURRENT_MIN_PERCENT
+    )
+    opening_impulse_source_velocity_max_percent: Decimal = (
+        OPENING_IMPULSE_SOURCE_VELOCITY_MAX_PERCENT
+    )
+    opening_impulse_source_velocity_min_percent: Decimal = (
+        OPENING_IMPULSE_SOURCE_VELOCITY_MIN_PERCENT
+    )
+    opening_impulse_source_recovery_max_percent: Decimal = (
+        OPENING_IMPULSE_SOURCE_RECOVERY_MAX_PERCENT
+    )
+    opening_impulse_source_extension_min_percent: Decimal = (
+        OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT
+    )
+    opening_impulse_source_new_low_count_min: int = (
+        OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN
+    )
     inverse_cascade_route_invalidation_grace_minutes: int = (
         INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES
     )
@@ -668,6 +714,123 @@ class BotConfig:
         )
         if inverse_cascade_sustain_minutes < 1:
             raise BotError("INVERSE_CASCADE_SUSTAIN_MINUTES must be at least 1")
+        opening_impulse_window_minutes = env_int(
+            "OPENING_IMPULSE_WINDOW_MINUTES",
+            OPENING_IMPULSE_WINDOW_MINUTES,
+        )
+        if opening_impulse_window_minutes < 1:
+            raise BotError("OPENING_IMPULSE_WINDOW_MINUTES must be at least 1")
+        opening_impulse_min_bars = env_int(
+            "OPENING_IMPULSE_MIN_BARS",
+            OPENING_IMPULSE_MIN_BARS,
+        )
+        if opening_impulse_min_bars < 2:
+            raise BotError("OPENING_IMPULSE_MIN_BARS must be at least 2")
+        if opening_impulse_min_bars > opening_impulse_window_minutes:
+            raise BotError(
+                "OPENING_IMPULSE_MIN_BARS must not exceed OPENING_IMPULSE_WINDOW_MINUTES"
+            )
+        opening_impulse_late_confirmation_start_minutes = env_int(
+            "OPENING_IMPULSE_LATE_CONFIRMATION_START_MINUTES",
+            OPENING_IMPULSE_LATE_CONFIRMATION_START_MINUTES,
+        )
+        if not (
+            opening_impulse_min_bars
+            <= opening_impulse_late_confirmation_start_minutes
+            < opening_impulse_window_minutes
+        ):
+            raise BotError(
+                "OPENING_IMPULSE_LATE_CONFIRMATION_START_MINUTES must be at least "
+                "OPENING_IMPULSE_MIN_BARS and below OPENING_IMPULSE_WINDOW_MINUTES"
+            )
+        opening_impulse_source_new_low_count_min = env_int(
+            "OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN",
+            OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN,
+        )
+        if opening_impulse_source_new_low_count_min < 1:
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN must be at least 1"
+            )
+        if opening_impulse_source_new_low_count_min > opening_impulse_min_bars:
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN must not exceed OPENING_IMPULSE_MIN_BARS"
+            )
+        opening_impulse_source_current_max_percent = env_decimal(
+            "OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT",
+            str(OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT),
+        )
+        opening_impulse_source_drawdown_max_percent = env_decimal(
+            "OPENING_IMPULSE_SOURCE_DRAWDOWN_MAX_PERCENT",
+            str(OPENING_IMPULSE_SOURCE_DRAWDOWN_MAX_PERCENT),
+        )
+        opening_impulse_inverse_current_min_percent = env_decimal(
+            "OPENING_IMPULSE_INVERSE_CURRENT_MIN_PERCENT",
+            str(OPENING_IMPULSE_INVERSE_CURRENT_MIN_PERCENT),
+        )
+        opening_impulse_late_inverse_current_min_percent = env_decimal(
+            "OPENING_IMPULSE_LATE_INVERSE_CURRENT_MIN_PERCENT",
+            str(OPENING_IMPULSE_LATE_INVERSE_CURRENT_MIN_PERCENT),
+        )
+        opening_impulse_source_velocity_max_percent = env_decimal(
+            "OPENING_IMPULSE_SOURCE_VELOCITY_MAX_PERCENT",
+            str(OPENING_IMPULSE_SOURCE_VELOCITY_MAX_PERCENT),
+        )
+        opening_impulse_source_velocity_min_percent = env_decimal(
+            "OPENING_IMPULSE_SOURCE_VELOCITY_MIN_PERCENT",
+            str(OPENING_IMPULSE_SOURCE_VELOCITY_MIN_PERCENT),
+        )
+        opening_impulse_source_recovery_max_percent = env_decimal(
+            "OPENING_IMPULSE_SOURCE_RECOVERY_MAX_PERCENT",
+            str(OPENING_IMPULSE_SOURCE_RECOVERY_MAX_PERCENT),
+        )
+        opening_impulse_source_extension_min_percent = env_decimal(
+            "OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT",
+            str(OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT),
+        )
+        if opening_impulse_source_current_max_percent >= 0:
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT must be below 0"
+            )
+        if opening_impulse_source_drawdown_max_percent >= 0:
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_DRAWDOWN_MAX_PERCENT must be below 0"
+            )
+        if opening_impulse_inverse_current_min_percent <= 0:
+            raise BotError(
+                "OPENING_IMPULSE_INVERSE_CURRENT_MIN_PERCENT must be greater than 0"
+            )
+        if (
+            opening_impulse_late_inverse_current_min_percent
+            < opening_impulse_inverse_current_min_percent
+        ):
+            raise BotError(
+                "OPENING_IMPULSE_LATE_INVERSE_CURRENT_MIN_PERCENT must be at least "
+                "OPENING_IMPULSE_INVERSE_CURRENT_MIN_PERCENT"
+            )
+        if opening_impulse_source_velocity_max_percent >= 0:
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_VELOCITY_MAX_PERCENT must be below 0"
+            )
+        if (
+            opening_impulse_source_velocity_min_percent
+            >= opening_impulse_source_velocity_max_percent
+        ):
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_VELOCITY_MIN_PERCENT must be below "
+                "OPENING_IMPULSE_SOURCE_VELOCITY_MAX_PERCENT"
+            )
+        if opening_impulse_source_recovery_max_percent < 0:
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_RECOVERY_MAX_PERCENT must be at least 0"
+            )
+        if (
+            opening_impulse_source_extension_min_percent
+            >= opening_impulse_source_current_max_percent
+        ):
+            raise BotError(
+                "OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT must be below "
+                "OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT"
+            )
         inverse_cascade_trail_percent = env_decimal(
             "INVERSE_CASCADE_TRAIL_PERCENT",
             str(INVERSE_CASCADE_TRAIL_PERCENT),
@@ -899,6 +1062,39 @@ class BotConfig:
             ),
             inverse_cascade_sustain_minutes=inverse_cascade_sustain_minutes,
             inverse_cascade_trail_percent=inverse_cascade_trail_percent,
+            opening_impulse_enabled=env_bool("OPENING_IMPULSE_ENABLED", False),
+            opening_impulse_window_minutes=opening_impulse_window_minutes,
+            opening_impulse_min_bars=opening_impulse_min_bars,
+            opening_impulse_source_current_max_percent=(
+                opening_impulse_source_current_max_percent
+            ),
+            opening_impulse_source_drawdown_max_percent=(
+                opening_impulse_source_drawdown_max_percent
+            ),
+            opening_impulse_inverse_current_min_percent=(
+                opening_impulse_inverse_current_min_percent
+            ),
+            opening_impulse_late_confirmation_start_minutes=(
+                opening_impulse_late_confirmation_start_minutes
+            ),
+            opening_impulse_late_inverse_current_min_percent=(
+                opening_impulse_late_inverse_current_min_percent
+            ),
+            opening_impulse_source_velocity_max_percent=(
+                opening_impulse_source_velocity_max_percent
+            ),
+            opening_impulse_source_velocity_min_percent=(
+                opening_impulse_source_velocity_min_percent
+            ),
+            opening_impulse_source_recovery_max_percent=(
+                opening_impulse_source_recovery_max_percent
+            ),
+            opening_impulse_source_extension_min_percent=(
+                opening_impulse_source_extension_min_percent
+            ),
+            opening_impulse_source_new_low_count_min=(
+                opening_impulse_source_new_low_count_min
+            ),
             inverse_cascade_route_invalidation_grace_minutes=(
                 inverse_cascade_route_invalidation_grace_minutes
             ),
@@ -3293,24 +3489,44 @@ class EdgeWalkerBot:
 
         detector = RegimeDetector(self.config, self.client, self.market_data)
         signal, soxl_snapshot = detector.detect()
+        opening_impulse_active = False
         if signal is None or soxl_snapshot is None:
-            self.state_store.set_regime_state(WARMUP, Decimal("0"))
-            self._print_market_data_status(SOXL)
-            print(
-                "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
-                "entry_signal=False action_taken=collecting_data"
-            )
-            positions = {
-                symbol: self.client.get_position(symbol)
-                for symbol in self.basket_symbols
-            }
-            if closeout_due:
-                orders = self.client.list_open_orders()
-                action_taken = self._liquidate_all_before_close(
-                    positions,
-                    orders,
-                    seconds_to_close,
+            opening_signal = self._opening_impulse_warmup_signal(market_open)
+            if opening_signal is not None:
+                signal, soxl_snapshot = opening_signal
+                opening_impulse_active = True
+            else:
+                self.state_store.set_regime_state(WARMUP, Decimal("0"))
+                self._print_market_data_status(SOXL)
+                print(
+                    "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
+                    "entry_signal=False action_taken=collecting_data"
                 )
+                positions = {
+                    symbol: self.client.get_position(symbol)
+                    for symbol in self.basket_symbols
+                }
+                if closeout_due:
+                    orders = self.client.list_open_orders()
+                    action_taken = self._liquidate_all_before_close(
+                        positions,
+                        orders,
+                        seconds_to_close,
+                    )
+                    return self._build_status(
+                        checked_at,
+                        market_open,
+                        next_open,
+                        next_close,
+                        account,
+                        None,
+                        None,
+                        positions,
+                        False,
+                        action_taken,
+                        regime_override=WARMUP,
+                    )
+
                 return self._build_status(
                     checked_at,
                     market_open,
@@ -3321,23 +3537,9 @@ class EdgeWalkerBot:
                     None,
                     positions,
                     False,
-                    action_taken,
+                    "collecting_data",
                     regime_override=WARMUP,
                 )
-
-            return self._build_status(
-                checked_at,
-                market_open,
-                next_open,
-                next_close,
-                account,
-                None,
-                None,
-                positions,
-                False,
-                "collecting_data",
-                regime_override=WARMUP,
-            )
 
         previous_regime_state = self.state_store.get_regime_state()
         signal = self._apply_regime_hysteresis(signal, previous_regime_state)
@@ -3349,9 +3551,12 @@ class EdgeWalkerBot:
             current_regime_state,
         )
         route = RegimeRouter().route(signal.regime)
-        self._v9_update_momentum_context(self._v9_authority_evaluation_route(route))
-        route = self._momentum_surge_route_override(route)
-        route = self._inverse_cascade_route_override(route)
+        if opening_impulse_active:
+            route = BotRoute(INVERSE_BOT, SOXS, True)
+        else:
+            self._v9_update_momentum_context(self._v9_authority_evaluation_route(route))
+            route = self._momentum_surge_route_override(route)
+            route = self._inverse_cascade_route_override(route)
         route = self._apply_enabled_bot_mask(route)
         routed_symbol = route.routed_symbol or "NONE"
         strength = self._regime_strength(signal)
@@ -3415,8 +3620,14 @@ class EdgeWalkerBot:
             previous_regime_state,
         )
 
+        required_stream_bars = (
+            self.config.opening_impulse_min_bars
+            if opening_impulse_active
+            else self.config.slow_sma_minutes
+        )
         market_data_blocks_entries = freshness.is_stale or self._market_data_blocks_trading(
-            SOXL
+            SOXL,
+            required_bars=required_stream_bars,
         )
         if market_data_blocks_entries:
             active_symbol, active_position = self._active_position(positions)
@@ -3473,8 +3684,14 @@ class EdgeWalkerBot:
                 "wait_stale_market_data",
             )
 
-        if self._market_data_blocks_trading(SOXL):
-            status = self._market_data_status(SOXL)
+        if self._market_data_blocks_trading(
+            SOXL,
+            required_bars=required_stream_bars,
+        ):
+            status = self._market_data_status(
+                SOXL,
+                required_bars=required_stream_bars,
+            )
             print(
                 "[DATA] stream market data is not live; "
                 f"data_status={status.get('data_status')} "
@@ -5279,6 +5496,33 @@ class EdgeWalkerBot:
             "sustained_window_insufficient_bars": "the setup window does not have enough completed bars yet",
             "momentum_surge_after_entry_window": "the Momentum Surge entry window has closed",
             "inverse_cascade_after_entry_window": "the Inverse Cascade entry window has closed",
+            "opening_impulse_path_unavailable": "opening price paths are not available yet",
+            "opening_source_current_above_max": "SOXL has not fallen far enough from the open",
+            "opening_source_drawdown_above_max": "SOXL opening drawdown is not deep enough",
+            "opening_inverse_current_below_min": "SOXS has not confirmed enough opening strength",
+            "opening_late_inverse_current_below_min": (
+                "late-window SOXS strength has not reached the higher confirmation floor"
+            ),
+            "opening_source_velocity_unavailable": (
+                "opening downside velocity is not available yet"
+            ),
+            "opening_source_velocity_above_max": (
+                "SOXL is not falling fast enough for an opening impulse"
+            ),
+            "opening_source_velocity_below_min": (
+                "the opening selloff is moving too fast to chase safely"
+            ),
+            "opening_source_recovery_above_max": "SOXL has recovered too far from its opening low",
+            "opening_source_overextended": "the opening selloff is already too extended to chase",
+            "opening_source_new_low_pressure_below_min": (
+                "SOXL is not making enough fresh opening lows"
+            ),
+            "opening_source_entry_bar_not_down": (
+                "the latest SOXL bar did not confirm opening downside pressure"
+            ),
+            "opening_inverse_entry_bar_not_up": (
+                "the latest SOXS bar did not confirm opening strength"
+            ),
             "source_entry_bar_not_up": "the latest SOXL bar did not confirm upside momentum",
             "source_entry_bar_not_down": "the latest SOXL bar did not confirm downside pressure",
             "inverse_entry_bar_not_down": "SOXS did not confirm the expected pullback pattern for Momentum Surge",
@@ -5728,7 +5972,11 @@ class EdgeWalkerBot:
             REGIME_STRENGTH_ORDER[REGIME_STRENGTH_MODERATE],
         )
 
-    def _market_data_status(self, symbol: str) -> dict[str, Any]:
+    def _market_data_status(
+        self,
+        symbol: str,
+        required_bars: int | None = None,
+    ) -> dict[str, Any]:
         if self.market_data is None:
             status = "LIVE" if self._latest_freshness and not self._latest_freshness.is_stale else "REST"
             return {
@@ -5751,7 +5999,11 @@ class EdgeWalkerBot:
 
         return self.market_data.status(
             symbol,
-            required_bars=self.config.slow_sma_minutes,
+            required_bars=(
+                self.config.slow_sma_minutes
+                if required_bars is None
+                else required_bars
+            ),
         )
 
     def _repair_stale_market_bars(self) -> None:
@@ -5799,10 +6051,19 @@ class EdgeWalkerBot:
         if status.get("stream_error"):
             print(f"[DATA] ERROR stream_error={status.get('stream_error')}")
 
-    def _market_data_blocks_trading(self, symbol: str) -> bool:
+    def _market_data_blocks_trading(
+        self,
+        symbol: str,
+        required_bars: int | None = None,
+    ) -> bool:
         if self.market_data is None:
             return False
-        return self._market_data_status(symbol).get("data_status") != "LIVE"
+        return (
+            self._market_data_status(symbol, required_bars=required_bars).get(
+                "data_status"
+            )
+            != "LIVE"
+        )
 
     def _market_data_freshness(
         self,
@@ -6308,6 +6569,200 @@ class EdgeWalkerBot:
                     count += 1
                 running_high = high_price
         return count
+
+    def _opening_impulse_warmup_signal(
+        self,
+        market_open: bool,
+    ) -> tuple[RegimeSignal, SmaSnapshot] | None:
+        if (
+            not self.config.opening_impulse_enabled
+            or self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or INVERSE_BOT not in self.config.enabled_bots
+            or not market_open
+        ):
+            return None
+
+        state = self._inverse_cascade_same_session_state()
+        maintaining_entry = bool(
+            state.get("entered_at")
+            and state.get("entry_reason") == OPENING_IMPULSE_ENTRY_REASON
+            and not state.get("stopped_out_at")
+        )
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        session_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        elapsed_minutes = Decimal(
+            str((now_ny - session_open).total_seconds() / 60)
+        )
+        if not maintaining_entry and not (
+            Decimal("0") <= elapsed_minutes < self.config.opening_impulse_window_minutes
+        ):
+            return None
+
+        source_bars = self._symbol_session_bars(SOXL)
+        inverse_bars = self._symbol_session_bars(SOXS)
+        if (
+            len(source_bars) < self.config.opening_impulse_min_bars
+            or len(inverse_bars) < self.config.opening_impulse_min_bars
+        ):
+            return None
+
+        context = self._opening_impulse_context(
+            source_bars,
+            inverse_bars,
+            elapsed_minutes,
+        )
+        if maintaining_entry:
+            context["reasons"] = []
+            context["maintaining_opening_entry"] = True
+        self._inverse_cascade_context = context
+        reasons = context.get("reasons") or []
+        if reasons:
+            print(
+                "[OPENING] Impulse candidate blocked: "
+                f"reason={','.join(reasons)} "
+                f"bars={len(source_bars)} "
+                f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+                f"dd={self._decimal_text(context.get('source_drawdown_percent'))}% "
+                f"recovery={self._decimal_text(context.get('source_recovery_percent'))}% "
+                f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+                f"velocity={self._decimal_text(context.get('source_velocity_percent'))}% "
+                f"new_lows={context.get('sustain_source_new_low_count', '--')}"
+            )
+            return None
+
+        prices = [
+            price
+            for bar in source_bars
+            if (price := self._v7_bar_decimal(bar, "c", "o")) is not None
+        ]
+        latest_bar_time = parse_market_timestamp(source_bars[-1].get("t"))
+        if len(prices) < self.config.opening_impulse_min_bars or latest_bar_time is None:
+            return None
+        fast_values = prices[-min(self.config.fast_sma_minutes, len(prices)) :]
+        slow_values = prices
+        snapshot = SmaSnapshot(
+            symbol=SOXL,
+            price=prices[-1],
+            fast_sma=sma(fast_values),
+            slow_sma=sma(slow_values),
+            fast_now_values=fast_values,
+            fast_prev_values=[],
+            slow_now_values=slow_values,
+            slow_prev_values=[],
+            latest_bar_time=latest_bar_time,
+        )
+        signal = RegimeSignal(
+            source_symbol=SOXL,
+            price=snapshot.price,
+            fast_sma=snapshot.fast_sma,
+            slow_sma=snapshot.slow_sma,
+            gap_percent=snapshot.gap_percent,
+            regime=DOWNTREND,
+        )
+        phase = "maintaining" if maintaining_entry else "qualified"
+        print(
+            f"[OPENING] Impulse {phase}: route={INVERSE_BOT}/{SOXS} "
+            f"bars={len(source_bars)} "
+            f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+            f"dd={self._decimal_text(context.get('source_drawdown_percent'))}% "
+            f"recovery={self._decimal_text(context.get('source_recovery_percent'))}% "
+            f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+            f"velocity={self._decimal_text(context.get('source_velocity_percent'))}% "
+            f"new_lows={context.get('sustain_source_new_low_count', '--')}"
+        )
+        return signal, snapshot
+
+    def _opening_impulse_context(
+        self,
+        source_bars: list[dict[str, Any]],
+        inverse_bars: list[dict[str, Any]],
+        elapsed_minutes: Decimal,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+            "opening_impulse": True,
+            "entry_family": "opening_impulse",
+            "reasons": [],
+            "thresholds": INVERSE_CASCADE_DEFAULTS[INVERSE_CASCADE_MODE_SUSTAINED],
+            "sustained_window_minutes": len(source_bars),
+            "opening_elapsed_minutes": elapsed_minutes,
+        }
+        reasons: list[str] = context["reasons"]
+        source_path = self._symbol_session_price_path(SOXL)
+        inverse_path = self._symbol_session_price_path(SOXS)
+        if source_path is None or inverse_path is None:
+            reasons.append("opening_impulse_path_unavailable")
+            return context
+
+        source_recovery = source_path.current_percent - source_path.drawdown_percent
+        source_velocity = self._recent_session_return_percent(
+            SOXL,
+            self.config.inverse_cascade_velocity_window_minutes,
+        )
+        new_low_count = self._inverse_cascade_recent_new_low_count(
+            source_bars,
+            len(source_bars),
+        )
+        source_last_open = self._v7_bar_decimal(source_bars[-1], "o", "c")
+        source_last_close = self._v7_bar_decimal(source_bars[-1], "c", "o")
+        inverse_last_open = self._v7_bar_decimal(inverse_bars[-1], "o", "c")
+        inverse_last_close = self._v7_bar_decimal(inverse_bars[-1], "c", "o")
+        context.update(
+            {
+                "source_current_percent": source_path.current_percent,
+                "source_runup_percent": source_path.runup_percent,
+                "source_drawdown_percent": source_path.drawdown_percent,
+                "source_recovery_percent": source_recovery,
+                "source_velocity_percent": source_velocity,
+                "inverse_current_percent": inverse_path.current_percent,
+                "inverse_runup_percent": inverse_path.runup_percent,
+                "sustain_source_new_low_count": new_low_count,
+                "entry_bar_soxl_direction": (
+                    "DOWN"
+                    if source_last_open is not None
+                    and source_last_close is not None
+                    and source_last_close < source_last_open
+                    else "NOT_DOWN"
+                ),
+                "entry_bar_soxs_direction": (
+                    "UP"
+                    if inverse_last_open is not None
+                    and inverse_last_close is not None
+                    and inverse_last_close > inverse_last_open
+                    else "NOT_UP"
+                ),
+            }
+        )
+        if source_path.current_percent > self.config.opening_impulse_source_current_max_percent:
+            reasons.append("opening_source_current_above_max")
+        if source_path.drawdown_percent > self.config.opening_impulse_source_drawdown_max_percent:
+            reasons.append("opening_source_drawdown_above_max")
+        if inverse_path.current_percent < self.config.opening_impulse_inverse_current_min_percent:
+            reasons.append("opening_inverse_current_below_min")
+        if (
+            elapsed_minutes
+            >= self.config.opening_impulse_late_confirmation_start_minutes
+            and inverse_path.current_percent
+            < self.config.opening_impulse_late_inverse_current_min_percent
+        ):
+            reasons.append("opening_late_inverse_current_below_min")
+        if source_velocity is None:
+            reasons.append("opening_source_velocity_unavailable")
+        elif source_velocity > self.config.opening_impulse_source_velocity_max_percent:
+            reasons.append("opening_source_velocity_above_max")
+        elif source_velocity < self.config.opening_impulse_source_velocity_min_percent:
+            reasons.append("opening_source_velocity_below_min")
+        if source_recovery > self.config.opening_impulse_source_recovery_max_percent:
+            reasons.append("opening_source_recovery_above_max")
+        if source_path.current_percent < self.config.opening_impulse_source_extension_min_percent:
+            reasons.append("opening_source_overextended")
+        if new_low_count < self.config.opening_impulse_source_new_low_count_min:
+            reasons.append("opening_source_new_low_pressure_below_min")
+        if context["entry_bar_soxl_direction"] != "DOWN":
+            reasons.append("opening_source_entry_bar_not_down")
+        if context["entry_bar_soxs_direction"] != "UP":
+            reasons.append("opening_inverse_entry_bar_not_up")
+        return context
 
     def _inverse_cascade_route_override(self, route: BotRoute) -> BotRoute:
         self._inverse_cascade_context = None
@@ -8278,6 +8733,8 @@ class EdgeWalkerBot:
             f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
             f"velocity={self._decimal_text(context.get('source_velocity_percent'))}%"
         )
+        if context.get("opening_impulse"):
+            return EntryDecision(True, OPENING_IMPULSE_ENTRY_REASON)
         return EntryDecision(
             True,
             f"inverse_cascade_{str(context.get('mode')).lower()}_confirmed",
@@ -8383,11 +8840,20 @@ class EdgeWalkerBot:
             return context
 
         cascade_context = self._inverse_cascade_context or {}
+        opening_impulse = bool(cascade_context.get("opening_impulse"))
         context.update(
             {
-                "entry_family": "inverse_cascade",
-                "inverse_entry_family": "cascade",
+                "entry_family": (
+                    "opening_impulse" if opening_impulse else "inverse_cascade"
+                ),
+                "inverse_entry_family": (
+                    "opening_impulse" if opening_impulse else "cascade"
+                ),
                 "inverse_cascade_confirmed": True,
+                "opening_impulse_confirmed": opening_impulse,
+                "opening_elapsed_minutes": cascade_context.get(
+                    "opening_elapsed_minutes"
+                ),
                 "inverse_cascade_mode": cascade_context.get("mode"),
                 "base_route_bot": cascade_context.get("base_route_bot"),
                 "base_route_symbol": cascade_context.get("base_route_symbol"),
@@ -8460,7 +8926,10 @@ class EdgeWalkerBot:
             self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
             or route.active_bot != INVERSE_BOT
             or route.routed_symbol != SOXS
-            or not reason.startswith("inverse_cascade_sustained_")
+            or not (
+                reason.startswith("inverse_cascade_sustained_")
+                or reason == OPENING_IMPULSE_ENTRY_REASON
+            )
         ):
             return
         context = self._inverse_cascade_context or {}
@@ -8471,6 +8940,13 @@ class EdgeWalkerBot:
                 "entered_at": datetime.now(timezone.utc).isoformat(),
                 "lockout_active": True,
                 "entry_reason": reason,
+                "entry_family": (
+                    "opening_impulse"
+                    if reason == OPENING_IMPULSE_ENTRY_REASON
+                    else "inverse_cascade"
+                ),
+                "opening_impulse": reason == OPENING_IMPULSE_ENTRY_REASON,
+                "opening_elapsed_minutes": context.get("opening_elapsed_minutes"),
                 "source_current_percent": context.get("source_current_percent"),
                 "source_drawdown_percent": context.get("source_drawdown_percent"),
                 "source_velocity_percent": context.get("source_velocity_percent"),

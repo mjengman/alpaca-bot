@@ -23,11 +23,16 @@ from bot import (
     BotStateStore,
     CHOP_BOT,
     EdgeWalkerBot,
+    ENTRY_INITIATOR_BOT,
     INVERSE_BOT,
+    LIFECYCLE_INTENDED_EXIT,
+    LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_SHADOW_ENTRY_SUPPRESSED,
     LifecycleLedger,
     MONEY_STEP,
     MOMENTUM_BOT,
+    OrderLifecycleTracker,
+    RISK_PROFILE_AUTONOMOUS,
     SOXL,
     SOXS,
     V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
@@ -51,6 +56,7 @@ RESEARCH_FILL_MODELS = {
     RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
     RESEARCH_FILL_MODEL_STRESSED,
 }
+RESEARCH_AUTO_BANK_DAY_EXIT_REASON = "auto_bank_day_target"
 _PREVIOUS_SESSION_CLOSE_CACHE: dict[tuple[str, str, str], dict[str, Decimal]] = {}
 
 
@@ -559,6 +565,82 @@ class SimulatedBroker:
         for symbol, lot in self.positions.items():
             total += lot["qty"] * self._mark(symbol)
         return total.quantize(MONEY_STEP)
+
+
+def _research_auto_bank_day(
+    config: BotConfig,
+    client: SimulatedBroker,
+    state_store: BotStateStore,
+    lifecycle_ledger: LifecycleLedger,
+) -> bool:
+    if not config.auto_bank_day_enabled:
+        return False
+    account = client.get_account()
+    equity = Decimal(str(account.get("equity") or account.get("portfolio_value") or 0))
+    last_equity = Decimal(str(account.get("last_equity") or 0))
+    if last_equity <= 0:
+        return False
+    day_pl_percent = (equity - last_equity) / last_equity * Decimal("100")
+    if day_pl_percent < config.auto_bank_day_target_percent:
+        return False
+
+    tracker = OrderLifecycleTracker(
+        client,
+        state_store,
+        lifecycle_ledger,
+        "EdgeWalker",
+        False,
+    )
+    for symbol in (SOXL, SOXS):
+        position = client.get_position(symbol)
+        if not position:
+            continue
+        qty = Decimal(str(position.get("qty") or 0))
+        if qty <= 0:
+            continue
+        owner = state_store.get_position_owner(symbol)
+        lifecycle_context = {
+            "entry_initiator": ENTRY_INITIATOR_BOT,
+            "exit_initiator": ENTRY_INITIATOR_BOT,
+            "risk_profile": RISK_PROFILE_AUTONOMOUS,
+            "strategy_owner": owner,
+            "operator_affected": False,
+            "auto_bank_day": True,
+        }
+        lifecycle_ledger.record(
+            LIFECYCLE_INTENDED_EXIT,
+            runtime="EdgeWalker",
+            dry_run=False,
+            bot=owner,
+            symbol=symbol,
+            side="sell",
+            qty=qty,
+            reason=RESEARCH_AUTO_BANK_DAY_EXIT_REASON,
+            day_pl_percent=day_pl_percent,
+            lifecycle_context=lifecycle_context,
+        )
+        order = client.submit_market_sell_qty(symbol, qty)
+        lifecycle_ledger.record(
+            LIFECYCLE_ORDER_SUBMITTED,
+            runtime="EdgeWalker",
+            dry_run=False,
+            bot=owner,
+            symbol=symbol,
+            side="sell",
+            qty=qty,
+            reason=RESEARCH_AUTO_BANK_DAY_EXIT_REASON,
+            day_pl_percent=day_pl_percent,
+            lifecycle_context=lifecycle_context,
+            order=order,
+        )
+        tracker.track_submitted_order(
+            order,
+            owner,
+            RESEARCH_AUTO_BANK_DAY_EXIT_REASON,
+            lifecycle_context,
+        )
+        state_store.clear_symbol(symbol)
+    return True
 
 
 def _performance_from_lifecycle(
@@ -1107,6 +1189,7 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         lifecycle_ledger = LifecycleLedger(Path(tmpdir) / "research_lifecycle.jsonl")
         max_cycles = len(bars_by_symbol[SOXL])
         previous_regime: str | None = None
+        auto_bank_active = False
         for index in range(max_cycles):
             current_bar = bars_by_symbol[SOXL][index]
             current_time = parse_market_timestamp(current_bar.get("t"))
@@ -1115,6 +1198,16 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
             market_data.set_time(current_time)
             inverse_bar = market_data.current_bar(SOXS) or {}
             client.set_time(current_time)
+            auto_bank_triggered = False
+            if not auto_bank_active:
+                with _patched_bot_time(current_time):
+                    auto_bank_triggered = _research_auto_bank_day(
+                        config,
+                        client,
+                        state_store,
+                        lifecycle_ledger,
+                    )
+                auto_bank_active = auto_bank_triggered
             output = io.StringIO()
             edgewalker_status = None
             error = None
@@ -1126,10 +1219,21 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
                         state_store,
                         market_data,
                         lifecycle_ledger,
+                        entry_halt=(
+                            {
+                                "active": True,
+                                "reason": RESEARCH_AUTO_BANK_DAY_EXIT_REASON,
+                            }
+                            if auto_bank_active
+                            else None
+                        ),
                     ).run_once()
                 except BotError as exc:
                     error = str(exc)
             status_dict = asdict(edgewalker_status) if edgewalker_status else None
+            if status_dict is not None and auto_bank_triggered:
+                status_dict["action_taken"] = RESEARCH_AUTO_BANK_DAY_EXIT_REASON
+                status_dict["entry_signal"] = False
             regime_transition = None
             if status_dict:
                 regime = status_dict.get("regime")
@@ -1162,6 +1266,39 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
                         "trail_percent": str(config.trail_percent),
                         "fast_sma_minutes": config.fast_sma_minutes,
                         "slow_sma_minutes": config.slow_sma_minutes,
+                        "opening_impulse_enabled": config.opening_impulse_enabled,
+                        "opening_impulse_window_minutes": config.opening_impulse_window_minutes,
+                        "opening_impulse_min_bars": config.opening_impulse_min_bars,
+                        "opening_impulse_source_current_max_percent": str(
+                            config.opening_impulse_source_current_max_percent
+                        ),
+                        "opening_impulse_source_drawdown_max_percent": str(
+                            config.opening_impulse_source_drawdown_max_percent
+                        ),
+                        "opening_impulse_inverse_current_min_percent": str(
+                            config.opening_impulse_inverse_current_min_percent
+                        ),
+                        "opening_impulse_late_confirmation_start_minutes": (
+                            config.opening_impulse_late_confirmation_start_minutes
+                        ),
+                        "opening_impulse_late_inverse_current_min_percent": str(
+                            config.opening_impulse_late_inverse_current_min_percent
+                        ),
+                        "opening_impulse_source_velocity_max_percent": str(
+                            config.opening_impulse_source_velocity_max_percent
+                        ),
+                        "opening_impulse_source_velocity_min_percent": str(
+                            config.opening_impulse_source_velocity_min_percent
+                        ),
+                        "opening_impulse_source_recovery_max_percent": str(
+                            config.opening_impulse_source_recovery_max_percent
+                        ),
+                        "opening_impulse_source_extension_min_percent": str(
+                            config.opening_impulse_source_extension_min_percent
+                        ),
+                        "opening_impulse_source_new_low_count_min": (
+                            config.opening_impulse_source_new_low_count_min
+                        ),
                         "close_liquidate_minutes": config.close_liquidate_minutes,
                         "regime_gap_threshold": str(config.regime_gap_threshold),
                         "regime_exit_gap_threshold": str(config.regime_exit_gap_threshold),
@@ -1457,6 +1594,9 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "trail_percent": _rounded(config.trail_percent),
         "fast_sma_minutes": config.fast_sma_minutes,
         "slow_sma_minutes": config.slow_sma_minutes,
+        "opening_impulse_enabled": config.opening_impulse_enabled,
+        "opening_impulse_window_minutes": config.opening_impulse_window_minutes,
+        "opening_impulse_min_bars": config.opening_impulse_min_bars,
         "regime_gap_percent": _rounded(config.regime_gap_threshold),
         "regime_exit_gap_percent": _rounded(config.regime_exit_gap_threshold),
         "chop_discount_percent": _rounded(config.chop_entry_discount_percent),

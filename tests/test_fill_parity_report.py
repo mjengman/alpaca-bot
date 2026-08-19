@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
-from bot import BotConfig
+from bot import BotConfig, BotStateStore, INVERSE_BOT, LifecycleLedger
 from fill_parity_report import classify_slippage
 from research import (
     RESEARCH_FILL_MODEL_LIVE_AUDIT,
@@ -12,12 +15,16 @@ from research import (
     RESEARCH_FILL_MODELS,
     ResearchFillOverride,
     SimulatedBroker,
+    _research_auto_bank_day,
 )
 
 
 class FakeMarketData:
+    def __init__(self, price: Decimal = Decimal("100")) -> None:
+        self.price = price
+
     def current_price(self, _symbol: str) -> Decimal:
-        return Decimal("100")
+        return self.price
 
 
 def config() -> BotConfig:
@@ -127,6 +134,48 @@ class FillParityReportTest(unittest.TestCase):
         broker.set_time(datetime(2026, 6, 1, 13, 32, tzinfo=timezone.utc))
 
         self.assertEqual(broker._fill_price("SOXL", "buy"), Decimal("100"))
+
+    def test_research_auto_bank_flattens_after_target_equity_is_reached(self) -> None:
+        market_data = FakeMarketData()
+        bot_config = replace(
+            config(),
+            auto_bank_day_enabled=True,
+            auto_bank_day_target_percent=Decimal("1.00"),
+        )
+        broker = SimulatedBroker(
+            bot_config,
+            market_data,  # type: ignore[arg-type]
+            start=datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 1, 20, 0, tzinfo=timezone.utc),
+            starting_account_value=Decimal("350"),
+            fill_model=RESEARCH_FILL_MODEL_STRESSED,
+            slippage_bps=Decimal("0"),
+            slippage_cents=Decimal("0"),
+        )
+        broker.submit_market_buy_qty("SOXS", Decimal("3"))
+        market_data.price = Decimal("102")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_position_owner("SOXS", INVERSE_BOT)
+            ledger = LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl")
+
+            triggered = _research_auto_bank_day(
+                bot_config,
+                broker,
+                state_store,
+                ledger,
+            )
+
+            self.assertTrue(triggered)
+            self.assertIsNone(broker.get_position("SOXS"))
+            self.assertTrue(
+                any(
+                    record.get("reason") == "auto_bank_day_target"
+                    and record.get("side") == "sell"
+                    for record in ledger.read_all()
+                )
+            )
 
 
 if __name__ == "__main__":

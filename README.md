@@ -97,6 +97,13 @@ Current production posture: full-roster EdgeWalker Router.
 - InverseBot trades SOXS through the sustained cascade specialist
   (`INVERSE_CASCADE_MODE=SUSTAINED`). It requires downside/cascade confirmation,
   prior-close context, and cascade-specific exit handling before it can execute.
+  When `OPENING_IMPULSE_ENABLED=true`, a separate first-20-minute lane can route
+  SOXS before the 20-bar SMA warmup completes, but only after SOXL decline,
+  drawdown, velocity, low-making pressure, and SOXS strength all confirm. It then
+  uses the same autonomous allocation, cascade trailing stop, lifecycle ledger,
+  one-entry lockout, and Auto Bank handling as the mature-session specialist.
+  The final five minutes demand stronger SOXS confirmation, and an excessively
+  fast selloff is rejected to avoid chasing the exhaustion end of a waterfall.
 - BalancedPure is a runtime observer/probe only. It supplies authority context
   through `BALANCEDPURE_RUNTIME_OBSERVER_ENABLED=true` and has no execution
   rights in the live router.

@@ -5046,6 +5046,39 @@ def _config_log_payload(config: BotConfig) -> dict[str, Any]:
         ),
         "fast_sma_minutes": config.fast_sma_minutes,
         "slow_sma_minutes": config.slow_sma_minutes,
+        "opening_impulse_enabled": config.opening_impulse_enabled,
+        "opening_impulse_window_minutes": config.opening_impulse_window_minutes,
+        "opening_impulse_min_bars": config.opening_impulse_min_bars,
+        "opening_impulse_source_current_max_percent": str(
+            config.opening_impulse_source_current_max_percent
+        ),
+        "opening_impulse_source_drawdown_max_percent": str(
+            config.opening_impulse_source_drawdown_max_percent
+        ),
+        "opening_impulse_inverse_current_min_percent": str(
+            config.opening_impulse_inverse_current_min_percent
+        ),
+        "opening_impulse_late_confirmation_start_minutes": (
+            config.opening_impulse_late_confirmation_start_minutes
+        ),
+        "opening_impulse_late_inverse_current_min_percent": str(
+            config.opening_impulse_late_inverse_current_min_percent
+        ),
+        "opening_impulse_source_velocity_max_percent": str(
+            config.opening_impulse_source_velocity_max_percent
+        ),
+        "opening_impulse_source_velocity_min_percent": str(
+            config.opening_impulse_source_velocity_min_percent
+        ),
+        "opening_impulse_source_recovery_max_percent": str(
+            config.opening_impulse_source_recovery_max_percent
+        ),
+        "opening_impulse_source_extension_min_percent": str(
+            config.opening_impulse_source_extension_min_percent
+        ),
+        "opening_impulse_source_new_low_count_min": (
+            config.opening_impulse_source_new_low_count_min
+        ),
         "close_liquidate_minutes": config.close_liquidate_minutes,
         "regime_gap_threshold": str(config.regime_gap_threshold),
         "regime_exit_gap_threshold": str(config.regime_exit_gap_threshold),
@@ -5527,6 +5560,39 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         ),
         inverse_cascade_sustain_minutes=inverse_cascade_sustain_minutes,
         inverse_cascade_trail_percent=inverse_cascade_trail_percent,
+        opening_impulse_enabled=base.opening_impulse_enabled,
+        opening_impulse_window_minutes=base.opening_impulse_window_minutes,
+        opening_impulse_min_bars=base.opening_impulse_min_bars,
+        opening_impulse_source_current_max_percent=(
+            base.opening_impulse_source_current_max_percent
+        ),
+        opening_impulse_source_drawdown_max_percent=(
+            base.opening_impulse_source_drawdown_max_percent
+        ),
+        opening_impulse_inverse_current_min_percent=(
+            base.opening_impulse_inverse_current_min_percent
+        ),
+        opening_impulse_late_confirmation_start_minutes=(
+            base.opening_impulse_late_confirmation_start_minutes
+        ),
+        opening_impulse_late_inverse_current_min_percent=(
+            base.opening_impulse_late_inverse_current_min_percent
+        ),
+        opening_impulse_source_velocity_max_percent=(
+            base.opening_impulse_source_velocity_max_percent
+        ),
+        opening_impulse_source_velocity_min_percent=(
+            base.opening_impulse_source_velocity_min_percent
+        ),
+        opening_impulse_source_recovery_max_percent=(
+            base.opening_impulse_source_recovery_max_percent
+        ),
+        opening_impulse_source_extension_min_percent=(
+            base.opening_impulse_source_extension_min_percent
+        ),
+        opening_impulse_source_new_low_count_min=(
+            base.opening_impulse_source_new_low_count_min
+        ),
         inverse_cascade_route_invalidation_grace_minutes=(
             inverse_cascade_route_invalidation_grace_minutes
         ),

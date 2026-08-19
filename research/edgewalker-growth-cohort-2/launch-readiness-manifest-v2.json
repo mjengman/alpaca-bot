@@ -1,0 +1,36 @@
+{
+  "cohort_id": "edgewalker-growth-cohort-2",
+  "cohort_name": "Edgewalker Growth Cohort 2",
+  "frozen_at": "2026-08-19T14:23:45Z",
+  "launch_authorized": true,
+  "baseline_parent_commit": "7b77b12",
+  "analysis_plan": "analysis-plan-v2.md",
+  "environment": "live",
+  "data_feed": "iex",
+  "objective": "maximum_compounded_return",
+  "primary_metric": "geometric_mean_daily_account_return",
+  "aspirational_daily_return": "0.01",
+  "planned_sessions": 60,
+  "interim_sessions": [20, 40],
+  "interim_changes_allowed": false,
+  "drawdown_is_promotion_veto": false,
+  "manual_interventions_allowed": false,
+  "operator_events_retained": true,
+  "challenger_order_authority": "shadow_only",
+  "supersedes": "edgewalker-growth-cohort-1",
+  "superseded_completed_sessions": 0,
+  "frozen_artifacts": {
+    "analysis-plan-v2.md": "269ca5f9c346b9aa776ea277adb0b293aacfe63c1f3f80273fdc1f0177add755",
+    "power-analysis-v2.json": "631eb1516dbe61e3dafd4c7811857a7d17674d43e77732d310096d08a2b74f43",
+    "shadow-trail-policy-v2.json": "771ac26690b564bf422229a2152c5bb3003abdf45d27e7da8bc0d0cf5871b898"
+  },
+  "freeze_scope": [
+    "git_commit",
+    "strategy_config",
+    "execution_config",
+    "risk_config",
+    "position_sizing",
+    "alpaca_environment",
+    "market_data_feed"
+  ]
+}

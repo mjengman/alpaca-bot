@@ -444,6 +444,30 @@ class EdgeWalkerBotTest(unittest.TestCase):
             previous_session_closes=previous_session_closes,
         )
 
+    def opening_impulse_client(self, latest_at: datetime) -> FakeClient:
+        return FakeClient(
+            {
+                SOXL: ohlc_bars(
+                    ("132.57", "132.74", "130.63", "131.52"),
+                    ("131.66", "131.96", "130.77", "131.29"),
+                    ("131.60", "133.10", "131.50", "133.10"),
+                    ("133.65", "133.65", "132.47", "132.47"),
+                    ("132.235", "132.235", "130.97", "130.97"),
+                    ("130.66", "130.81", "128.79", "129.54"),
+                    latest_at=latest_at,
+                ),
+                SOXS: ohlc_bars(
+                    ("42.83", "43.625", "42.66", "43.30"),
+                    ("43.23", "43.50", "43.12", "43.28"),
+                    ("43.30", "43.30", "42.625", "42.64"),
+                    ("42.515", "42.96", "42.48", "42.96"),
+                    ("42.995", "43.52", "42.995", "43.44"),
+                    ("43.50", "44.185", "43.50", "43.925"),
+                    latest_at=latest_at,
+                ),
+            }
+        )
+
     def test_warmup_blocks_regime_routing_until_slow_sma_history_exists(self) -> None:
         client = FakeClient({"SOXL": bars("100", "99")})
 
@@ -464,6 +488,232 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertIsNone(status.routed_symbol)
         self.assertEqual(status.entry_signal, False)
         self.assertEqual(status.action_taken, "collecting_data")
+
+    def test_opening_impulse_routes_soxs_before_slow_sma_warmup_completes(self) -> None:
+        now = datetime(2026, 8, 19, 13, 36, 10, tzinfo=timezone.utc)
+        client = self.opening_impulse_client(
+            datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        )
+
+        with patched_bot_time(now):
+            output, status, records = self.run_bot_with_lifecycle(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=True,
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                ),
+            )
+
+        self.assertEqual(client.buys, [(SOXS, Decimal("25"))])
+        self.assertIn("[OPENING] Impulse qualified", output)
+        self.assertIn("reason=inverse_cascade_opening_impulse_confirmed", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, INVERSE_BOT)
+        self.assertEqual(status.routed_symbol, SOXS)
+        submitted = next(
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_ORDER_SUBMITTED
+        )
+        context = submitted["lifecycle_context"]
+        self.assertEqual(context["entry_family"], "opening_impulse")
+        self.assertEqual(context["inverse_entry_family"], "opening_impulse")
+        self.assertTrue(context["opening_impulse_confirmed"])
+
+    def test_opening_impulse_requires_confirmed_downside_path(self) -> None:
+        now = datetime(2026, 8, 19, 13, 36, 10, tzinfo=timezone.utc)
+        latest_at = datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        client = FakeClient(
+            {
+                SOXL: ohlc_bars(
+                    ("100", "100.2", "99.8", "100"),
+                    ("100", "100.1", "99.7", "99.9"),
+                    ("99.9", "100.2", "99.8", "100.1"),
+                    ("100.1", "100.2", "99.9", "100"),
+                    ("100", "100.1", "99.8", "99.9"),
+                    ("99.9", "100", "99.7", "99.8"),
+                    latest_at=latest_at,
+                ),
+                SOXS: ohlc_bars(
+                    ("10", "10.1", "9.9", "10"),
+                    ("10", "10.1", "9.9", "10.01"),
+                    ("10.01", "10.02", "9.9", "9.99"),
+                    ("9.99", "10.02", "9.98", "10"),
+                    ("10", "10.02", "9.98", "10.01"),
+                    ("10.01", "10.02", "9.99", "10"),
+                    latest_at=latest_at,
+                ),
+            }
+        )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[OPENING] Impulse candidate blocked", output)
+        self.assertEqual(status.regime, "WARMUP")
+        self.assertEqual(status.action_taken, "collecting_data")
+
+    def test_opening_impulse_waits_for_six_completed_bars(self) -> None:
+        now = datetime(2026, 8, 19, 13, 35, 10, tzinfo=timezone.utc)
+        client = self.opening_impulse_client(
+            datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        )
+        client.bar_map[SOXL] = client.bar_map[SOXL][:-1]
+        client.bar_map[SOXS] = client.bar_map[SOXS][:-1]
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertNotIn("[OPENING] Impulse qualified", output)
+        self.assertEqual(status.regime, "WARMUP")
+
+    def test_opening_impulse_rejects_an_overfast_waterfall(self) -> None:
+        now = datetime(2026, 8, 19, 13, 36, 10, tzinfo=timezone.utc)
+        latest_at = datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        client = FakeClient(
+            {
+                SOXL: ohlc_bars(
+                    ("100", "100", "98.8", "99"),
+                    ("99", "99", "96.8", "97"),
+                    ("97", "97", "94.8", "95"),
+                    ("95", "95", "93.8", "94"),
+                    ("94", "94", "92.8", "93"),
+                    ("93", "93", "91.8", "92"),
+                    latest_at=latest_at,
+                ),
+                SOXS: ohlc_bars(
+                    ("10", "10.15", "10", "10.1"),
+                    ("10.1", "10.3", "10.1", "10.25"),
+                    ("10.25", "10.45", "10.25", "10.4"),
+                    ("10.4", "10.6", "10.4", "10.55"),
+                    ("10.55", "10.75", "10.55", "10.7"),
+                    ("10.7", "10.9", "10.7", "10.85"),
+                    latest_at=latest_at,
+                ),
+            }
+        )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("opening_source_velocity_below_min", output)
+        self.assertEqual(status.regime, "WARMUP")
+
+    def test_opening_impulse_disabled_preserves_twenty_bar_warmup(self) -> None:
+        now = datetime(2026, 8, 19, 13, 36, 10, tzinfo=timezone.utc)
+        client = self.opening_impulse_client(
+            datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=False,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertNotIn("[OPENING]", output)
+        self.assertEqual(status.regime, "WARMUP")
+
+    def test_opening_impulse_does_not_open_after_twenty_minute_window(self) -> None:
+        now = datetime(2026, 8, 19, 13, 51, 10, tzinfo=timezone.utc)
+        client = self.opening_impulse_client(
+            datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertNotIn("[OPENING] Impulse qualified", output)
+        self.assertEqual(status.regime, "WARMUP")
+
+    def test_opening_impulse_position_is_managed_during_sma_warmup(self) -> None:
+        now = datetime(2026, 8, 19, 13, 36, 10, tzinfo=timezone.utc)
+        client = self.opening_impulse_client(
+            datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+        )
+        client.positions[SOXS] = {
+            "symbol": SOXS,
+            "qty": "20",
+            "avg_entry_price": "43.90",
+            "current_price": "43.925",
+            "market_value": "878.50",
+            "unrealized_pl": "0.50",
+            "unrealized_plpc": "0.00057",
+        }
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": "2026-08-19",
+                    "entered_at": "2026-08-19T13:36:00+00:00",
+                    "entry_reason": bot_module.OPENING_IMPULSE_ENTRY_REASON,
+                    "lockout_active": True,
+                }
+            )
+            state_store.set_position_owner(SOXS, INVERSE_BOT)
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                setup_state=setup_state,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_impulse_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("[OPENING] Impulse maintaining", output)
+        self.assertEqual(status.action_taken, "manage_open_position")
+        self.assertEqual(status.routed_symbol, SOXS)
 
     def test_warmup_persists_regime_state_to_clear_old_hysteresis_memory(self) -> None:
         client = FakeClient({"SOXL": bars("100", "99")})
