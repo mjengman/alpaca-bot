@@ -187,6 +187,7 @@ LIFECYCLE_FULL_FILL = "FULL_FILL"
 LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
 LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
+LIFECYCLE_AUTO_BANK_DAY = "AUTO_BANK_DAY"
 LIFECYCLE_OPERATOR_BANK_DAY = "OPERATOR_BANK_DAY"
 LIFECYCLE_OPERATOR_ENTER_NOW = "OPERATOR_ENTER_NOW"
 LIFECYCLE_OPERATOR_EXIT_NOW = "OPERATOR_EXIT_NOW"
@@ -499,6 +500,8 @@ class BotConfig:
     preset_name: str | None = None
     v9_observer_context: dict[str, Any] | None = None
     v10_force_no_authority: bool = False
+    auto_bank_day_enabled: bool = False
+    auto_bank_day_target_percent: Decimal = Decimal("1.00")
 
     @classmethod
     def from_env(cls, environment_override: str | None = None) -> "BotConfig":
@@ -569,6 +572,13 @@ class BotConfig:
         close_liquidate_minutes = env_int("CLOSE_LIQUIDATE_MINUTES", 5)
         if close_liquidate_minutes < 1:
             raise BotError("CLOSE_LIQUIDATE_MINUTES must be at least 1")
+
+        auto_bank_day_target_percent = env_decimal(
+            "AUTO_BANK_DAY_TARGET_PERCENT",
+            "1.00",
+        )
+        if auto_bank_day_target_percent <= 0:
+            raise BotError("AUTO_BANK_DAY_TARGET_PERCENT must be greater than 0")
 
         regime_gap_threshold = env_decimal("REGIME_GAP_THRESHOLD", "0.20")
         if regime_gap_threshold < 0:
@@ -1019,6 +1029,8 @@ class BotConfig:
             preset_name=os.environ.get("PRESET_NAME") or None,
             v9_observer_context=runtime_observer_context,
             v10_force_no_authority=False,
+            auto_bank_day_enabled=env_bool("AUTO_BANK_DAY_ENABLED", False),
+            auto_bank_day_target_percent=auto_bank_day_target_percent,
         )
 
 
@@ -4922,6 +4934,17 @@ class EdgeWalkerBot:
         action_taken: str,
         entry_block_reason: str | None,
     ) -> dict[str, Any]:
+        if (
+            entry_block_reason == "auto_bank_day_target"
+            or action_taken == "auto_bank_day_target"
+        ):
+            return self._specialist_gate(
+                "position",
+                "Position",
+                "veto",
+                "required",
+                "The automatic daily target was reached; new entries are halted until the next session.",
+            )
         if entry_block_reason == "operator_banked" or action_taken == "operator_banked":
             return self._specialist_gate(
                 "position",

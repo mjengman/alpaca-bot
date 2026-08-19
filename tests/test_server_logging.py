@@ -20,6 +20,7 @@ from bot import (
     EdgeWalkerBot,
     FRACTIONAL_QTY_STEP,
     INVERSE_BOT,
+    LIFECYCLE_AUTO_BANK_DAY,
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
@@ -44,6 +45,7 @@ from bot import (
 )
 from server import (
     ACTIVE_SCAN_SECONDS,
+    AUTO_BANK_DAY_EXIT_REASON,
     BotRunner,
     NY_TZ,
     OPERATOR_BANK_DAY_EXIT_REASON,
@@ -4892,6 +4894,220 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(runner._operator_bank_state["flatten_status"], "filled")
         self.assertEqual(runner._operator_bank_state["exit_price"], "4.18")
         self.assertEqual(runner._operator_bank_state["filled_qty"], "2.5")
+
+    def test_auto_bank_triggers_at_target_and_not_below_it(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._operator_bank_state = {}
+        runner._operator_exit_state = {}
+        runner._operator_bank_enforcement_lock = threading.Lock()
+        triggered: list[dict[str, object]] = []
+        banked_at = datetime(2026, 8, 19, 15, 0, tzinfo=timezone.utc)
+
+        def fake_execute(
+            _config: BotConfig,
+            _client: object,
+            status: dict[str, object],
+            *,
+            automatic: bool = False,
+            account: dict[str, object] | None = None,
+        ) -> datetime:
+            triggered.append(
+                {
+                    "status": status,
+                    "automatic": automatic,
+                    "account": account,
+                }
+            )
+            return banked_at
+
+        runner._execute_operator_bank = fake_execute
+
+        class FakeClient:
+            def __init__(self, equity: str) -> None:
+                self.equity = equity
+                self.clock_calls = 0
+
+            def get_account(self) -> dict[str, object]:
+                return {
+                    "equity": self.equity,
+                    "portfolio_value": self.equity,
+                    "last_equity": "1000",
+                }
+
+            def get_clock(self) -> dict[str, object]:
+                self.clock_calls += 1
+                return {"is_open": True}
+
+        auto_config = replace(
+            config(),
+            auto_bank_day_enabled=True,
+            auto_bank_day_target_percent=Decimal("1.00"),
+        )
+        below = FakeClient("1009.99")
+        self.assertIsNone(
+            runner._maybe_auto_bank_day(
+                auto_config,
+                below,
+                check_account=True,
+            )
+        )
+        self.assertEqual(below.clock_calls, 0)
+        self.assertEqual(triggered, [])
+
+        reached = FakeClient("1010.00")
+        result = runner._maybe_auto_bank_day(
+            auto_config,
+            reached,
+            check_account=True,
+        )
+        self.assertEqual(result, banked_at)
+        self.assertEqual(reached.clock_calls, 1)
+        self.assertEqual(len(triggered), 1)
+        self.assertTrue(triggered[0]["automatic"])
+        self.assertEqual(triggered[0]["status"]["day_pl_percent"], "1")
+        self.assertEqual(triggered[0]["status"]["action_taken"], AUTO_BANK_DAY_EXIT_REASON)
+
+    def test_auto_bank_exit_is_autonomous_and_uses_distinct_reason(self) -> None:
+        records: list[dict[str, object]] = []
+
+        class FakeLifecycleLedger:
+            def record(self, event_type: str, **fields: object) -> None:
+                records.append({"event_type": event_type, **fields})
+
+        class FakeStateStore:
+            def __init__(self) -> None:
+                self._orders: dict[str, dict[str, object]] = {}
+
+            def get_pending_orders(self) -> dict[str, dict[str, object]]:
+                return dict(self._orders)
+
+            def track_order(self, order_id: str, metadata: dict[str, object]) -> None:
+                self._orders[order_id] = metadata
+
+            def get_pending_order(self, order_id: str) -> dict[str, object] | None:
+                return self._orders.get(order_id)
+
+            def clear_order(self, order_id: str) -> None:
+                self._orders.pop(order_id, None)
+
+            def clear_symbol(self, symbol: str) -> None:
+                self.cleared_symbol = symbol
+
+            def get_position_owner(self, _symbol: str) -> str:
+                return MOMENTUM_BOT
+
+            def get_position_entry_initiator(self, _symbol: str) -> str:
+                return "bot"
+
+            def get_position_risk_profile(self, _symbol: str) -> str:
+                return "autonomous_specialist"
+
+            def get_high_water_mark(self, _symbol: str) -> Decimal:
+                return Decimal("102")
+
+        class FakeClient:
+            order = {
+                "id": "auto-bank-sell-1",
+                "symbol": SOXL,
+                "side": "sell",
+                "status": "filled",
+                "qty": "2",
+                "filled_qty": "2",
+                "filled_avg_price": "101",
+            }
+
+            def get_account(self) -> dict[str, object]:
+                return {
+                    "equity": "1010",
+                    "portfolio_value": "1010",
+                    "last_equity": "1000",
+                    "buying_power": "50",
+                }
+
+            def list_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def get_position(self, symbol: str) -> dict[str, object] | None:
+                if symbol != SOXL:
+                    return None
+                return {
+                    "symbol": SOXL,
+                    "qty": "2",
+                    "avg_entry_price": "100",
+                    "current_price": "101",
+                    "unrealized_pl": "2",
+                    "unrealized_plpc": "0.01",
+                }
+
+            def submit_market_sell_qty(
+                self,
+                symbol: str,
+                qty: Decimal,
+            ) -> dict[str, object]:
+                self.submitted = (symbol, qty)
+                return dict(self.order)
+
+            def get_order(self, _order_id: str) -> dict[str, object]:
+                return dict(self.order)
+
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._operator_bank_state = {}
+        runner._activity_log = []
+        runner._save_activity_log = lambda: None
+        client = FakeClient()
+        auto_config = replace(
+            config(),
+            dry_run=False,
+            auto_bank_day_enabled=True,
+            auto_bank_day_target_percent=Decimal("1.00"),
+        )
+        edgewalker_status = {
+            "day_pl": "10",
+            "day_pl_percent": "1",
+            "active_bot": MOMENTUM_BOT,
+            "routed_symbol": SOXL,
+            "regime": "UPTREND",
+        }
+
+        with patch("server.LifecycleLedger", FakeLifecycleLedger), patch(
+            "server.BotStateStore",
+            FakeStateStore,
+        ), patch(
+            "server._save_operator_bank_state",
+            lambda _state: None,
+        ):
+            runner._execute_operator_bank(
+                auto_config,
+                client,
+                edgewalker_status,
+                automatic=True,
+                account=client.get_account(),
+            )
+
+        self.assertEqual(runner._operator_bank_state["flatten_status"], "filled")
+        self.assertTrue(runner._operator_bank_state["automatic"])
+        self.assertEqual(client.submitted, (SOXL, Decimal("2")))
+        self.assertTrue(
+            any(record["event_type"] == LIFECYCLE_AUTO_BANK_DAY for record in records)
+        )
+        exit_records = [
+            record
+            for record in records
+            if record["event_type"] in {LIFECYCLE_INTENDED_EXIT, LIFECYCLE_FULL_FILL}
+        ]
+        self.assertTrue(exit_records)
+        self.assertTrue(
+            all(record.get("reason") == AUTO_BANK_DAY_EXIT_REASON for record in exit_records)
+        )
+        self.assertTrue(
+            all(
+                record["lifecycle_context"]["exit_initiator"] == "bot"
+                and record["lifecycle_context"]["operator_affected"] is False
+                for record in exit_records
+            )
+        )
 
     def test_operator_bank_cancels_pending_entry_before_exit(self) -> None:
         canceled_order_ids: list[str] = []

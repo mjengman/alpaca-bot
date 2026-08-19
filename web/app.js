@@ -687,6 +687,11 @@ function renderBankDayStatus(data) {
   const status = data.operator_bank_status || {};
   state.operatorBankStatus = status;
   const active = Boolean(status.active || status.operator_banked);
+  const autoEnabled = Boolean(
+    status.auto_enabled ?? data.auto_bank_day_enabled,
+  );
+  const autoTarget =
+    status.auto_target_percent ?? data.auto_bank_day_target_percent ?? 1;
   const marketOpen = Boolean(data.edgewalker_status?.market_open);
   const shouldShowButton =
     state.running && !active && !state.researchModeEnabled;
@@ -704,9 +709,16 @@ function renderBankDayStatus(data) {
     return;
   }
   if (!active) {
-    els.bankDayStatus.hidden = true;
-    els.bankDayStatus.textContent = "";
-    delete els.bankDayStatus.dataset.tooltip;
+    els.bankDayStatus.hidden = !autoEnabled;
+    els.bankDayStatus.textContent = autoEnabled
+      ? `Auto Bank armed at ${formatPercent(autoTarget)}`
+      : "";
+    if (autoEnabled) {
+      els.bankDayStatus.dataset.tooltip =
+        "When account equity reaches the daily target, Edgewalker will flatten exposure and halt new entries until the next session.";
+    } else {
+      delete els.bankDayStatus.dataset.tooltip;
+    }
     return;
   }
 
@@ -759,7 +771,8 @@ function renderBankDayStatus(data) {
   }
 
   els.bankDayStatus.hidden = false;
-  els.bankDayStatus.textContent = `Bank Day at ${timeText}${
+  const bankLabel = status.automatic ? "Auto Bank" : "Bank Day";
+  els.bankDayStatus.textContent = `${bankLabel} at ${timeText}${
     detailParts.length ? ` · ${detailParts.join(" · ")}` : ""
   }`;
   els.bankDayStatus.dataset.tooltip =

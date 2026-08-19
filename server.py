@@ -43,6 +43,7 @@ from bot import (
     LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
     LIFECYCLE_FULL_FILL,
+    LIFECYCLE_AUTO_BANK_DAY,
     LIFECYCLE_OPERATOR_BANK_DAY,
     LIFECYCLE_OPERATOR_ENTER_NOW,
     LIFECYCLE_OPERATOR_EXIT_NOW,
@@ -125,6 +126,7 @@ NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
 NOTIFICATION_SEND_TIMEOUT_SECONDS = 30
 NOTIFICATION_SENT_EVENT_LIMIT = 500
 OPERATOR_BANK_DAY_EXIT_REASON = "operator_bank_day"
+AUTO_BANK_DAY_EXIT_REASON = "auto_bank_day_target"
 OPERATOR_ENTER_NOW_REASON = "operator_enter_now"
 OPERATOR_EXIT_NOW_REASON = "operator_exit_now"
 NARRATIVE_GROUNDING_VERSION = "deterministic-daily-v4"
@@ -359,6 +361,8 @@ class RunnerSnapshot:
     position_sizing_mode: str
     position_allocation_percent: str
     trail_percent: str
+    auto_bank_day_enabled: bool
+    auto_bank_day_target_percent: str
     fast_sma_minutes: int
     slow_sma_minutes: int
     cycle_count: int
@@ -1591,22 +1595,46 @@ class BotRunner:
                         "autonomous cycle deferred."
                     )
                 else:
-                    operator_entry_halt = self._operator_entry_halt_payload(
-                        run_timestamp
-                    )
-                    growth_entry_halt = self._growth_cohort_entry_halt_payload(
-                        effective_config,
-                        run_timestamp,
-                    )
-                    status = EdgeWalkerBot(
+                    with self._lock:
+                        prior_status = copy.deepcopy(self._edgewalker_status) or {}
+                    auto_banked_at = self._maybe_auto_bank_day(
                         effective_config,
                         client,
-                        market_data=self._market_data,
-                        entry_halt=operator_entry_halt or growth_entry_halt,
-                    ).run_once()
-                    edgewalker_status = asdict(status)
-                    if authority_state:
-                        edgewalker_status["preset_authority"] = authority_state
+                        edgewalker_status=prior_status,
+                        check_account=True,
+                    )
+                    if auto_banked_at is not None:
+                        print(
+                            "[AUTO BANK] Daily target reached before the next "
+                            "decision; autonomous cycle deferred."
+                        )
+                    else:
+                        operator_entry_halt = self._operator_entry_halt_payload(
+                            run_timestamp
+                        )
+                        growth_entry_halt = self._growth_cohort_entry_halt_payload(
+                            effective_config,
+                            run_timestamp,
+                        )
+                        status = EdgeWalkerBot(
+                            effective_config,
+                            client,
+                            market_data=self._market_data,
+                            entry_halt=operator_entry_halt or growth_entry_halt,
+                        ).run_once()
+                        edgewalker_status = asdict(status)
+                        if authority_state:
+                            edgewalker_status["preset_authority"] = authority_state
+                        auto_banked_at = self._maybe_auto_bank_day(
+                            effective_config,
+                            client,
+                            edgewalker_status=edgewalker_status,
+                        )
+                        if auto_banked_at is not None:
+                            print(
+                                "[AUTO BANK] Daily target reached; closing exposure "
+                                "and halting new entries for this session."
+                            )
                     self._continue_operator_bank_enforcement(
                         effective_config,
                         client,
@@ -2123,6 +2151,86 @@ class BotRunner:
             return price, trade_time
         return None, None
 
+    def _auto_bank_day_performance(
+        self,
+        account: dict[str, Any],
+    ) -> tuple[Decimal | None, Decimal | None]:
+        equity = optional_decimal_from_api(
+            account.get("equity") or account.get("portfolio_value"),
+            "account equity",
+        )
+        last_equity = optional_decimal_from_api(
+            account.get("last_equity"),
+            "prior-close account equity",
+        )
+        if equity is None or last_equity is None:
+            return None, None
+        day_pl = equity - last_equity
+        if last_equity == 0:
+            return day_pl, None
+        return day_pl, day_pl / last_equity * Decimal("100")
+
+    def _maybe_auto_bank_day(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+        *,
+        edgewalker_status: dict[str, Any] | None = None,
+        account: dict[str, Any] | None = None,
+        check_account: bool = False,
+    ) -> datetime | None:
+        if not config.auto_bank_day_enabled:
+            return None
+        with self._lock:
+            if _operator_bank_state_active(self._operator_bank_state):
+                return None
+            if self._operator_exit_state_active_locked():
+                return None
+
+        status = copy.deepcopy(edgewalker_status) if edgewalker_status else {}
+        status_percent = _decimal_from_value(status.get("day_pl_percent"))
+        if account is None and not check_account and (
+            status_percent is None
+            or status_percent < config.auto_bank_day_target_percent
+        ):
+            return None
+
+        authoritative_account = account or client.get_account()
+        day_pl, day_pl_percent = self._auto_bank_day_performance(
+            authoritative_account
+        )
+        if (
+            day_pl_percent is None
+            or day_pl_percent < config.auto_bank_day_target_percent
+        ):
+            return None
+        if not bool(client.get_clock().get("is_open")):
+            return None
+
+        status.update(
+            {
+                "day_pl": format_decimal(day_pl) if day_pl is not None else None,
+                "day_pl_percent": format_decimal(day_pl_percent),
+                "portfolio_value": _optional_text(
+                    authoritative_account.get("portfolio_value")
+                    or authoritative_account.get("equity")
+                ),
+                "action_taken": AUTO_BANK_DAY_EXIT_REASON,
+                "entry_signal": False,
+            }
+        )
+        with self._operator_bank_guard():
+            with self._lock:
+                if _operator_bank_state_active(self._operator_bank_state):
+                    return None
+            return self._execute_operator_bank(
+                config,
+                client,
+                status,
+                automatic=True,
+                account=authoritative_account,
+            )
+
     def bank_day(self) -> RunnerSnapshot:
         with self._trade_action_guard():
             with self._lock:
@@ -2439,8 +2547,11 @@ class BotRunner:
         config: BotConfig,
         client: AlpacaClient,
         edgewalker_status: dict[str, Any],
+        *,
+        automatic: bool = False,
+        account: dict[str, Any] | None = None,
     ) -> datetime:
-        account = client.get_account()
+        account = account or client.get_account()
         orders = client.list_open_orders()
         positions = {
             symbol: client.get_position(symbol)
@@ -2455,13 +2566,21 @@ class BotRunner:
             edgewalker_status,
             state_store,
             banked_at,
+            automatic=automatic,
+            target_percent=(
+                config.auto_bank_day_target_percent if automatic else None
+            ),
         )
 
         LifecycleLedger().record(
-            LIFECYCLE_OPERATOR_BANK_DAY,
-            runtime="Operator",
+            LIFECYCLE_AUTO_BANK_DAY if automatic else LIFECYCLE_OPERATOR_BANK_DAY,
+            runtime="EdgeWalker" if automatic else "Operator",
             dry_run=config.dry_run,
-            reason=OPERATOR_BANK_DAY_EXIT_REASON,
+            reason=(
+                AUTO_BANK_DAY_EXIT_REASON
+                if automatic
+                else OPERATOR_BANK_DAY_EXIT_REASON
+            ),
             lifecycle_context=context,
             **self._operator_bank_event_fields(context),
         )
@@ -2554,6 +2673,9 @@ class BotRunner:
         edgewalker_status: dict[str, Any],
         state_store: BotStateStore,
         banked_at: datetime,
+        *,
+        automatic: bool = False,
+        target_percent: Decimal | None = None,
     ) -> dict[str, Any]:
         active_symbol, active_position = self._operator_active_position(positions)
         day_pl = _optional_text(edgewalker_status.get("day_pl"))
@@ -2561,10 +2683,22 @@ class BotRunner:
         account_equity = _optional_text(
             account.get("portfolio_value") or account.get("equity")
         )
+        reason = (
+            AUTO_BANK_DAY_EXIT_REASON if automatic else OPERATOR_BANK_DAY_EXIT_REASON
+        )
         context: dict[str, Any] = {
-            "event": OPERATOR_BANK_DAY_EXIT_REASON,
-            "exit_initiator": ENTRY_INITIATOR_OPERATOR,
-            "operator_affected": True,
+            "event": reason,
+            "trigger_source": "automatic" if automatic else "operator",
+            "automatic": automatic,
+            "target_percent": (
+                format_decimal(target_percent)
+                if target_percent is not None
+                else None
+            ),
+            "exit_initiator": (
+                ENTRY_INITIATOR_BOT if automatic else ENTRY_INITIATOR_OPERATOR
+            ),
+            "operator_affected": not automatic,
             "banked_at": banked_at.isoformat(timespec="seconds"),
             "session_date": _operator_session_date(banked_at),
             "account_equity": account_equity,
@@ -2580,6 +2714,12 @@ class BotRunner:
                 "session_date": _operator_session_date(banked_at),
                 "banked_at": banked_at.isoformat(timespec="seconds"),
                 "requires_post_bank_replay": True,
+                "trigger_source": "automatic" if automatic else "operator",
+                "target_percent": (
+                    format_decimal(target_percent)
+                    if target_percent is not None
+                    else None
+                ),
             },
         }
         if active_symbol and active_position:
@@ -2636,6 +2776,9 @@ class BotRunner:
         position = context.get("position") if isinstance(context.get("position"), dict) else {}
         return {
             "banked_at": context.get("banked_at"),
+            "trigger_source": context.get("trigger_source"),
+            "automatic": context.get("automatic"),
+            "target_percent": context.get("target_percent"),
             "session_date": context.get("session_date"),
             "account_equity": context.get("account_equity"),
             "day_pl": context.get("day_pl"),
@@ -2659,7 +2802,10 @@ class BotRunner:
         state = {
             "operator_banked": True,
             "active": True,
-            "reason": OPERATOR_BANK_DAY_EXIT_REASON,
+            "reason": context.get("event") or OPERATOR_BANK_DAY_EXIT_REASON,
+            "trigger_source": context.get("trigger_source") or "operator",
+            "automatic": bool(context.get("automatic")),
+            "target_percent": context.get("target_percent"),
             "session_date": context.get("session_date"),
             "banked_at": context.get("banked_at"),
             "account_equity": context.get("account_equity"),
@@ -2701,6 +2847,12 @@ class BotRunner:
             target = "flat account"
         pl_text = f" day_pl={pl}" if pl not in (None, "") else ""
         pct_text = f" ({pct}%)" if pct not in (None, "") else ""
+        if context.get("automatic"):
+            target_percent = context.get("target_percent") or "1"
+            return (
+                f"[AUTO BANK] +{target_percent}% daily target reached; {target}; "
+                f"new entries halted{pl_text}{pct_text}."
+            )
         return f"[OPERATOR] Bank Day pressed; {target}; new entries halted{pl_text}{pct_text}."
 
     def _operator_trend_trust_score(
@@ -2754,6 +2906,13 @@ class BotRunner:
         state_store: BotStateStore,
         context: dict[str, Any],
     ) -> dict[str, Any]:
+        automatic = bool(context.get("automatic"))
+        activity_prefix = "[AUTO BANK]" if automatic else "[OPERATOR]"
+        reason = _optional_text(context.get("event")) or OPERATOR_BANK_DAY_EXIT_REASON
+        exit_initiator = (
+            ENTRY_INITIATOR_BOT if automatic else ENTRY_INITIATOR_OPERATOR
+        )
+        runtime = "EdgeWalker" if automatic else "Operator"
         open_entry_orders = [
             order
             for order in orders
@@ -2768,7 +2927,7 @@ class BotRunner:
             with self._lock:
                 self._append_activity_locked(
                     [
-                        "[OPERATOR] Bank Day canceled pending entry order(s): "
+                        f"{activity_prefix} Bank Day canceled pending entry order(s): "
                         + ", ".join(canceled_order_ids)
                         + "."
                     ]
@@ -2784,7 +2943,8 @@ class BotRunner:
             with self._lock:
                 self._append_activity_locked(
                     [
-                        "[OPERATOR] Bank Day waiting for pending order resolution; no duplicate sell submitted."
+                        f"{activity_prefix} Bank Day waiting for pending order "
+                        "resolution; no duplicate sell submitted."
                     ]
                 )
             return {
@@ -2797,7 +2957,7 @@ class BotRunner:
             self._clear_operator_bank_position_state(state_store)
             with self._lock:
                 self._append_activity_locked(
-                    ["[OPERATOR] Bank Day confirmed the account is flat."]
+                    [f"{activity_prefix} Bank Day confirmed the account is flat."]
                 )
             return {
                 "flatten_status": "flat",
@@ -2819,31 +2979,31 @@ class BotRunner:
             context.get("position", {}).get("owner")
             if isinstance(context.get("position"), dict)
             else None
-        ) or "Operator"
+        ) or ("EdgeWalker" if automatic else "Operator")
         exit_context = {
             **context,
             "entry_initiator": self._state_position_entry_initiator(
                 state_store,
                 active_symbol,
             ),
-            "exit_initiator": ENTRY_INITIATOR_OPERATOR,
+            "exit_initiator": exit_initiator,
             "strategy_owner": owner,
             "risk_profile": self._state_position_risk_profile(
                 state_store,
                 active_symbol,
             ),
-            "operator_affected": True,
+            "operator_affected": not automatic,
         }
         ledger = LifecycleLedger()
         ledger.record(
             LIFECYCLE_INTENDED_EXIT,
-            runtime="Operator",
+            runtime=runtime,
             dry_run=config.dry_run,
             bot=owner,
             symbol=active_symbol,
             side="sell",
             qty=qty,
-            reason=OPERATOR_BANK_DAY_EXIT_REASON,
+            reason=reason,
             lifecycle_context=exit_context,
         )
         try:
@@ -2851,13 +3011,13 @@ class BotRunner:
         except BotError as exc:
             ledger.record(
                 LIFECYCLE_ORDER_REJECTED,
-                runtime="Operator",
+                runtime=runtime,
                 dry_run=config.dry_run,
                 bot=owner,
                 symbol=active_symbol,
                 side="sell",
                 qty=qty,
-                reason=OPERATOR_BANK_DAY_EXIT_REASON,
+                reason=reason,
                 lifecycle_context=exit_context,
                 error=str(exc),
                 broker_constraint=broker_constraint_payload(
@@ -2868,13 +3028,13 @@ class BotRunner:
 
         ledger.record(
             LIFECYCLE_ORDER_SUBMITTED,
-            runtime="Operator",
+            runtime=runtime,
             dry_run=config.dry_run,
             bot=owner,
             symbol=active_symbol,
             side="sell",
             qty=qty,
-            reason=OPERATOR_BANK_DAY_EXIT_REASON,
+            reason=reason,
             lifecycle_context=exit_context,
             order=order,
         )
@@ -2882,19 +3042,19 @@ class BotRunner:
             client,
             state_store,
             ledger,
-            "Operator",
+            runtime,
             config.dry_run,
         ).track_submitted_order(
             order,
             owner,
-            OPERATOR_BANK_DAY_EXIT_REASON,
+            reason,
             lifecycle_context=exit_context,
         )
         if config.dry_run and order is None:
             with self._lock:
                 self._append_activity_locked(
                     [
-                        f"[OPERATOR] Bank Day dry run simulated market sell for "
+                        f"{activity_prefix} Bank Day dry run simulated market sell for "
                         f"{active_symbol} qty={format_decimal(qty)}."
                     ]
                 )
@@ -2915,7 +3075,7 @@ class BotRunner:
         with self._lock:
             self._append_activity_locked(
                 [
-                    f"[OPERATOR] Bank Day {order_status} market sell for "
+                    f"{activity_prefix} Bank Day {order_status} market sell for "
                     f"{active_symbol} qty={format_decimal(qty)}."
                 ]
             )
@@ -2945,6 +3105,10 @@ class BotRunner:
         performance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         status = _operator_bank_status_from_state(self._operator_bank_state)
+        status["auto_enabled"] = self._config.auto_bank_day_enabled
+        status["auto_target_percent"] = format_decimal(
+            self._config.auto_bank_day_target_percent
+        )
         return _operator_bank_status_with_performance(status, performance or {})
 
     def _save_operator_bank_state_locked(self) -> None:
@@ -2981,10 +3145,15 @@ class BotRunner:
         if status.get("active"):
             return {
                 "active": True,
-                "reason": "operator_banked",
+                "reason": (
+                    AUTO_BANK_DAY_EXIT_REASON
+                    if status.get("automatic")
+                    else "operator_banked"
+                ),
                 "banked_at": status.get("banked_at"),
                 "day_pl": status.get("day_pl"),
                 "day_pl_percent": status.get("day_pl_percent"),
+                "target_percent": status.get("target_percent"),
             }
         if exit_state.get("active"):
             return {
@@ -3231,6 +3400,10 @@ class BotRunner:
             position_sizing_mode=self._config.position_sizing_mode,
             position_allocation_percent=str(self._config.position_allocation_percent),
             trail_percent=str(self._config.trail_percent),
+            auto_bank_day_enabled=self._config.auto_bank_day_enabled,
+            auto_bank_day_target_percent=str(
+                self._config.auto_bank_day_target_percent
+            ),
             fast_sma_minutes=self._config.fast_sma_minutes,
             slow_sma_minutes=self._config.slow_sma_minutes,
             cycle_count=self._cycle_count,
@@ -4379,6 +4552,9 @@ def _operator_bank_status_from_state(
     for key in (
         "banked_at",
         "reason",
+        "trigger_source",
+        "automatic",
+        "target_percent",
         "account_equity",
         "press_day_pl",
         "press_day_pl_percent",
@@ -4401,7 +4577,12 @@ def _operator_bank_status_from_state(
             status[key] = state[key]
     status.setdefault("press_day_pl", status.get("day_pl"))
     status.setdefault("press_day_pl_percent", status.get("day_pl_percent"))
-    status["message"] = "Bank Day is active; new entries are halted until the next session."
+    status["message"] = (
+        "The automatic daily target was reached; new entries are halted until "
+        "the next session."
+        if status.get("automatic")
+        else "Bank Day is active; new entries are halted until the next session."
+    )
     return status
 
 
@@ -4414,13 +4595,18 @@ def _operator_bank_status_with_performance(
 
     result = dict(status)
     banked_at = _parse_optional_datetime(result.get("banked_at"))
+    bank_reason = (
+        AUTO_BANK_DAY_EXIT_REASON
+        if result.get("automatic")
+        else OPERATOR_BANK_DAY_EXIT_REASON
+    )
     banked_trade = None
     realized_trades = performance.get("realized_trades")
     if isinstance(realized_trades, list):
         for trade in reversed(realized_trades):
             if not isinstance(trade, dict):
                 continue
-            if trade.get("exit_reason") != OPERATOR_BANK_DAY_EXIT_REASON:
+            if trade.get("exit_reason") != bank_reason:
                 continue
             closed_at = _parse_optional_datetime(trade.get("closed_at"))
             if banked_at and closed_at and closed_at < banked_at:
@@ -4440,8 +4626,11 @@ def _operator_bank_status_with_performance(
                 ),
                 "session_realized_pl": performance.get("session_realized_pl"),
                 "message": (
-                    "The Bank Day exit filled; new entries are halted until "
-                    "the next session."
+                    "The automatic daily-target exit filled; new entries are "
+                    "halted until the next session."
+                    if result.get("automatic")
+                    else "The Bank Day exit filled; new entries are halted "
+                    "until the next session."
                 ),
             }
         )
@@ -4851,6 +5040,10 @@ def _config_log_payload(config: BotConfig) -> dict[str, Any]:
         "position_sizing_mode": config.position_sizing_mode,
         "position_allocation_percent": str(config.position_allocation_percent),
         "trail_percent": str(config.trail_percent),
+        "auto_bank_day_enabled": config.auto_bank_day_enabled,
+        "auto_bank_day_target_percent": str(
+            config.auto_bank_day_target_percent
+        ),
         "fast_sma_minutes": config.fast_sma_minutes,
         "slow_sma_minutes": config.slow_sma_minutes,
         "close_liquidate_minutes": config.close_liquidate_minutes,
@@ -6493,7 +6686,10 @@ def _operator_bank_summary_from_records(
     bank_records = [
         record
         for record in _lifecycle_records_for_date(lifecycle_records, log_date)
-        if record.get("event_type") == LIFECYCLE_OPERATOR_BANK_DAY
+        if record.get("event_type") in {
+            LIFECYCLE_AUTO_BANK_DAY,
+            LIFECYCLE_OPERATOR_BANK_DAY,
+        }
     ]
     if not bank_records:
         return None
@@ -6511,6 +6707,9 @@ def _operator_bank_summary_from_records(
         else {}
     )
     return {
+        "automatic": bool(context.get("automatic")),
+        "trigger_source": context.get("trigger_source") or "operator",
+        "target_percent": context.get("target_percent"),
         "banked_at": context.get("banked_at") or record.get("timestamp"),
         "account_equity": context.get("account_equity") or record.get("account_equity"),
         "press_day_pl": context.get("day_pl") or record.get("day_pl"),
@@ -6533,7 +6732,11 @@ def _operator_bank_note_from_records(
     if not summary:
         return ""
 
-    parts = ["operator_banked=true"]
+    parts = [
+        "auto_banked=true"
+        if summary.get("automatic")
+        else "operator_banked=true"
+    ]
     for key in (
         "banked_at",
         "press_day_pl",
@@ -6579,6 +6782,14 @@ def _operator_bank_narrative_note(operator_bank: dict[str, Any]) -> str:
 
     symbol = _optional_text(operator_bank.get("position_symbol"))
     position_text = f" while {symbol} was open" if symbol else " while flat"
+    if operator_bank.get("automatic"):
+        target = _optional_text(operator_bank.get("target_percent")) or "1"
+        return (
+            f"The automatic +{target}% daily target was reached{banked_text}"
+            f"{pl_text}{position_text}; exposure was flattened, new entries "
+            "were halted for the rest of the session, and the exit remained "
+            "part of autonomous expectancy."
+        )
     return (
         f"Operator Bank Day was pressed{banked_text}{pl_text}{position_text}; "
         "new entries were halted for the rest of the session and the ledger "

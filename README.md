@@ -73,6 +73,15 @@ lifecycle ledger reconciles the fill, the UI displays the realized trade result.
 The bank event also records its route, position, MFE, and timestamp as an anchor
 for later counterfactual replay; it does not claim that replay is automatic.
 
+When `AUTO_BANK_DAY_ENABLED=true`, Edgewalker applies the same flatten-and-halt
+contract automatically after Alpaca account equity reaches
+`AUTO_BANK_DAY_TARGET_PERCENT` above prior-close equity. The target is checked
+before a new autonomous decision and again after each cycle. Automatic banks
+use the separate `AUTO_BANK_DAY` lifecycle event and
+`auto_bank_day_target` exit reason, remain bot/bot expectancy, and display as
+`Auto Bank` rather than an operator intervention. Market-order movement means
+the realized close can finish slightly above or below the trigger snapshot.
+
 ## Strategy
 
 Current production posture: full-roster EdgeWalker Router.
