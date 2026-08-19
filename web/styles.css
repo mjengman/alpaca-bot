@@ -801,6 +801,37 @@ h2 {
   grid-column: span 2;
 }
 
+.status-cohort-card {
+  grid-column: span 6;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px 20px;
+  min-height: 96px;
+}
+
+.status-cohort-card > div {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-cohort-card > div > span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.status-cohort-card > div > strong {
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+}
+
+.status-cohort-card > small {
+  grid-column: span 4;
+}
+
 .status-card span,
 .status-sizing-card > span {
   color: var(--muted);
@@ -2552,8 +2583,17 @@ body.live-paper .metric:first-child {
   }
 
   .status-card-wide,
+  .status-cohort-card,
   .status-sizing-card,
   .status-action-card {
+    grid-column: span 2;
+  }
+
+  .status-cohort-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .status-cohort-card > small {
     grid-column: span 2;
   }
 
@@ -2638,8 +2678,17 @@ body.live-paper .metric:first-child {
   }
 
   .status-card-wide,
+  .status-cohort-card,
   .status-sizing-card,
   .status-action-card {
+    grid-column: auto;
+  }
+
+  .status-cohort-card {
+    grid-template-columns: 1fr;
+  }
+
+  .status-cohort-card > small {
     grid-column: auto;
   }
 

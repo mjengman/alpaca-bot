@@ -82,6 +82,7 @@ from bot import (
     closeout_status,
 )
 from market_data import StreamingMarketDataService
+from experiment_ledger import GrowthCohortCoordinator
 from research import (
     RESEARCH_FILL_MODEL_NEXT_BAR_OPEN,
     ResearchRunRequest,
@@ -373,6 +374,7 @@ class RunnerSnapshot:
     broker_state: dict[str, Any]
     performance: dict[str, Any]
     order_state: dict[str, Any]
+    growth_cohort_status: dict[str, Any]
     preset_authority: dict[str, Any] | None
     notification_status: dict[str, Any]
     operator_control_status: dict[str, Any]
@@ -417,6 +419,8 @@ class BotRunner:
         self._preset_authority_state: dict[str, Any] = {}
         self._prior_close_preload_keys: set[tuple[str, str, str]] = set()
         self._daily_close_actions_lock = threading.Lock()
+        self._growth_cohort = GrowthCohortCoordinator()
+        self._growth_cohort_runtime_error: str | None = None
 
     def _initial_config(self) -> tuple[BotConfig, str | None]:
         try:
@@ -678,6 +682,7 @@ class BotRunner:
         if not close_lock.acquire(blocking=False):
             return False
         try:
+            self._maybe_finalize_growth_cohort_session()
             self._maybe_auto_post_operator_spreadsheet(next_open)
             self._maybe_send_daily_summary_notification(next_open)
         finally:
@@ -693,6 +698,7 @@ class BotRunner:
 
         def worker() -> None:
             try:
+                self._maybe_finalize_growth_cohort_session()
                 self._maybe_auto_post_operator_spreadsheet(None)
                 self._maybe_send_daily_summary_notification(None)
             finally:
@@ -1585,11 +1591,18 @@ class BotRunner:
                         "autonomous cycle deferred."
                     )
                 else:
+                    operator_entry_halt = self._operator_entry_halt_payload(
+                        run_timestamp
+                    )
+                    growth_entry_halt = self._growth_cohort_entry_halt_payload(
+                        effective_config,
+                        run_timestamp,
+                    )
                     status = EdgeWalkerBot(
                         effective_config,
                         client,
                         market_data=self._market_data,
-                        entry_halt=self._operator_entry_halt_payload(run_timestamp),
+                        entry_halt=operator_entry_halt or growth_entry_halt,
                     ).run_once()
                     edgewalker_status = asdict(status)
                     if authority_state:
@@ -3090,6 +3103,22 @@ class BotRunner:
             BotStateStore().get_pending_orders(),
             timestamp,
         )
+        config_payload = _config_log_payload(config)
+        try:
+            self._growth_cohort.observe_cycle(
+                cycle_id=cycle_id,
+                observed_at=timestamp,
+                config_payload=config_payload,
+                edgewalker_status=edgewalker_status,
+                performance=performance,
+                broker_state=broker_state,
+                error=error,
+                lifecycle_records=lifecycle_records,
+            )
+            self._growth_cohort_runtime_error = None
+        except Exception as exc:
+            self._growth_cohort_runtime_error = f"{type(exc).__name__}: {exc}"
+        experiment_status = self._growth_cohort_status_locked(config)
         record = _cycle_log_record(
             config=config,
             cycle_id=cycle_id,
@@ -3100,8 +3129,9 @@ class BotRunner:
             broker_state=broker_state,
             regime_transition=regime_transition,
             performance=performance,
-                order_state=order_state,
-            )
+            order_state=order_state,
+            growth_cohort_status=experiment_status,
+        )
 
         try:
             _append_daily_jsonl(record, timestamp)
@@ -3219,12 +3249,86 @@ class BotRunner:
                 lifecycle_records,
                 BotStateStore().get_pending_orders(),
             ),
+            growth_cohort_status=self._growth_cohort_status_locked(self._config),
             preset_authority=self._preset_authority_snapshot_locked(),
             notification_status=self._notification_delivery_status_locked(),
             operator_control_status=self._operator_control_status_locked(),
             operator_bank_status=self._operator_bank_status_locked(performance),
             last_error=self._last_error,
         )
+
+    def _growth_cohort_entry_halt_payload(
+        self,
+        config: BotConfig,
+        observed_at: datetime,
+    ) -> dict[str, Any] | None:
+        coordinator = getattr(self, "_growth_cohort", None)
+        if coordinator is None:
+            return None
+        settings = alpaca_environment_settings()
+        if getattr(self, "_growth_cohort_runtime_error", None):
+            if coordinator.eligible(
+                config_payload=_config_log_payload(config),
+                environment=settings["active_environment"],
+                live_trading_armed=settings["live_trading_armed"],
+            ):
+                return {
+                    "active": True,
+                    "reason": "experiment_ledger_unavailable",
+                }
+            return None
+        try:
+            return coordinator.entry_halt(
+                config_payload=_config_log_payload(config),
+                environment=settings["active_environment"],
+                live_trading_armed=settings["live_trading_armed"],
+                observed_at=observed_at,
+            )
+        except Exception as exc:
+            self._growth_cohort_runtime_error = f"{type(exc).__name__}: {exc}"
+            return {
+                "active": True,
+                "reason": "experiment_ledger_unavailable",
+            }
+
+    def _growth_cohort_status_locked(self, config: BotConfig) -> dict[str, Any]:
+        coordinator = getattr(self, "_growth_cohort", None)
+        if coordinator is None:
+            return {
+                "state": "WAITING",
+                "integrity_state": "PENDING",
+                "completed_sessions": 0,
+                "planned_sessions": 60,
+            }
+        settings = alpaca_environment_settings()
+        try:
+            status = coordinator.status(
+                config_payload=_config_log_payload(config),
+                environment=settings["active_environment"],
+                live_trading_armed=settings["live_trading_armed"],
+            )
+        except Exception as exc:
+            status = {
+                "state": "BLOCKED",
+                "integrity_state": "BLOCKED",
+                "completed_sessions": 0,
+                "planned_sessions": 60,
+            }
+            self._growth_cohort_runtime_error = f"{type(exc).__name__}: {exc}"
+        if getattr(self, "_growth_cohort_runtime_error", None):
+            status["runtime_error"] = self._growth_cohort_runtime_error
+            status["integrity_state"] = "BLOCKED"
+        return status
+
+    def _maybe_finalize_growth_cohort_session(self) -> None:
+        coordinator = getattr(self, "_growth_cohort", None)
+        if coordinator is None:
+            return
+        try:
+            coordinator.finalize_session(datetime.now(timezone.utc))
+            self._growth_cohort_runtime_error = None
+        except Exception as exc:
+            self._growth_cohort_runtime_error = f"{type(exc).__name__}: {exc}"
 
     def _preset_authority_snapshot_locked(self) -> dict[str, Any] | None:
         plan = self._preset_authority_plan
@@ -4812,6 +4916,7 @@ def _cycle_log_record(
     regime_transition: dict[str, Any] | None,
     performance: dict[str, Any] | None = None,
     order_state: dict[str, Any] | None = None,
+    growth_cohort_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "timestamp": _utc_timestamp(timestamp),
@@ -4840,6 +4945,8 @@ def _cycle_log_record(
     if order_state:
         record["order_state"] = order_state
         record["pending_order_count"] = order_state.get("pending_count")
+    if growth_cohort_status:
+        record["growth_cohort"] = growth_cohort_status
     return record
 
 

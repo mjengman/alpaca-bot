@@ -234,6 +234,11 @@ const els = {
   toggle: document.querySelector("#toggleButton"),
   edgeRunState: document.querySelector("#edgeRunStateValue"),
   positionSizeSummary: document.querySelector("#positionSizeSummaryValue"),
+  growthCohortState: document.querySelector("#growthCohortStateValue"),
+  growthCohortProgress: document.querySelector("#growthCohortProgressValue"),
+  growthCohortReturn: document.querySelector("#growthCohortReturnValue"),
+  growthCohortDaily: document.querySelector("#growthCohortDailyValue"),
+  growthCohortDetail: document.querySelector("#growthCohortDetailValue"),
   mode: document.querySelector("#modeValue"),
   dataStatus: document.querySelector("#dataStatusValue"),
   brokerState: document.querySelector("#brokerStateValue"),
@@ -614,6 +619,68 @@ function renderPositionSizeSummary(status = null) {
     effectiveNotional === null || effectiveNotional === undefined
       ? `${allocation}% BP`
       : `${allocation}% BP · ${dollars}`;
+}
+
+function formatCohortReturn(value) {
+  const parsed = numberOrNull(value);
+  if (parsed === null) {
+    return "--";
+  }
+  return `${parsed >= 0 ? "+" : ""}${(parsed * 100).toFixed(2)}%`;
+}
+
+function renderGrowthCohort(data) {
+  const cohort = data.growth_cohort_status || {};
+  const stateLabels = {
+    WAITING: "Waiting",
+    READY: "Ready to launch",
+    ACTIVE: "Live",
+    COMPLETE: "Complete",
+    BLOCKED: "Blocked",
+  };
+  const cohortState = cohort.state || "WAITING";
+  const integrity = cohort.integrity_state || "PENDING";
+  const completed = numberOrNull(cohort.completed_sessions) || 0;
+  const observed = numberOrNull(cohort.observed_sessions) || completed;
+  const planned = numberOrNull(cohort.planned_sessions) || 60;
+
+  if (els.growthCohortState) {
+    els.growthCohortState.textContent =
+      stateLabels[cohortState] || formatLabel(cohortState);
+    els.growthCohortState.classList.toggle(
+      "is-positive",
+      cohortState === "ACTIVE" || cohortState === "COMPLETE",
+    );
+    els.growthCohortState.classList.toggle(
+      "is-negative",
+      cohortState === "BLOCKED" || integrity === "BLOCKED",
+    );
+  }
+  if (els.growthCohortProgress) {
+    els.growthCohortProgress.textContent = `${completed} / ${planned}`;
+  }
+  if (els.growthCohortReturn) {
+    els.growthCohortReturn.textContent = formatCohortReturn(
+      cohort.compounded_return,
+    );
+  }
+  if (els.growthCohortDaily) {
+    els.growthCohortDaily.textContent = formatCohortReturn(
+      cohort.geometric_mean_daily_return,
+    );
+  }
+  if (els.growthCohortDetail) {
+    const detail = cohort.runtime_error
+      ? `Ledger unavailable · ${cohort.runtime_error}`
+      : integrity === "BLOCKED"
+      ? `Integrity block · ${cohort.integrity_detail || "new entries halted"}`
+      : cohortState === "WAITING"
+      ? "Launches only when live trading is armed on IEX"
+      : cohortState === "READY"
+      ? "Frozen manifest ready · begins on the first live cycle"
+      : `${observed} observed session${observed === 1 ? "" : "s"} · interim readouts at 20 and 40 · 1% daily is aspirational`;
+    els.growthCohortDetail.textContent = detail;
+  }
 }
 
 function renderBankDayStatus(data) {
@@ -7045,6 +7112,7 @@ function render(data) {
     ? "The repeating bot loop is running. It arms itself outside regular market hours."
     : "The repeating bot loop is stopped.";
   renderRunState(data, waitingForOpen);
+  renderGrowthCohort(data);
   els.toggle.textContent = state.running ? "Turn Off" : "Turn On";
   els.toggle.dataset.tooltip = state.running
     ? "Stop the repeating bot loop after the current cycle."

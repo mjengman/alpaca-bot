@@ -1,0 +1,17 @@
+{
+  "artifact_id": "edgewalker-entry-anchored-shadow-trails-v1",
+  "prepared_at": "2026-08-19T08:34:12Z",
+  "order_authority": false,
+  "broker_or_network_calls": false,
+  "entry_anchor": "autonomous live FULL_FILL buys admitted after cohort launch",
+  "operator_affected_entries_included": false,
+  "variants_percent": ["1.00", "1.50", "2.00", "3.50", "6.00"],
+  "mark_source": {
+    "SOXL": "same-cycle Edgewalker source_price",
+    "SOXS": "same-cycle Edgewalker inverse_price"
+  },
+  "fill_assumption": "first observed cycle mark at or below the trailing threshold",
+  "session_close_assumption": "last observed same-session mark",
+  "promotion": "disabled",
+  "interpretation_limit": "Entry-anchored per-trade exit-doctrine comparison; overlapping shadows are not a deployable portfolio equity curve."
+}

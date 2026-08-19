@@ -1,0 +1,34 @@
+{
+  "cohort_id": "edgewalker-growth-cohort-1",
+  "cohort_name": "Edgewalker Growth Cohort 1",
+  "frozen_at": "2026-08-19T08:34:12Z",
+  "launch_authorized": true,
+  "baseline_parent_commit": "b90a547",
+  "analysis_plan": "analysis-plan-v1.md",
+  "environment": "live",
+  "data_feed": "iex",
+  "objective": "maximum_compounded_return",
+  "primary_metric": "geometric_mean_daily_account_return",
+  "aspirational_daily_return": "0.01",
+  "planned_sessions": 60,
+  "interim_sessions": [20, 40],
+  "interim_changes_allowed": false,
+  "drawdown_is_promotion_veto": false,
+  "manual_interventions_allowed": false,
+  "operator_events_retained": true,
+  "challenger_order_authority": "shadow_only",
+  "frozen_artifacts": {
+    "analysis-plan-v1.md": "d9c97d3ccc1ec1851ec469f3fae04e5c5478ec49c59301bf230e3cb42ef2bb96",
+    "power-analysis-v1.json": "c629cb960b6ae9183e676c34422a4f143629045f6cb784577f435f29b77691c1",
+    "shadow-trail-policy-v1.json": "89bd6d61d37fa76803388b5c1c69a1ac07635e90a2aa8783d8811fbf6100b420"
+  },
+  "freeze_scope": [
+    "git_commit",
+    "strategy_config",
+    "execution_config",
+    "risk_config",
+    "position_sizing",
+    "alpaca_environment",
+    "market_data_feed"
+  ]
+}
