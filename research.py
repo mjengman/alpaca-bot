@@ -1018,18 +1018,22 @@ def _session_metrics(
     inverse_entry_counts = {
         "inverse_cascade": 0,
         "inverse_legacy": 0,
+        "opening_impulse": 0,
     }
     inverse_entry_pl = {
         "inverse_cascade": Decimal("0"),
         "inverse_legacy": Decimal("0"),
+        "opening_impulse": Decimal("0"),
     }
     momentum_entry_counts = {
         "momentum_surge": 0,
         "momentum_legacy": 0,
+        "opening_orb": 0,
     }
     momentum_entry_pl = {
         "momentum_surge": Decimal("0"),
         "momentum_legacy": Decimal("0"),
+        "opening_orb": Decimal("0"),
     }
     for trade in trades:
         reason = str(trade.get("exit_reason") or "UNKNOWN")
@@ -1142,10 +1146,14 @@ def _session_metrics(
         "inverse_cascade_pl": inverse_entry_pl["inverse_cascade"],
         "inverse_legacy_trade_count": inverse_entry_counts["inverse_legacy"],
         "inverse_legacy_pl": inverse_entry_pl["inverse_legacy"],
+        "opening_impulse_trade_count": inverse_entry_counts["opening_impulse"],
+        "opening_impulse_pl": inverse_entry_pl["opening_impulse"],
         "momentum_surge_trade_count": momentum_entry_counts["momentum_surge"],
         "momentum_surge_pl": momentum_entry_pl["momentum_surge"],
         "momentum_legacy_trade_count": momentum_entry_counts["momentum_legacy"],
         "momentum_legacy_pl": momentum_entry_pl["momentum_legacy"],
+        "opening_orb_trade_count": momentum_entry_counts["opening_orb"],
+        "opening_orb_pl": momentum_entry_pl["opening_orb"],
         "exit_reason_counts": exit_reason_counts,
         "exit_reason_pl": exit_reason_pl,
     }
@@ -1298,6 +1306,29 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
                         ),
                         "opening_impulse_source_new_low_count_min": (
                             config.opening_impulse_source_new_low_count_min
+                        ),
+                        "opening_orb_enabled": config.opening_orb_enabled,
+                        "opening_orb_range_minutes": config.opening_orb_range_minutes,
+                        "opening_orb_entry_window_minutes": (
+                            config.opening_orb_entry_window_minutes
+                        ),
+                        "opening_orb_breakout_buffer_percent": str(
+                            config.opening_orb_breakout_buffer_percent
+                        ),
+                        "opening_orb_source_current_min_percent": str(
+                            config.opening_orb_source_current_min_percent
+                        ),
+                        "opening_orb_source_extension_max_percent": str(
+                            config.opening_orb_source_extension_max_percent
+                        ),
+                        "opening_orb_inverse_current_max_percent": str(
+                            config.opening_orb_inverse_current_max_percent
+                        ),
+                        "opening_orb_trail_percent": str(
+                            config.opening_orb_trail_percent
+                        ),
+                        "opening_orb_exit_minute_of_day": (
+                            config.opening_orb_exit_minute_of_day
                         ),
                         "close_liquidate_minutes": config.close_liquidate_minutes,
                         "regime_gap_threshold": str(config.regime_gap_threshold),
@@ -1564,10 +1595,14 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "momentum_surge_pl": _rounded(metrics["momentum_surge_pl"]),
         "momentum_legacy_trades": int(metrics["momentum_legacy_trade_count"]),
         "momentum_legacy_pl": _rounded(metrics["momentum_legacy_pl"]),
+        "opening_orb_trades": int(metrics["opening_orb_trade_count"]),
+        "opening_orb_pl": _rounded(metrics["opening_orb_pl"]),
         "inverse_cascade_trades": int(metrics["inverse_cascade_trade_count"]),
         "inverse_cascade_pl": _rounded(metrics["inverse_cascade_pl"]),
         "inverse_legacy_trades": int(metrics["inverse_legacy_trade_count"]),
         "inverse_legacy_pl": _rounded(metrics["inverse_legacy_pl"]),
+        "opening_impulse_trades": int(metrics["opening_impulse_trade_count"]),
+        "opening_impulse_pl": _rounded(metrics["opening_impulse_pl"]),
         "top_pl_bot": top_bot,
         "bottom_pl_bot": bottom_bot,
         "regime_transitions": int(metrics["regime_transitions"]),
@@ -1597,6 +1632,25 @@ def run_research_backtest(config: BotConfig, request: ResearchRunRequest) -> dic
         "opening_impulse_enabled": config.opening_impulse_enabled,
         "opening_impulse_window_minutes": config.opening_impulse_window_minutes,
         "opening_impulse_min_bars": config.opening_impulse_min_bars,
+        "opening_orb_enabled": config.opening_orb_enabled,
+        "opening_orb_range_minutes": config.opening_orb_range_minutes,
+        "opening_orb_entry_window_minutes": (
+            config.opening_orb_entry_window_minutes
+        ),
+        "opening_orb_breakout_buffer_percent": _rounded(
+            config.opening_orb_breakout_buffer_percent
+        ),
+        "opening_orb_source_current_min_percent": _rounded(
+            config.opening_orb_source_current_min_percent
+        ),
+        "opening_orb_source_extension_max_percent": _rounded(
+            config.opening_orb_source_extension_max_percent
+        ),
+        "opening_orb_inverse_current_max_percent": _rounded(
+            config.opening_orb_inverse_current_max_percent
+        ),
+        "opening_orb_trail_percent": _rounded(config.opening_orb_trail_percent),
+        "opening_orb_exit_minute_of_day": config.opening_orb_exit_minute_of_day,
         "regime_gap_percent": _rounded(config.regime_gap_threshold),
         "regime_exit_gap_percent": _rounded(config.regime_exit_gap_threshold),
         "chop_discount_percent": _rounded(config.chop_entry_discount_percent),

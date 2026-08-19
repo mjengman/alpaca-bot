@@ -1,0 +1,36 @@
+{
+  "artifact_id": "edgewalker-growth-cohort-3-power-v3",
+  "prepared_at": "2026-08-19T15:20:37Z",
+  "primary_metric": "geometric_mean_daily_account_return",
+  "historical_variance_calibration": {
+    "source": "latest 20 available prelaunch Edgewalker daily logs",
+    "start_date": "2026-07-22",
+    "end_date": "2026-08-18",
+    "sessions": 20,
+    "arithmetic_mean_daily_return": "0.00965986628678336",
+    "geometric_mean_daily_return": "0.008432830777511002",
+    "daily_standard_deviation": "0.053174762059026666",
+    "warning": "Historical sessions span prior code/config states and include human intervention; they calibrate variance only and are not confirmation evidence."
+  },
+  "one_sided_normal_approximation": {
+    "alpha": "0.05",
+    "power": "0.80",
+    "target_effect": "0.01",
+    "iid_sessions_required": 175,
+    "effect_detectable_with_60_iid_sessions": "0.01708"
+  },
+  "fixed_first_stage_horizon": 60,
+  "rationale": [
+    "Sixty sessions provide twelve non-overlapping five-session trading-week blocks, the minimum fixed horizon selected for a useful moving-block bootstrap.",
+    "The first-stage horizon is intentionally shorter than the 175-session iid approximation so Edgewalker can learn from shadow challengers within one quarter rather than freezing production for most of a year.",
+    "A positive 60-session point estimate is not automatically described as statistically strong; the frozen bootstrap lower bound determines that label."
+  ],
+  "formal_analysis": {
+    "method": "circular moving-block bootstrap of log daily returns",
+    "block_length": 5,
+    "resamples": 50000,
+    "seed": 20260819,
+    "strong_support_rule": "one-sided 95% lower bound above zero",
+    "aspirational_rule": "geometric mean daily return at least 0.01 and lower bound above zero"
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "artifact_id": "edgewalker-bidirectional-opening-prelaunch-replay-v3",
+  "prepared_at": "2026-08-19T15:20:37Z",
+  "source": "Alpaca IEX raw one-minute SOXL/SOXS bars",
+  "date_range": {
+    "start": "2026-01-02",
+    "end": "2026-08-18",
+    "sessions": 157
+  },
+  "chronological_partitions": {
+    "discovery": "2026-01-02 through 2026-04-30 (82 sessions)",
+    "validation": "2026-05-01 through 2026-06-30 (41 sessions)",
+    "holdout": "2026-07-01 through 2026-08-18 (34 sessions)"
+  },
+  "replay_model": {
+    "engine": "production EdgeWalkerBot",
+    "fill_model": "next_bar_open",
+    "starting_equity": "1000",
+    "position_sizing_mode": "dynamic",
+    "position_allocation_percent": "95",
+    "daily_bank_policy": "hard +1% account-equity flatten and halt"
+  },
+  "candidate": {
+    "bearish_lane": "existing confirmed Opening Impulse",
+    "bullish_lane": "15-minute SOXL opening-range breakout",
+    "opening_orb_range_minutes": 15,
+    "opening_orb_entry_window_minutes": 20,
+    "opening_orb_breakout_buffer_percent": "0.10",
+    "opening_orb_source_current_min_percent": "1.00",
+    "opening_orb_source_extension_max_percent": "9.00",
+    "opening_orb_inverse_current_max_percent": "-0.50",
+    "opening_orb_trail_percent": "1.00",
+    "opening_orb_exit_time_et": "09:55",
+    "opening_orb_attempts_per_session": 1
+  },
+  "results": {
+    "5_bps_per_side": {
+      "control_total_trades": 396,
+      "candidate_total_trades": 422,
+      "hard_1_percent_bank": {
+        "control": {
+          "discovery_compounded_return": "-0.11750032003695077",
+          "validation_compounded_return": "-0.012216984970003786",
+          "holdout_compounded_return": "0.007916731970477597",
+          "all_compounded_return": "-0.12138064606236354",
+          "all_max_drawdown": "-0.17684020764508435",
+          "all_positive_sessions": 80,
+          "all_negative_sessions": 69
+        },
+        "candidate": {
+          "discovery_compounded_return": "-0.09447774141679144",
+          "validation_compounded_return": "0.035587699952013274",
+          "holdout_compounded_return": "0.07217587479182686",
+          "all_compounded_return": "0.0054304745429016865",
+          "all_max_drawdown": "-0.14030458983668592",
+          "all_positive_sessions": 87,
+          "all_negative_sessions": 64
+        }
+      },
+      "no_daily_bank": {
+        "control_all_compounded_return": "0.42347276112994825",
+        "candidate_all_compounded_return": "0.48718506898799663",
+        "control_all_max_drawdown": "-0.18894797591599954",
+        "candidate_all_max_drawdown": "-0.18280228753063776"
+      }
+    },
+    "10_bps_per_side": {
+      "hard_1_percent_bank": {
+        "control": {
+          "discovery_compounded_return": "-0.2617722114475718",
+          "validation_compounded_return": "-0.08537287019406392",
+          "holdout_compounded_return": "-0.055679885832440434",
+          "all_compounded_return": "-0.3623920716643826",
+          "all_max_drawdown": "-0.36782492195266314",
+          "all_positive_sessions": 65,
+          "all_negative_sessions": 84
+        },
+        "candidate": {
+          "discovery_compounded_return": "-0.242507073344834",
+          "validation_compounded_return": "-0.04019867919677367",
+          "holdout_compounded_return": "0.012179367711940392",
+          "all_compounded_return": "-0.26410236797159226",
+          "all_max_drawdown": "-0.30881717438560685",
+          "all_positive_sessions": 73,
+          "all_negative_sessions": 78
+        }
+      },
+      "no_daily_bank": {
+        "control_all_compounded_return": "-0.0283721917053259",
+        "candidate_all_compounded_return": "-0.027801588316799686",
+        "control_all_max_drawdown": "-0.2567846847213272",
+        "candidate_all_max_drawdown": "-0.270771268328058"
+      }
+    }
+  },
+  "selection": {
+    "decision": "deploy candidate as frozen Cohort 3 production",
+    "rationale": [
+      "With the configured +1% bank, the candidate improved compounded return in discovery, validation, holdout, and the full sample at both 5 and 10 bps per-side friction.",
+      "At the central 5 bps assumption, full-sample compounded return crossed from negative to slightly positive and max drawdown improved.",
+      "At 10 bps, absolute performance remained negative but the candidate retained a material advantage over control, confirming that execution cost remains a first-order risk."
+    ]
+  },
+  "limitations": [
+    "IEX is a single-exchange feed and cannot reproduce consolidated-market price formation.",
+    "One-minute bars cannot establish intrabar event ordering, queue position, or realized spread.",
+    "The holdout was consumed during design and is not prospective confirmation.",
+    "Backtest improvement is evidence for incremental edge, not a guarantee of positive live returns or a 1% daily result."
+  ]
+}

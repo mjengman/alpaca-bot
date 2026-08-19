@@ -46,6 +46,9 @@ from bot import (
     INVERSE_BOT,
     MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
     MOMENTUM_BOT,
+    OPENING_ORB_ENTRY_REASON,
+    OPENING_ORB_TIME_EXIT_REASON,
+    RISK_PROFILE_OPENING_ORB,
     RISK_PROFILE_OPERATOR_FRESH_1_5,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_OPEN,
@@ -467,6 +470,280 @@ class EdgeWalkerBotTest(unittest.TestCase):
                 ),
             }
         )
+
+    def opening_orb_client(self, latest_at: datetime) -> FakeClient:
+        source_rows: list[tuple[str, str, str, str]] = []
+        inverse_rows: list[tuple[str, str, str, str]] = []
+        for index in range(15):
+            source_open = Decimal("100") + Decimal(index) * Decimal("0.04")
+            source_close = source_open + Decimal("0.03")
+            source_rows.append(
+                (
+                    str(source_open),
+                    str(source_close + Decimal("0.05")),
+                    str(source_open - Decimal("0.05")),
+                    str(source_close),
+                )
+            )
+            inverse_open = Decimal("10") - Decimal(index) * Decimal("0.02")
+            inverse_close = inverse_open - Decimal("0.01")
+            inverse_rows.append(
+                (
+                    str(inverse_open),
+                    str(inverse_open + Decimal("0.02")),
+                    str(inverse_close - Decimal("0.02")),
+                    str(inverse_close),
+                )
+            )
+        source_rows.append(("100.56", "101.55", "100.54", "101.50"))
+        inverse_rows.append(("9.70", "9.71", "9.63", "9.65"))
+        return FakeClient(
+            {
+                SOXL: ohlc_bars(*source_rows, latest_at=latest_at),
+                SOXS: ohlc_bars(*inverse_rows, latest_at=latest_at),
+            }
+        )
+
+    def test_opening_orb_routes_soxl_after_confirmed_fifteen_minute_breakout(self) -> None:
+        now = datetime(2026, 8, 19, 13, 46, 10, tzinfo=timezone.utc)
+        client = self.opening_orb_client(
+            datetime(2026, 8, 19, 13, 45, tzinfo=timezone.utc)
+        )
+
+        with patched_bot_time(now):
+            output, status, records = self.run_bot_with_lifecycle(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_orb_enabled=True,
+                    momentum_authority_required=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [(SOXL, Decimal("25"))])
+        self.assertIn("[OPENING] SOXL ORB qualified", output)
+        self.assertIn(f"reason={OPENING_ORB_ENTRY_REASON}", output)
+        self.assertEqual(status.regime, "UPTREND")
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.routed_symbol, SOXL)
+        submitted = next(
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_ORDER_SUBMITTED
+        )
+        context = submitted["lifecycle_context"]
+        self.assertEqual(context["entry_family"], "opening_orb")
+        self.assertTrue(context["opening_orb_confirmed"])
+        self.assertEqual(context["risk_profile"], RISK_PROFILE_OPENING_ORB)
+
+    def test_opening_orb_requires_breakout_buffer_confirmation(self) -> None:
+        now = datetime(2026, 8, 19, 13, 46, 10, tzinfo=timezone.utc)
+        client = self.opening_orb_client(
+            datetime(2026, 8, 19, 13, 45, tzinfo=timezone.utc)
+        )
+        client.bar_map[SOXL][-1].update(
+            {"o": "100.56", "h": "100.60", "l": "100.50", "c": "100.58"}
+        )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_orb_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("opening_orb_breakout_not_confirmed", output)
+        self.assertEqual(status.regime, "WARMUP")
+
+    def test_opening_orb_time_exit_hands_back_to_normal_routing(self) -> None:
+        now = datetime(2026, 8, 19, 13, 55, 10, tzinfo=timezone.utc)
+        client = self.opening_orb_client(
+            datetime(2026, 8, 19, 13, 45, tzinfo=timezone.utc)
+        )
+        client.positions[SOXL] = {
+            "symbol": SOXL,
+            "qty": "8",
+            "avg_entry_price": "101.50",
+            "current_price": "101.75",
+            "market_value": "814",
+            "unrealized_pl": "2",
+            "unrealized_plpc": "0.00246",
+        }
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_momentum_state(
+                {
+                    "session_date": "2026-08-19",
+                    "entered_at": "2026-08-19T13:46:00+00:00",
+                    "entry_reason": OPENING_ORB_ENTRY_REASON,
+                    "entry_family": "opening_orb",
+                    "opening_orb": True,
+                    "exited_at": None,
+                    "stopped_out_at": None,
+                }
+            )
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+                risk_profile=RISK_PROFILE_OPENING_ORB,
+            )
+
+        with patched_bot_time(now):
+            output, status, records = self.run_bot_with_lifecycle(
+                client,
+                setup_state=setup_state,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_orb_enabled=True,
+                ),
+            )
+
+        self.assertEqual(client.sells, [(SOXL, Decimal("8.000000000"))])
+        self.assertIn("SOXL ORB handoff reached", output)
+        self.assertEqual(status.action_taken, OPENING_ORB_TIME_EXIT_REASON)
+        intended_exit = next(
+            record
+            for record in records
+            if record["event_type"] == LIFECYCLE_INTENDED_EXIT
+        )
+        self.assertEqual(intended_exit["reason"], OPENING_ORB_TIME_EXIT_REASON)
+
+    def test_opening_orb_uses_dedicated_one_percent_trail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+                risk_profile=RISK_PROFILE_OPENING_ORB,
+            )
+            trail = TrailingStopBot(
+                replace(config(), opening_orb_trail_percent=Decimal("1.00")),
+                FakeClient({SOXL: bars("100", "101")}),
+                state_store,
+                None,
+                LifecycleLedger(Path(tmpdir) / "lifecycle.jsonl"),
+            )._effective_trail_percent(SOXL)
+
+        self.assertEqual(trail, Decimal("1.00"))
+
+    def test_opening_orb_disabled_preserves_slow_sma_warmup(self) -> None:
+        now = datetime(2026, 8, 19, 13, 46, 10, tzinfo=timezone.utc)
+        client = self.opening_orb_client(
+            datetime(2026, 8, 19, 13, 45, tzinfo=timezone.utc)
+        )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_orb_enabled=False,
+                ),
+            )
+
+        self.assertEqual(client.buys, [])
+        self.assertIn("regime=WARMUP active_bot=NONE", output)
+        self.assertEqual(status.action_taken, "collecting_data")
+
+    def test_opening_orb_is_one_attempt_per_session_after_exit(self) -> None:
+        now = datetime(2026, 8, 19, 13, 47, 10, tzinfo=timezone.utc)
+        for terminal_field in ("stopped_out_at", "exited_at"):
+            with self.subTest(terminal_field=terminal_field):
+                client = self.opening_orb_client(
+                    datetime(2026, 8, 19, 13, 46, tzinfo=timezone.utc)
+                )
+
+                def setup_state(state_store: BotStateStore) -> None:
+                    state_store.set_momentum_state(
+                        {
+                            "session_date": "2026-08-19",
+                            "entered_at": "2026-08-19T13:46:00+00:00",
+                            "entry_reason": OPENING_ORB_ENTRY_REASON,
+                            "entry_family": "opening_orb",
+                            "opening_orb": True,
+                            terminal_field: "2026-08-19T13:46:30+00:00",
+                        }
+                    )
+
+                with patched_bot_time(now):
+                    _output, status = self.run_bot(
+                        client,
+                        setup_state=setup_state,
+                        bot_config=replace(
+                            config(),
+                            fast_sma_minutes=5,
+                            slow_sma_minutes=20,
+                            opening_orb_enabled=True,
+                        ),
+                    )
+
+                self.assertEqual(client.buys, [])
+                self.assertEqual(status.action_taken, "collecting_data")
+
+    def test_opening_orb_position_keeps_authority_after_entry_window(self) -> None:
+        now = datetime(2026, 8, 19, 13, 52, 10, tzinfo=timezone.utc)
+        latest = datetime(2026, 8, 19, 13, 51, tzinfo=timezone.utc)
+        client = FakeClient(
+            {
+                SOXL: bars(*(["100"] * 20 + ["101.5"]), latest_at=latest),
+                SOXS: bars(*(["10"] * 20 + ["9.65"]), latest_at=latest),
+            }
+        )
+        client.positions[SOXL] = {
+            "symbol": SOXL,
+            "qty": "8",
+            "avg_entry_price": "101.50",
+            "current_price": "101.75",
+            "market_value": "814",
+            "unrealized_pl": "2",
+            "unrealized_plpc": "0.00246",
+        }
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_momentum_state(
+                {
+                    "session_date": "2026-08-19",
+                    "entered_at": "2026-08-19T13:46:00+00:00",
+                    "entry_reason": OPENING_ORB_ENTRY_REASON,
+                    "entry_family": "opening_orb",
+                    "opening_orb": True,
+                    "exited_at": None,
+                    "stopped_out_at": None,
+                }
+            )
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+                risk_profile=RISK_PROFILE_OPENING_ORB,
+            )
+
+        with patched_bot_time(now):
+            output, status = self.run_bot(
+                client,
+                setup_state=setup_state,
+                bot_config=replace(
+                    config(),
+                    fast_sma_minutes=5,
+                    slow_sma_minutes=20,
+                    opening_orb_enabled=True,
+                ),
+            )
+
+        self.assertIn("SOXL ORB maintaining", output)
+        self.assertEqual(status.active_bot, MOMENTUM_BOT)
+        self.assertEqual(status.routed_symbol, SOXL)
+        self.assertEqual(client.sells, [])
 
     def test_warmup_blocks_regime_routing_until_slow_sma_history_exists(self) -> None:
         client = FakeClient({"SOXL": bars("100", "99")})

@@ -120,6 +120,17 @@ OPENING_IMPULSE_SOURCE_RECOVERY_MAX_PERCENT = Decimal("1.25")
 OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT = Decimal("-9.00")
 OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN = 2
 OPENING_IMPULSE_ENTRY_REASON = "inverse_cascade_opening_impulse_confirmed"
+OPENING_ORB_MODE = "OPENING_ORB"
+OPENING_ORB_RANGE_MINUTES = 15
+OPENING_ORB_ENTRY_WINDOW_MINUTES = 20
+OPENING_ORB_BREAKOUT_BUFFER_PERCENT = Decimal("0.10")
+OPENING_ORB_SOURCE_CURRENT_MIN_PERCENT = Decimal("1.00")
+OPENING_ORB_SOURCE_EXTENSION_MAX_PERCENT = Decimal("9.00")
+OPENING_ORB_INVERSE_CURRENT_MAX_PERCENT = Decimal("-0.50")
+OPENING_ORB_TRAIL_PERCENT = Decimal("1.00")
+OPENING_ORB_EXIT_MINUTE_OF_DAY = 9 * 60 + 55
+OPENING_ORB_ENTRY_REASON = "momentum_opening_orb_confirmed"
+OPENING_ORB_TIME_EXIT_REASON = "momentum_opening_orb_time_exit"
 INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES = 5
 INVERSE_CASCADE_PROVEN_MFE_PERCENT = Decimal("0.50")
 INVERSE_CASCADE_PROVEN_TRAIL_PERCENT = Decimal("6.00")
@@ -210,6 +221,7 @@ ENTRY_INITIATOR_BOT = "bot"
 ENTRY_INITIATOR_OPERATOR = "operator"
 RISK_PROFILE_AUTONOMOUS = "autonomous_specialist"
 RISK_PROFILE_OPERATOR_FRESH_1_5 = "operator_fresh_1_5"
+RISK_PROFILE_OPENING_ORB = "opening_orb_1_0"
 OPERATOR_ENTRY_TRAIL_PERCENT = Decimal("1.5")
 POSITION_LIFECYCLE_OPENING = "OPENING"
 POSITION_LIFECYCLE_OPEN = "OPEN"
@@ -453,6 +465,23 @@ class BotConfig:
     opening_impulse_source_new_low_count_min: int = (
         OPENING_IMPULSE_SOURCE_NEW_LOW_COUNT_MIN
     )
+    opening_orb_enabled: bool = False
+    opening_orb_range_minutes: int = OPENING_ORB_RANGE_MINUTES
+    opening_orb_entry_window_minutes: int = OPENING_ORB_ENTRY_WINDOW_MINUTES
+    opening_orb_breakout_buffer_percent: Decimal = (
+        OPENING_ORB_BREAKOUT_BUFFER_PERCENT
+    )
+    opening_orb_source_current_min_percent: Decimal = (
+        OPENING_ORB_SOURCE_CURRENT_MIN_PERCENT
+    )
+    opening_orb_source_extension_max_percent: Decimal = (
+        OPENING_ORB_SOURCE_EXTENSION_MAX_PERCENT
+    )
+    opening_orb_inverse_current_max_percent: Decimal = (
+        OPENING_ORB_INVERSE_CURRENT_MAX_PERCENT
+    )
+    opening_orb_trail_percent: Decimal = OPENING_ORB_TRAIL_PERCENT
+    opening_orb_exit_minute_of_day: int = OPENING_ORB_EXIT_MINUTE_OF_DAY
     inverse_cascade_route_invalidation_grace_minutes: int = (
         INVERSE_CASCADE_ROUTE_INVALIDATION_GRACE_MINUTES
     )
@@ -831,6 +860,82 @@ class BotConfig:
                 "OPENING_IMPULSE_SOURCE_EXTENSION_MIN_PERCENT must be below "
                 "OPENING_IMPULSE_SOURCE_CURRENT_MAX_PERCENT"
             )
+        opening_orb_range_minutes = env_int(
+            "OPENING_ORB_RANGE_MINUTES",
+            OPENING_ORB_RANGE_MINUTES,
+        )
+        opening_orb_entry_window_minutes = env_int(
+            "OPENING_ORB_ENTRY_WINDOW_MINUTES",
+            OPENING_ORB_ENTRY_WINDOW_MINUTES,
+        )
+        opening_orb_exit_minute_of_day = env_int(
+            "OPENING_ORB_EXIT_MINUTE_OF_DAY",
+            OPENING_ORB_EXIT_MINUTE_OF_DAY,
+        )
+        opening_orb_breakout_buffer_percent = env_decimal(
+            "OPENING_ORB_BREAKOUT_BUFFER_PERCENT",
+            str(OPENING_ORB_BREAKOUT_BUFFER_PERCENT),
+        )
+        opening_orb_source_current_min_percent = env_decimal(
+            "OPENING_ORB_SOURCE_CURRENT_MIN_PERCENT",
+            str(OPENING_ORB_SOURCE_CURRENT_MIN_PERCENT),
+        )
+        opening_orb_source_extension_max_percent = env_decimal(
+            "OPENING_ORB_SOURCE_EXTENSION_MAX_PERCENT",
+            str(OPENING_ORB_SOURCE_EXTENSION_MAX_PERCENT),
+        )
+        opening_orb_inverse_current_max_percent = env_decimal(
+            "OPENING_ORB_INVERSE_CURRENT_MAX_PERCENT",
+            str(OPENING_ORB_INVERSE_CURRENT_MAX_PERCENT),
+        )
+        opening_orb_trail_percent = env_decimal(
+            "OPENING_ORB_TRAIL_PERCENT",
+            str(OPENING_ORB_TRAIL_PERCENT),
+        )
+        session_open_minute = 9 * 60 + 30
+        if opening_orb_range_minutes < 2:
+            raise BotError("OPENING_ORB_RANGE_MINUTES must be at least 2")
+        if (
+            opening_orb_entry_window_minutes
+            <= opening_orb_range_minutes + 1
+        ):
+            raise BotError(
+                "OPENING_ORB_ENTRY_WINDOW_MINUTES must leave time for a completed confirmation bar"
+            )
+        if (
+            session_open_minute + opening_orb_entry_window_minutes
+            >= opening_orb_exit_minute_of_day
+        ):
+            raise BotError(
+                "OPENING_ORB_EXIT_MINUTE_OF_DAY must be later than the entry window"
+            )
+        if not (
+            session_open_minute < opening_orb_exit_minute_of_day <= 16 * 60
+        ):
+            raise BotError(
+                "OPENING_ORB_EXIT_MINUTE_OF_DAY must be during the regular session"
+            )
+        if opening_orb_breakout_buffer_percent < 0:
+            raise BotError(
+                "OPENING_ORB_BREAKOUT_BUFFER_PERCENT must be at least 0"
+            )
+        if opening_orb_source_current_min_percent <= 0:
+            raise BotError(
+                "OPENING_ORB_SOURCE_CURRENT_MIN_PERCENT must be greater than 0"
+            )
+        if (
+            opening_orb_source_extension_max_percent
+            <= opening_orb_source_current_min_percent
+        ):
+            raise BotError(
+                "OPENING_ORB_SOURCE_EXTENSION_MAX_PERCENT must exceed the current-move minimum"
+            )
+        if opening_orb_inverse_current_max_percent >= 0:
+            raise BotError(
+                "OPENING_ORB_INVERSE_CURRENT_MAX_PERCENT must be below 0"
+            )
+        if opening_orb_trail_percent <= 0:
+            raise BotError("OPENING_ORB_TRAIL_PERCENT must be greater than 0")
         inverse_cascade_trail_percent = env_decimal(
             "INVERSE_CASCADE_TRAIL_PERCENT",
             str(INVERSE_CASCADE_TRAIL_PERCENT),
@@ -1095,6 +1200,23 @@ class BotConfig:
             opening_impulse_source_new_low_count_min=(
                 opening_impulse_source_new_low_count_min
             ),
+            opening_orb_enabled=env_bool("OPENING_ORB_ENABLED", False),
+            opening_orb_range_minutes=opening_orb_range_minutes,
+            opening_orb_entry_window_minutes=opening_orb_entry_window_minutes,
+            opening_orb_breakout_buffer_percent=(
+                opening_orb_breakout_buffer_percent
+            ),
+            opening_orb_source_current_min_percent=(
+                opening_orb_source_current_min_percent
+            ),
+            opening_orb_source_extension_max_percent=(
+                opening_orb_source_extension_max_percent
+            ),
+            opening_orb_inverse_current_max_percent=(
+                opening_orb_inverse_current_max_percent
+            ),
+            opening_orb_trail_percent=opening_orb_trail_percent,
+            opening_orb_exit_minute_of_day=opening_orb_exit_minute_of_day,
             inverse_cascade_route_invalidation_grace_minutes=(
                 inverse_cascade_route_invalidation_grace_minutes
             ),
@@ -1813,6 +1935,15 @@ class BotRoute:
     active_bot: str
     routed_symbol: str | None
     allows_entry: bool
+
+
+@dataclass(frozen=True)
+class OpeningRouteSignal:
+    signal: RegimeSignal
+    snapshot: SmaSnapshot
+    route: BotRoute
+    required_bars: int
+    family: str
 
 
 @dataclass(frozen=True)
@@ -2792,6 +2923,7 @@ class TrailingStopBot:
             print(f"[RISK] {symbol}: trailing stop breached; submitting fractional market sell.")
             if not operator_entry:
                 self._mark_inverse_cascade_trailing_stop_lockout(symbol)
+                self._mark_opening_orb_trailing_stop_lockout(symbol)
 
         if exit_reason:
             lifecycle_context = self._position_exit_lifecycle_context(
@@ -2866,6 +2998,22 @@ class TrailingStopBot:
         state["stopped_out_reason"] = "trailing_stop_breached"
         state["invalidation_started_at"] = None
         self.state_store.set_inverse_cascade_state(state)
+
+    def _mark_opening_orb_trailing_stop_lockout(self, symbol: str) -> None:
+        if symbol != SOXL:
+            return
+        state = self.state_store.get_momentum_state()
+        session_date = datetime.now(timezone.utc).astimezone(NY_TZ).date().isoformat()
+        if (
+            state.get("session_date") != session_date
+            or state.get("entry_reason") != OPENING_ORB_ENTRY_REASON
+            or not state.get("entered_at")
+        ):
+            return
+        state["stopped_out_at"] = datetime.now(timezone.utc).isoformat()
+        state["stopped_out_reason"] = "trailing_stop_breached"
+        state["invalidation_started_at"] = None
+        self.state_store.set_momentum_state(state)
 
     def _inverse_cascade_tiered_proven_trail_percent(
         self,
@@ -2987,6 +3135,11 @@ class TrailingStopBot:
             == RISK_PROFILE_OPERATOR_FRESH_1_5
         ):
             return OPERATOR_ENTRY_TRAIL_PERCENT
+        if (
+            symbol == SOXL
+            and self._position_risk_profile(symbol) == RISK_PROFILE_OPENING_ORB
+        ):
+            return self.config.opening_orb_trail_percent
         if (
             symbol == SOXS
             and self.config.inverse_cascade_mode == INVERSE_CASCADE_MODE_SUSTAINED
@@ -3489,44 +3642,29 @@ class EdgeWalkerBot:
 
         detector = RegimeDetector(self.config, self.client, self.market_data)
         signal, soxl_snapshot = detector.detect()
-        opening_impulse_active = False
-        if signal is None or soxl_snapshot is None:
-            opening_signal = self._opening_impulse_warmup_signal(market_open)
-            if opening_signal is not None:
-                signal, soxl_snapshot = opening_signal
-                opening_impulse_active = True
-            else:
-                self.state_store.set_regime_state(WARMUP, Decimal("0"))
-                self._print_market_data_status(SOXL)
-                print(
-                    "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
-                    "entry_signal=False action_taken=collecting_data"
+        opening_route_signal = self._opening_route_signal(market_open)
+        opening_strategy_active = opening_route_signal is not None
+        if opening_route_signal is not None:
+            signal = opening_route_signal.signal
+            soxl_snapshot = opening_route_signal.snapshot
+        elif signal is None or soxl_snapshot is None:
+            self.state_store.set_regime_state(WARMUP, Decimal("0"))
+            self._print_market_data_status(SOXL)
+            print(
+                "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
+                "entry_signal=False action_taken=collecting_data"
+            )
+            positions = {
+                symbol: self.client.get_position(symbol)
+                for symbol in self.basket_symbols
+            }
+            if closeout_due:
+                orders = self.client.list_open_orders()
+                action_taken = self._liquidate_all_before_close(
+                    positions,
+                    orders,
+                    seconds_to_close,
                 )
-                positions = {
-                    symbol: self.client.get_position(symbol)
-                    for symbol in self.basket_symbols
-                }
-                if closeout_due:
-                    orders = self.client.list_open_orders()
-                    action_taken = self._liquidate_all_before_close(
-                        positions,
-                        orders,
-                        seconds_to_close,
-                    )
-                    return self._build_status(
-                        checked_at,
-                        market_open,
-                        next_open,
-                        next_close,
-                        account,
-                        None,
-                        None,
-                        positions,
-                        False,
-                        action_taken,
-                        regime_override=WARMUP,
-                    )
-
                 return self._build_status(
                     checked_at,
                     market_open,
@@ -3537,9 +3675,23 @@ class EdgeWalkerBot:
                     None,
                     positions,
                     False,
-                    "collecting_data",
+                    action_taken,
                     regime_override=WARMUP,
                 )
+
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                None,
+                None,
+                positions,
+                False,
+                "collecting_data",
+                regime_override=WARMUP,
+            )
 
         previous_regime_state = self.state_store.get_regime_state()
         signal = self._apply_regime_hysteresis(signal, previous_regime_state)
@@ -3551,8 +3703,8 @@ class EdgeWalkerBot:
             current_regime_state,
         )
         route = RegimeRouter().route(signal.regime)
-        if opening_impulse_active:
-            route = BotRoute(INVERSE_BOT, SOXS, True)
+        if opening_route_signal is not None:
+            route = opening_route_signal.route
         else:
             self._v9_update_momentum_context(self._v9_authority_evaluation_route(route))
             route = self._momentum_surge_route_override(route)
@@ -3611,6 +3763,25 @@ class EdgeWalkerBot:
                 "no_entry",
             )
 
+        opening_exit = self._maybe_exit_opening_orb_position(
+            positions,
+            orders,
+            signal.regime,
+        )
+        if opening_exit:
+            return self._build_status(
+                checked_at,
+                market_open,
+                next_open,
+                next_close,
+                account,
+                signal,
+                route,
+                positions,
+                False,
+                opening_exit,
+            )
+
         self._maybe_update_adaptive_posture(
             signal,
             route,
@@ -3621,8 +3792,8 @@ class EdgeWalkerBot:
         )
 
         required_stream_bars = (
-            self.config.opening_impulse_min_bars
-            if opening_impulse_active
+            opening_route_signal.required_bars
+            if opening_route_signal is not None
             else self.config.slow_sma_minutes
         )
         market_data_blocks_entries = freshness.is_stale or self._market_data_blocks_trading(
@@ -3883,7 +4054,7 @@ class EdgeWalkerBot:
             )
 
         entry_decision = self._entry_decision_for_route(route, soxl_snapshot)
-        if entry_decision.signal:
+        if entry_decision.signal and not opening_strategy_active:
             policy_decision = self._momentum_authority_entry_policy_decision(
                 route,
                 soxl_snapshot,
@@ -4102,7 +4273,10 @@ class EdgeWalkerBot:
                     route.routed_symbol,
                     owner=route.active_bot,
                     entry_initiator=ENTRY_INITIATOR_BOT,
-                    risk_profile=RISK_PROFILE_AUTONOMOUS,
+                    risk_profile=str(
+                        lifecycle_context.get("risk_profile")
+                        or RISK_PROFILE_AUTONOMOUS
+                    ),
                 )
             else:
                 self.state_store.set_position_owner(
@@ -4452,6 +4626,12 @@ class EdgeWalkerBot:
             return str(getter(symbol) or ENTRY_INITIATOR_BOT)
         return ENTRY_INITIATOR_BOT
 
+    def _position_risk_profile(self, symbol: str) -> str:
+        getter = getattr(self.state_store, "get_position_risk_profile", None)
+        if callable(getter):
+            return str(getter(symbol) or RISK_PROFILE_AUTONOMOUS)
+        return RISK_PROFILE_AUTONOMOUS
+
     def _position_uses_proven_inverse_trail(
         self,
         position_symbol: str | None,
@@ -4742,6 +4922,14 @@ class EdgeWalkerBot:
             if self._momentum_surge_context and not self._momentum_surge_context.get(
                 "reasons"
             ):
+                if self._momentum_surge_context.get("opening_orb"):
+                    return self._specialist_gate(
+                        "authority",
+                        "Authority",
+                        "pass",
+                        "hard_veto",
+                        "The paired SOXL opening-range breakout is confirmed.",
+                    )
                 return self._specialist_gate(
                     "authority",
                     "Authority",
@@ -4837,6 +5025,14 @@ class EdgeWalkerBot:
             )
         context = self._specialist_setup_context(bot_name) or {}
         reasons = self._context_reasons(context)
+        if context.get("opening_orb"):
+            return self._specialist_gate(
+                "prior_close",
+                "Prior Close",
+                "pass",
+                "hard_veto",
+                "Opening ORB uses the session open and paired ETF confirmation instead.",
+            )
         if "source_prior_close_unavailable" in reasons:
             return self._specialist_gate(
                 "prior_close",
@@ -4956,6 +5152,15 @@ class EdgeWalkerBot:
                 "The specialist entry window has closed.",
             )
         if context and not reasons:
+            if context.get("opening_orb"):
+                return self._specialist_gate(
+                    "setup",
+                    "Setup",
+                    "pass",
+                    "required",
+                    "The 15-minute opening range and confirmation bar are complete.",
+                    context.get("opening_range_minutes"),
+                )
             return self._specialist_gate(
                 "setup",
                 "Setup",
@@ -5034,6 +5239,14 @@ class EdgeWalkerBot:
                 f"Path is not clean: {self._gate_reason_label(path_reasons[0])}.",
             )
         if context:
+            if context.get("opening_orb"):
+                return self._specialist_gate(
+                    "path",
+                    "Path",
+                    "pass",
+                    "quality",
+                    "SOXL cleared the buffered range high while SOXS confirmed weakness.",
+                )
             return self._specialist_gate(
                 "path",
                 "Path",
@@ -5399,10 +5612,10 @@ class EdgeWalkerBot:
         gate_details = {
             MOMENTUM_BOT: {
                 "route": "Momentum Surge only trades SOXL when Edgewalker is routing upside exposure.",
-                "authority": "Looks for clean momentum authority, or a confirmed Surge override.",
+                "authority": "Looks for clean momentum authority, a confirmed Surge override, or the opening-range breakout lane.",
                 "prior_close": "Checks the previous session close so it does not chase an overextended open.",
-                "setup": "Waits for a sustained upside window before joining strength.",
-                "path": "Checks whether SOXL is advancing cleanly instead of whipping around.",
+                "setup": "Waits for a sustained upside window or a confirmed 15-minute opening-range breakout.",
+                "path": "Checks whether SOXL is advancing cleanly, with paired SOXS confirmation at the open.",
                 "entry_bar": "Checks that the latest bar supports the upside move.",
                 "cooldown": "Waits out any directional cooldown or session lockout.",
                 "position": "Requires the account to be flat with no pending entry order.",
@@ -5522,6 +5735,33 @@ class EdgeWalkerBot:
             ),
             "opening_inverse_entry_bar_not_up": (
                 "the latest SOXS bar did not confirm opening strength"
+            ),
+            "opening_direction_ambiguous": (
+                "bullish and bearish opening candidates conflicted"
+            ),
+            "opening_orb_path_unavailable": (
+                "opening SOXL/SOXS paths are not available yet"
+            ),
+            "opening_orb_range_unavailable": (
+                "the fifteen-minute opening range is not complete yet"
+            ),
+            "opening_orb_source_current_below_min": (
+                "SOXL has not advanced enough from the open"
+            ),
+            "opening_orb_source_overextended": (
+                "SOXL is already too extended to chase"
+            ),
+            "opening_orb_inverse_current_above_max": (
+                "SOXS has not confirmed enough opening weakness"
+            ),
+            "opening_orb_breakout_not_confirmed": (
+                "SOXL has not cleared the buffered opening-range high"
+            ),
+            "opening_orb_source_entry_bar_not_up": (
+                "the latest SOXL bar did not confirm the breakout"
+            ),
+            "opening_orb_inverse_entry_bar_not_down": (
+                "the latest SOXS bar did not confirm paired weakness"
             ),
             "source_entry_bar_not_up": "the latest SOXL bar did not confirm upside momentum",
             "source_entry_bar_not_down": "the latest SOXL bar did not confirm downside pressure",
@@ -6570,10 +6810,275 @@ class EdgeWalkerBot:
                 running_high = high_price
         return count
 
+    def _opening_route_signal(
+        self,
+        market_open: bool,
+    ) -> OpeningRouteSignal | None:
+        bearish = self._opening_impulse_warmup_signal(market_open)
+        bullish = self._opening_orb_warmup_signal(market_open)
+        candidates = [item for item in (bearish, bullish) if item is not None]
+        if len(candidates) <= 1:
+            return candidates[0] if candidates else None
+
+        maintaining = [
+            item
+            for item in candidates
+            if (
+                item.family == "opening_impulse"
+                and bool((self._inverse_cascade_context or {}).get("maintaining_opening_entry"))
+            )
+            or (
+                item.family == "opening_orb"
+                and bool((self._momentum_surge_context or {}).get("maintaining_opening_entry"))
+            )
+        ]
+        if len(maintaining) == 1:
+            return maintaining[0]
+
+        if self._inverse_cascade_context is not None:
+            self._inverse_cascade_context.setdefault("reasons", []).append(
+                "opening_direction_ambiguous"
+            )
+        if self._momentum_surge_context is not None:
+            self._momentum_surge_context.setdefault("reasons", []).append(
+                "opening_direction_ambiguous"
+            )
+        print(
+            "[OPENING] Directional authority vetoed: "
+            "both bullish and bearish opening candidates qualified."
+        )
+        return None
+
+    def _opening_route_signal_from_bars(
+        self,
+        source_bars: list[dict[str, Any]],
+        *,
+        regime: str,
+        route: BotRoute,
+        required_bars: int,
+        family: str,
+    ) -> OpeningRouteSignal | None:
+        prices = [
+            price
+            for bar in source_bars
+            if (price := self._v7_bar_decimal(bar, "c", "o")) is not None
+        ]
+        latest_bar_time = parse_market_timestamp(source_bars[-1].get("t"))
+        if len(prices) < required_bars or latest_bar_time is None:
+            return None
+        fast_values = prices[-min(self.config.fast_sma_minutes, len(prices)) :]
+        slow_values = prices
+        snapshot = SmaSnapshot(
+            symbol=SOXL,
+            price=prices[-1],
+            fast_sma=sma(fast_values),
+            slow_sma=sma(slow_values),
+            fast_now_values=fast_values,
+            fast_prev_values=[],
+            slow_now_values=slow_values,
+            slow_prev_values=[],
+            latest_bar_time=latest_bar_time,
+        )
+        signal = RegimeSignal(
+            source_symbol=SOXL,
+            price=snapshot.price,
+            fast_sma=snapshot.fast_sma,
+            slow_sma=snapshot.slow_sma,
+            gap_percent=snapshot.gap_percent,
+            regime=regime,
+        )
+        return OpeningRouteSignal(
+            signal=signal,
+            snapshot=snapshot,
+            route=route,
+            required_bars=required_bars,
+            family=family,
+        )
+
+    def _opening_orb_warmup_signal(
+        self,
+        market_open: bool,
+    ) -> OpeningRouteSignal | None:
+        if (
+            not self.config.opening_orb_enabled
+            or MOMENTUM_BOT not in self.config.enabled_bots
+            or not market_open
+        ):
+            return None
+
+        state = self._momentum_same_session_state()
+        opening_attempted = bool(
+            state.get("entered_at")
+            and state.get("entry_reason") == OPENING_ORB_ENTRY_REASON
+        )
+        maintaining_entry = bool(
+            opening_attempted
+            and not state.get("stopped_out_at")
+            and not state.get("exited_at")
+            and self._position_qty(self.client.get_position(SOXL)) > 0
+        )
+        if opening_attempted and not maintaining_entry:
+            return None
+
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        session_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+        elapsed_minutes = Decimal(str((now_ny - session_open).total_seconds() / 60))
+        if not maintaining_entry and not (
+            Decimal("0")
+            <= elapsed_minutes
+            < self.config.opening_orb_entry_window_minutes
+        ):
+            return None
+
+        source_bars = self._symbol_session_bars(SOXL)
+        inverse_bars = self._symbol_session_bars(SOXS)
+        required_bars = self.config.opening_orb_range_minutes + 1
+        if len(source_bars) < required_bars or len(inverse_bars) < required_bars:
+            return None
+
+        context = self._opening_orb_context(
+            source_bars,
+            inverse_bars,
+            elapsed_minutes,
+        )
+        if maintaining_entry:
+            context["reasons"] = []
+            context["maintaining_opening_entry"] = True
+        self._momentum_surge_context = context
+        reasons = context.get("reasons") or []
+        if reasons:
+            print(
+                "[OPENING] SOXL ORB candidate blocked: "
+                f"reason={','.join(reasons)} "
+                f"bars={len(source_bars)} "
+                f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+                f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+                f"close={self._decimal_text(context.get('source_close'))} "
+                f"breakout={self._decimal_text(context.get('opening_breakout_price'))}"
+            )
+            return None
+
+        phase = "maintaining" if maintaining_entry else "qualified"
+        print(
+            f"[OPENING] SOXL ORB {phase}: route={MOMENTUM_BOT}/{SOXL} "
+            f"bars={len(source_bars)} "
+            f"soxl={self._decimal_text(context.get('source_current_percent'))}% "
+            f"soxs={self._decimal_text(context.get('inverse_current_percent'))}% "
+            f"close={self._decimal_text(context.get('source_close'))} "
+            f"breakout={self._decimal_text(context.get('opening_breakout_price'))}"
+        )
+        return self._opening_route_signal_from_bars(
+            source_bars,
+            regime=UPTREND,
+            route=BotRoute(MOMENTUM_BOT, SOXL, True),
+            required_bars=required_bars,
+            family="opening_orb",
+        )
+
+    def _opening_orb_context(
+        self,
+        source_bars: list[dict[str, Any]],
+        inverse_bars: list[dict[str, Any]],
+        elapsed_minutes: Decimal,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "mode": OPENING_ORB_MODE,
+            "opening_orb": True,
+            "entry_family": "opening_orb",
+            "reasons": [],
+            "opening_elapsed_minutes": elapsed_minutes,
+            "opening_range_minutes": self.config.opening_orb_range_minutes,
+            "opening_entry_window_minutes": (
+                self.config.opening_orb_entry_window_minutes
+            ),
+            "opening_exit_minute_of_day": self.config.opening_orb_exit_minute_of_day,
+        }
+        reasons: list[str] = context["reasons"]
+        source_path = self._symbol_session_price_path(SOXL)
+        inverse_path = self._symbol_session_price_path(SOXS)
+        if source_path is None or inverse_path is None:
+            reasons.append("opening_orb_path_unavailable")
+            return context
+
+        range_bars = source_bars[: self.config.opening_orb_range_minutes]
+        range_highs = [
+            value
+            for bar in range_bars
+            if (value := self._v7_bar_decimal(bar, "h", "c", "o")) is not None
+        ]
+        range_lows = [
+            value
+            for bar in range_bars
+            if (value := self._v7_bar_decimal(bar, "l", "c", "o")) is not None
+        ]
+        source_close = self._v7_bar_decimal(source_bars[-1], "c", "o")
+        source_open = self._v7_bar_decimal(source_bars[-1], "o", "c")
+        inverse_close = self._v7_bar_decimal(inverse_bars[-1], "c", "o")
+        inverse_open = self._v7_bar_decimal(inverse_bars[-1], "o", "c")
+        if not range_highs or not range_lows or source_close is None:
+            reasons.append("opening_orb_range_unavailable")
+            return context
+
+        range_high = max(range_highs)
+        range_low = min(range_lows)
+        breakout_price = range_high * (
+            Decimal("1")
+            + self.config.opening_orb_breakout_buffer_percent / Decimal("100")
+        )
+        context.update(
+            {
+                "source_current_percent": source_path.current_percent,
+                "source_runup_percent": source_path.runup_percent,
+                "source_drawdown_percent": source_path.drawdown_percent,
+                "inverse_current_percent": inverse_path.current_percent,
+                "opening_range_high": range_high,
+                "opening_range_low": range_low,
+                "opening_breakout_price": breakout_price,
+                "opening_breakout_buffer_percent": (
+                    self.config.opening_orb_breakout_buffer_percent
+                ),
+                "source_close": source_close,
+                "entry_bar_soxl_direction": (
+                    "UP"
+                    if source_open is not None and source_close > source_open
+                    else "NOT_UP"
+                ),
+                "entry_bar_soxs_direction": (
+                    "DOWN"
+                    if inverse_open is not None
+                    and inverse_close is not None
+                    and inverse_close < inverse_open
+                    else "NOT_DOWN"
+                ),
+            }
+        )
+        if (
+            source_path.current_percent
+            < self.config.opening_orb_source_current_min_percent
+        ):
+            reasons.append("opening_orb_source_current_below_min")
+        if (
+            source_path.current_percent
+            > self.config.opening_orb_source_extension_max_percent
+        ):
+            reasons.append("opening_orb_source_overextended")
+        if (
+            inverse_path.current_percent
+            > self.config.opening_orb_inverse_current_max_percent
+        ):
+            reasons.append("opening_orb_inverse_current_above_max")
+        if source_close < breakout_price:
+            reasons.append("opening_orb_breakout_not_confirmed")
+        if context["entry_bar_soxl_direction"] != "UP":
+            reasons.append("opening_orb_source_entry_bar_not_up")
+        if context["entry_bar_soxs_direction"] != "DOWN":
+            reasons.append("opening_orb_inverse_entry_bar_not_down")
+        return context
+
     def _opening_impulse_warmup_signal(
         self,
         market_open: bool,
-    ) -> tuple[RegimeSignal, SmaSnapshot] | None:
+    ) -> OpeningRouteSignal | None:
         if (
             not self.config.opening_impulse_enabled
             or self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
@@ -6630,35 +7135,6 @@ class EdgeWalkerBot:
             )
             return None
 
-        prices = [
-            price
-            for bar in source_bars
-            if (price := self._v7_bar_decimal(bar, "c", "o")) is not None
-        ]
-        latest_bar_time = parse_market_timestamp(source_bars[-1].get("t"))
-        if len(prices) < self.config.opening_impulse_min_bars or latest_bar_time is None:
-            return None
-        fast_values = prices[-min(self.config.fast_sma_minutes, len(prices)) :]
-        slow_values = prices
-        snapshot = SmaSnapshot(
-            symbol=SOXL,
-            price=prices[-1],
-            fast_sma=sma(fast_values),
-            slow_sma=sma(slow_values),
-            fast_now_values=fast_values,
-            fast_prev_values=[],
-            slow_now_values=slow_values,
-            slow_prev_values=[],
-            latest_bar_time=latest_bar_time,
-        )
-        signal = RegimeSignal(
-            source_symbol=SOXL,
-            price=snapshot.price,
-            fast_sma=snapshot.fast_sma,
-            slow_sma=snapshot.slow_sma,
-            gap_percent=snapshot.gap_percent,
-            regime=DOWNTREND,
-        )
         phase = "maintaining" if maintaining_entry else "qualified"
         print(
             f"[OPENING] Impulse {phase}: route={INVERSE_BOT}/{SOXS} "
@@ -6670,7 +7146,13 @@ class EdgeWalkerBot:
             f"velocity={self._decimal_text(context.get('source_velocity_percent'))}% "
             f"new_lows={context.get('sustain_source_new_low_count', '--')}"
         )
-        return signal, snapshot
+        return self._opening_route_signal_from_bars(
+            source_bars,
+            regime=DOWNTREND,
+            route=BotRoute(INVERSE_BOT, SOXS, True),
+            required_bars=self.config.opening_impulse_min_bars,
+            family="opening_impulse",
+        )
 
     def _opening_impulse_context(
         self,
@@ -7169,8 +7651,9 @@ class EdgeWalkerBot:
         return state
 
     def _mark_momentum_entry(self, route: BotRoute, reason: str) -> None:
+        opening_orb = reason == OPENING_ORB_ENTRY_REASON
         if (
-            not self.config.momentum_route_hold_enabled
+            (not self.config.momentum_route_hold_enabled and not opening_orb)
             or route.active_bot != MOMENTUM_BOT
             or route.routed_symbol != SOXL
         ):
@@ -7180,6 +7663,15 @@ class EdgeWalkerBot:
                 "session_date": self._momentum_session_date(),
                 "entered_at": datetime.now(timezone.utc).isoformat(),
                 "entry_reason": reason,
+                "entry_family": "opening_orb" if opening_orb else "momentum",
+                "opening_orb": opening_orb,
+                "opening_exit_minute_of_day": (
+                    self.config.opening_orb_exit_minute_of_day
+                    if opening_orb
+                    else None
+                ),
+                "stopped_out_at": None,
+                "exited_at": None,
                 "invalidation_started_at": None,
                 "max_favorable_excursion_percent": None,
                 "max_favorable_price": None,
@@ -8701,6 +9193,8 @@ class EdgeWalkerBot:
             f"deepening={self._decimal_text(context.get('sustain_source_deepening_percent'))}% "
             f"new_highs={context.get('sustain_source_new_high_count', '--')}"
         )
+        if context.get("opening_orb"):
+            return EntryDecision(True, OPENING_ORB_ENTRY_REASON)
         return EntryDecision(
             True,
             f"momentum_surge_{str(context.get('mode')).lower()}_confirmed",
@@ -8751,6 +9245,58 @@ class EdgeWalkerBot:
                 "momentum_entry_family": "legacy",
                 "momentum_surge_confirmed": False,
             }
+            if reason == OPENING_ORB_ENTRY_REASON:
+                orb_context = self._momentum_surge_context or {}
+                context.update(
+                    {
+                        "entry_family": "opening_orb",
+                        "momentum_entry_family": "opening_orb",
+                        "opening_orb": True,
+                        "opening_orb_confirmed": True,
+                        "risk_profile": RISK_PROFILE_OPENING_ORB,
+                        "opening_elapsed_minutes": orb_context.get(
+                            "opening_elapsed_minutes"
+                        ),
+                        "opening_range_minutes": orb_context.get(
+                            "opening_range_minutes"
+                        ),
+                        "opening_entry_window_minutes": orb_context.get(
+                            "opening_entry_window_minutes"
+                        ),
+                        "opening_range_high": orb_context.get(
+                            "opening_range_high"
+                        ),
+                        "opening_range_low": orb_context.get("opening_range_low"),
+                        "opening_breakout_price": orb_context.get(
+                            "opening_breakout_price"
+                        ),
+                        "opening_breakout_buffer_percent": orb_context.get(
+                            "opening_breakout_buffer_percent"
+                        ),
+                        "opening_exit_minute_of_day": orb_context.get(
+                            "opening_exit_minute_of_day"
+                        ),
+                        "source_current_percent": orb_context.get(
+                            "source_current_percent"
+                        ),
+                        "source_runup_percent": orb_context.get(
+                            "source_runup_percent"
+                        ),
+                        "source_drawdown_percent": orb_context.get(
+                            "source_drawdown_percent"
+                        ),
+                        "inverse_current_percent": orb_context.get(
+                            "inverse_current_percent"
+                        ),
+                        "entry_bar_soxl_direction": orb_context.get(
+                            "entry_bar_soxl_direction"
+                        ),
+                        "entry_bar_soxs_direction": orb_context.get(
+                            "entry_bar_soxs_direction"
+                        ),
+                    }
+                )
+                return context
             if not reason.startswith("momentum_surge_"):
                 return context
 
@@ -9318,6 +9864,111 @@ class EdgeWalkerBot:
             state["invalidation_started_at"] = None
             self.state_store.set_momentum_state(state)
 
+    def _maybe_exit_opening_orb_position(
+        self,
+        positions: dict[str, dict[str, Any] | None],
+        orders: list[dict[str, Any]],
+        regime: str,
+    ) -> str | None:
+        position = positions.get(SOXL)
+        if self._position_qty(position) <= 0:
+            return None
+        if self._position_risk_profile(SOXL) != RISK_PROFILE_OPENING_ORB:
+            return None
+
+        now_ny = datetime.now(timezone.utc).astimezone(NY_TZ)
+        minute_of_day = now_ny.hour * 60 + now_ny.minute
+        if minute_of_day < self.config.opening_orb_exit_minute_of_day:
+            return None
+
+        symbol_orders = [order for order in orders if order.get("symbol") == SOXL]
+        if any(order.get("side") == "sell" for order in symbol_orders):
+            print(
+                "[OPENING] SOXL ORB time exit already has a sell order pending."
+            )
+            return "wait_for_opening_orb_time_exit"
+        if any(order.get("side") == "buy" for order in symbol_orders):
+            print(
+                "[OPENING] SOXL ORB time exit is waiting for its buy order to resolve."
+            )
+            return "wait_for_opening_orb_entry_order"
+
+        qty = self._position_qty(position).quantize(
+            FRACTIONAL_QTY_STEP,
+            rounding=ROUND_DOWN,
+        )
+        if qty <= 0:
+            return None
+
+        lifecycle_context = {
+            "entry_initiator": self._position_entry_initiator(SOXL),
+            "exit_initiator": ENTRY_INITIATOR_BOT,
+            "entry_family": "opening_orb",
+            "opening_orb": True,
+            "opening_exit_minute_of_day": (
+                self.config.opening_orb_exit_minute_of_day
+            ),
+            "risk_profile": RISK_PROFILE_OPENING_ORB,
+            "strategy_owner": MOMENTUM_BOT,
+            "operator_affected": False,
+        }
+        print(
+            "[OPENING] SOXL ORB handoff reached; "
+            f"selling qty={format_decimal(qty)} before normal routing resumes."
+        )
+        self._record_lifecycle(
+            LIFECYCLE_INTENDED_EXIT,
+            bot=MOMENTUM_BOT,
+            symbol=SOXL,
+            side="sell",
+            qty=qty,
+            reason=OPENING_ORB_TIME_EXIT_REASON,
+            regime=regime,
+            lifecycle_context=lifecycle_context,
+        )
+        try:
+            order = self.client.submit_market_sell_qty(SOXL, qty)
+        except BotError as exc:
+            self._record_lifecycle(
+                LIFECYCLE_ORDER_REJECTED,
+                bot=MOMENTUM_BOT,
+                symbol=SOXL,
+                side="sell",
+                qty=qty,
+                reason=OPENING_ORB_TIME_EXIT_REASON,
+                regime=regime,
+                error=str(exc),
+                broker_constraint=self._broker_rejection_payload(exc, "sell", SOXL),
+                lifecycle_context=lifecycle_context,
+            )
+            raise
+        self._record_lifecycle(
+            LIFECYCLE_ORDER_SUBMITTED,
+            bot=MOMENTUM_BOT,
+            symbol=SOXL,
+            side="sell",
+            qty=qty,
+            reason=OPENING_ORB_TIME_EXIT_REASON,
+            regime=regime,
+            order=order,
+            lifecycle_context=lifecycle_context,
+        )
+        self.order_tracker.track_submitted_order(
+            order,
+            MOMENTUM_BOT,
+            OPENING_ORB_TIME_EXIT_REASON,
+            lifecycle_context,
+        )
+        state = self._momentum_same_session_state()
+        if state.get("entry_reason") == OPENING_ORB_ENTRY_REASON:
+            state["exited_at"] = datetime.now(timezone.utc).isoformat()
+            state["exit_reason"] = OPENING_ORB_TIME_EXIT_REASON
+            state["invalidation_started_at"] = None
+            self.state_store.set_momentum_state(state)
+        if str((order or {}).get("status") or "").lower() == "filled":
+            self.state_store.clear_symbol(SOXL)
+        return OPENING_ORB_TIME_EXIT_REASON
+
     def _maybe_exit_momentum_authority_revoked_position(
         self,
         route: BotRoute,
@@ -9339,6 +9990,8 @@ class EdgeWalkerBot:
         if owner != MOMENTUM_BOT:
             return None
         if self._position_entry_initiator(SOXL) == ENTRY_INITIATOR_OPERATOR:
+            return None
+        if self._position_risk_profile(SOXL) == RISK_PROFILE_OPENING_ORB:
             return None
 
         block_reason = self._momentum_authority_block_reason()

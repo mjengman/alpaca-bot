@@ -15,8 +15,8 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 
-COHORT_ID = "edgewalker-growth-cohort-2"
-COHORT_NAME = "Edgewalker Growth Cohort 2"
+COHORT_ID = "edgewalker-growth-cohort-3"
+COHORT_NAME = "Edgewalker Growth Cohort 3"
 COHORT_STATUS_ACTIVE = "ACTIVE"
 COHORT_STATUS_COMPLETE = "COMPLETE"
 COHORT_STATUS_WAITING = "WAITING"
@@ -34,7 +34,7 @@ DEFAULT_MANIFEST_PATH = (
     PROJECT_ROOT
     / "research"
     / COHORT_ID
-    / "launch-readiness-manifest-v2.json"
+    / "launch-readiness-manifest-v3.json"
 )
 NY_TZ = ZoneInfo("America/New_York")
 OPERATOR_EVENT_TYPES = {

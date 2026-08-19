@@ -297,6 +297,18 @@ RESEARCH_SPREADSHEET_COLUMNS = [
     "v9_momentum_context_early_non_warmup_transitions_per_hour",
     "v9_momentum_context_early_window_minutes",
     "v9_momentum_context_invalidation_reason",
+    "momentum_surge_trades",
+    "momentum_surge_pl",
+    "momentum_legacy_trades",
+    "momentum_legacy_pl",
+    "opening_orb_trades",
+    "opening_orb_pl",
+    "inverse_cascade_trades",
+    "inverse_cascade_pl",
+    "inverse_legacy_trades",
+    "inverse_legacy_pl",
+    "opening_impulse_trades",
+    "opening_impulse_pl",
     *OPERATOR_SPREADSHEET_COLUMNS,
 ]
 ALLOWED_UI_ORIGINS = {
@@ -365,6 +377,12 @@ class RunnerSnapshot:
     auto_bank_day_target_percent: str
     fast_sma_minutes: int
     slow_sma_minutes: int
+    opening_orb_enabled: bool
+    opening_orb_range_minutes: int
+    opening_orb_entry_window_minutes: int
+    opening_orb_breakout_buffer_percent: str
+    opening_orb_trail_percent: str
+    opening_orb_exit_minute_of_day: int
     cycle_count: int
     last_started_at: str | None
     last_stopped_at: str | None
@@ -3406,6 +3424,18 @@ class BotRunner:
             ),
             fast_sma_minutes=self._config.fast_sma_minutes,
             slow_sma_minutes=self._config.slow_sma_minutes,
+            opening_orb_enabled=self._config.opening_orb_enabled,
+            opening_orb_range_minutes=self._config.opening_orb_range_minutes,
+            opening_orb_entry_window_minutes=(
+                self._config.opening_orb_entry_window_minutes
+            ),
+            opening_orb_breakout_buffer_percent=str(
+                self._config.opening_orb_breakout_buffer_percent
+            ),
+            opening_orb_trail_percent=str(self._config.opening_orb_trail_percent),
+            opening_orb_exit_minute_of_day=(
+                self._config.opening_orb_exit_minute_of_day
+            ),
             cycle_count=self._cycle_count,
             last_started_at=self._last_started_at,
             last_stopped_at=self._last_stopped_at,
@@ -5079,6 +5109,25 @@ def _config_log_payload(config: BotConfig) -> dict[str, Any]:
         "opening_impulse_source_new_low_count_min": (
             config.opening_impulse_source_new_low_count_min
         ),
+        "opening_orb_enabled": config.opening_orb_enabled,
+        "opening_orb_range_minutes": config.opening_orb_range_minutes,
+        "opening_orb_entry_window_minutes": (
+            config.opening_orb_entry_window_minutes
+        ),
+        "opening_orb_breakout_buffer_percent": str(
+            config.opening_orb_breakout_buffer_percent
+        ),
+        "opening_orb_source_current_min_percent": str(
+            config.opening_orb_source_current_min_percent
+        ),
+        "opening_orb_source_extension_max_percent": str(
+            config.opening_orb_source_extension_max_percent
+        ),
+        "opening_orb_inverse_current_max_percent": str(
+            config.opening_orb_inverse_current_max_percent
+        ),
+        "opening_orb_trail_percent": str(config.opening_orb_trail_percent),
+        "opening_orb_exit_minute_of_day": config.opening_orb_exit_minute_of_day,
         "close_liquidate_minutes": config.close_liquidate_minutes,
         "regime_gap_threshold": str(config.regime_gap_threshold),
         "regime_exit_gap_threshold": str(config.regime_exit_gap_threshold),
@@ -5593,6 +5642,23 @@ def config_from_payload(payload: dict[str, Any]) -> BotConfig:
         opening_impulse_source_new_low_count_min=(
             base.opening_impulse_source_new_low_count_min
         ),
+        opening_orb_enabled=base.opening_orb_enabled,
+        opening_orb_range_minutes=base.opening_orb_range_minutes,
+        opening_orb_entry_window_minutes=base.opening_orb_entry_window_minutes,
+        opening_orb_breakout_buffer_percent=(
+            base.opening_orb_breakout_buffer_percent
+        ),
+        opening_orb_source_current_min_percent=(
+            base.opening_orb_source_current_min_percent
+        ),
+        opening_orb_source_extension_max_percent=(
+            base.opening_orb_source_extension_max_percent
+        ),
+        opening_orb_inverse_current_max_percent=(
+            base.opening_orb_inverse_current_max_percent
+        ),
+        opening_orb_trail_percent=base.opening_orb_trail_percent,
+        opening_orb_exit_minute_of_day=base.opening_orb_exit_minute_of_day,
         inverse_cascade_route_invalidation_grace_minutes=(
             inverse_cascade_route_invalidation_grace_minutes
         ),

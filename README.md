@@ -89,7 +89,14 @@ Current production posture: full-roster EdgeWalker Router.
 - MomentumBot trades SOXL only when upside continuation has earned permission.
   The legacy StrictAuthority/BalancedTight path remains available, and the
   default production upside edge is the high-conviction Momentum Surge lane
-  (`MOMENTUM_SURGE_MODE=SUSTAINED`).
+  (`MOMENTUM_SURGE_MODE=SUSTAINED`). When `OPENING_ORB_ENABLED=true`, a separate
+  bullish opening lane builds the first 15-minute SOXL range, waits for a
+  completed confirmation bar, and enters only when SOXL clears the range high
+  by the configured buffer, is at least 1% above its session open, and paired
+  SOXS weakness confirms. The lane rejects excessive extension, gets one
+  attempt per session, uses a dedicated 1% trailing stop, and exits at 9:55 ET
+  if neither its trail nor Auto Bank has already ended the trade. Normal routing
+  resumes after that handoff.
 - ChopBot trades SOXL mean reversion through `Chop_Gap020` with
   `CHOP_PERMISSION_MODE=FIREWALL`, primarily when directional authority is
   absent and the runtime observer does not flag dirty tape or deep source
@@ -104,6 +111,10 @@ Current production posture: full-roster EdgeWalker Router.
   one-entry lockout, and Auto Bank handling as the mature-session specialist.
   The final five minutes demand stronger SOXS confirmation, and an excessively
   fast selloff is rejected to avoid chasing the exhaustion end of a waterfall.
+- The two opening lanes are intentionally asymmetric. Bearish openings qualify
+  through fast impulse/path evidence; bullish openings qualify through an
+  opening-range breakout. If both ever appear qualified in the same cycle,
+  opening authority fails closed instead of guessing a direction.
 - BalancedPure is a runtime observer/probe only. It supplies authority context
   through `BALANCEDPURE_RUNTIME_OBSERVER_ENABLED=true` and has no execution
   rights in the live router.
