@@ -47,6 +47,7 @@ const state = {
   lastResearchResult: null,
   activeStrategyConfig: null,
   operatorBankStatus: null,
+  operatorControlStatus: null,
   tooltipsSetup: false,
 };
 
@@ -224,6 +225,9 @@ const els = {
   researchResults: document.querySelector("#researchResults"),
   applyGoLiveRouter: document.querySelector("#applyGoLiveRouterButton"),
   liveStrategyBadge: document.querySelector("#liveStrategyBadge"),
+  enterNow: document.querySelector("#enterNowButton"),
+  exitNow: document.querySelector("#exitNowButton"),
+  operatorActionStatus: document.querySelector("#operatorActionStatus"),
   bankDay: document.querySelector("#bankDayButton"),
   bankDayStatus: document.querySelector("#bankDayStatus"),
   runOnce: document.querySelector("#runOnceButton"),
@@ -618,11 +622,15 @@ function renderBankDayStatus(data) {
   const active = Boolean(status.active || status.operator_banked);
   const marketOpen = Boolean(data.edgewalker_status?.market_open);
   const shouldShowButton =
-    state.running && marketOpen && !active && !state.researchModeEnabled;
+    state.running && !active && !state.researchModeEnabled;
 
   if (els.bankDay) {
     els.bankDay.hidden = !shouldShowButton;
-    els.bankDay.disabled = state.busy || !shouldShowButton;
+    els.bankDay.disabled =
+      state.busy || !shouldShowButton || !marketOpen;
+    els.bankDay.dataset.tooltip = marketOpen
+      ? "Flatten any open position and halt new entries for the rest of the session."
+      : "Bank Day is unavailable while the market is closed.";
   }
 
   if (!els.bankDayStatus) {
@@ -690,6 +698,110 @@ function renderBankDayStatus(data) {
   els.bankDayStatus.dataset.tooltip =
     status.message ||
     "New entries are halted until the next regular market session.";
+}
+
+function renderOperatorControls(data) {
+  const status = data.edgewalker_status || {};
+  const controls = data.operator_control_status || {};
+  const exitState = controls.exit_now || {};
+  state.operatorControlStatus = controls;
+
+  const bankActive = Boolean(
+    data.operator_bank_status?.active ||
+      data.operator_bank_status?.operator_banked,
+  );
+  const exitInProgress = Boolean(
+    controls.exit_in_progress || exitState.active,
+  );
+  const marketOpen = Boolean(status.market_open);
+  const routeSymbol = status.routed_symbol || "";
+  const routeBot = status.active_bot || "";
+  const hasPosition =
+    Boolean(status.position_symbol) &&
+    (numberOrNull(status.position_qty) || 0) > 0;
+  const pendingOrders = Array.isArray(data.order_state?.pending_orders)
+    ? data.order_state.pending_orders
+    : [];
+  const hasPendingOrder = pendingOrders.length > 0;
+  const visible =
+    state.running &&
+    !bankActive &&
+    !state.researchModeEnabled;
+  const enterReady =
+    visible &&
+    marketOpen &&
+    !exitInProgress &&
+    !hasPosition &&
+    !hasPendingOrder &&
+    Boolean(routeSymbol && routeBot) &&
+    status.data_status === "LIVE";
+  const exitReady =
+    visible &&
+    marketOpen &&
+    !exitInProgress &&
+    (hasPosition || hasPendingOrder);
+
+  if (els.enterNow) {
+    els.enterNow.hidden = !visible;
+    els.enterNow.disabled = state.busy || !enterReady;
+    els.enterNow.textContent = routeSymbol
+      ? `Enter ${routeSymbol} Now`
+      : "Enter Now";
+    const sizing =
+      status.position_sizing_mode === "DYNAMIC"
+        ? `${status.position_allocation_percent || "--"}% of buying power`
+        : `${formatMoney(status.effective_position_notional)} fixed`;
+    els.enterNow.dataset.tooltip = !marketOpen
+      ? "Enter Now is unavailable while the market is closed."
+      : enterReady
+      ? `Enter ${routeSymbol} immediately using ${sizing} (${formatMoney(
+          status.effective_position_notional,
+        )} effective) with a fresh 1.5% trailing stop. This trade is classified as operator-initiated.`
+      : hasPosition
+      ? `A ${status.position_symbol} position is already open.`
+      : hasPendingOrder
+      ? "Wait for the pending order to resolve."
+      : exitInProgress
+      ? "Exit Now is still flattening the account."
+      : "Enter Now requires an open market, a current route, and LIVE data.";
+  }
+
+  if (els.exitNow) {
+    els.exitNow.hidden = !visible;
+    els.exitNow.disabled = state.busy || !exitReady;
+    els.exitNow.textContent = exitInProgress ? "Exiting…" : "Exit Now";
+    els.exitNow.dataset.tooltip = !marketOpen
+      ? "Exit Now is unavailable while the market is closed."
+      : exitInProgress
+      ? "Edgewalker is flattening exposure; autonomous cycles resume as soon as the account is flat."
+      : exitReady
+      ? "Flatten the current position or cancel a pending entry. Edgewalker remains on and may enter again on a later cycle."
+      : "Exit Now becomes available when a position or entry order is active.";
+  }
+
+  if (els.bankDay && exitInProgress) {
+    els.bankDay.disabled = true;
+  }
+
+  if (!els.operatorActionStatus) {
+    return;
+  }
+  if (!exitState.pressed_at) {
+    els.operatorActionStatus.hidden = true;
+    els.operatorActionStatus.textContent = "";
+    delete els.operatorActionStatus.dataset.tooltip;
+    return;
+  }
+  const flattenStatus = exitState.flatten_status || "pending";
+  els.operatorActionStatus.hidden = false;
+  els.operatorActionStatus.textContent = exitInProgress
+    ? `Exit Now at ${formatTime(exitState.pressed_at, "--")} · ${formatLabel(
+        flattenStatus,
+      )}`
+    : `Exit Now complete · autonomy resumed`;
+  els.operatorActionStatus.dataset.tooltip = exitInProgress
+    ? "New entries are temporarily blocked only until the flatten completes."
+    : "Exit Now did not halt the session. Edgewalker is free to trade the next qualified cycle.";
 }
 
 function validateAllocationPercent(value) {
@@ -2020,6 +2132,8 @@ function renderAdaptiveStatus(status) {
 function renderPerformance(performance) {
   const realizedPl = performance?.session_realized_pl ?? null;
   const tradeCount = performance?.session_trade_count ?? 0;
+  const autonomousTradeCount = performance?.autonomous_trade_count ?? tradeCount;
+  const operatorTradeCount = performance?.operator_affected_trade_count ?? 0;
   const lastTradePl = performance?.last_trade_realized_pl ?? null;
   const reconciliationConfidence =
     performance?.reconciliation_confidence || "UNKNOWN";
@@ -2042,6 +2156,12 @@ function renderPerformance(performance) {
     els.sessionTrades.textContent = String(tradeCount || 0);
     setTone(els.sessionTrades, 0);
   }
+  els.sessionTrades.dataset.tooltip =
+    `${autonomousTradeCount} autonomous expectancy trade${
+      autonomousTradeCount === 1 ? "" : "s"
+    } · ${operatorTradeCount} operator-affected trade${
+      operatorTradeCount === 1 ? "" : "s"
+    }. Account P/L includes both; specialist cards exclude operator-affected trades.`;
 
   renderBotPerformance(performance?.bot_performance || []);
 }
@@ -2053,7 +2173,9 @@ function renderBotPerformance(botPerformance) {
     0,
   );
   els.botPerformanceSummary.textContent =
-    totalTrades > 0 ? `${totalTrades} closed trades` : "No closed trades";
+    totalTrades > 0
+      ? `${totalTrades} autonomous closed trades`
+      : "No autonomous closed trades";
   els.botPerformanceSummary.classList.remove(
     "is-positive",
     "is-negative",
@@ -6352,6 +6474,8 @@ function explainPositionSection(status, performance) {
       </p>
       <div class="explain-metrics">
         ${explainMetric("Owner", formatLabel(status.position_owner || status.active_bot || "Unknown"))}
+        ${explainMetric("Initiator", formatLabel(status.position_entry_initiator || "bot"))}
+        ${explainMetric("Risk profile", formatLabel(status.position_risk_profile || "autonomous specialist"))}
         ${explainMetric("Entry", formatPrice(status.position_avg_entry_price))}
         ${explainMetric("Position P/L", plText, toneClassForValue(pl))}
         ${explainMetric(`${riskLabel} price`, riskPriceText)}
@@ -6929,6 +7053,7 @@ function render(data) {
   els.runOnce.disabled = state.running || state.busy;
   els.toggle.disabled = state.busy;
   renderBankDayStatus(data);
+  renderOperatorControls(data);
   const settingsLocked = state.running || state.busy;
   lockedStrategyInputs.forEach((input) => {
     input.disabled = true;
@@ -6998,10 +7123,16 @@ function startRefreshLoop() {
   run();
 }
 
-async function postAction(path) {
+async function postAction(path, payloadOverride = null) {
   state.busy = true;
   els.toggle.disabled = true;
   els.runOnce.disabled = true;
+  if (els.enterNow) {
+    els.enterNow.disabled = true;
+  }
+  if (els.exitNow) {
+    els.exitNow.disabled = true;
+  }
   if (els.bankDay) {
     els.bankDay.disabled = true;
   }
@@ -7010,7 +7141,7 @@ async function postAction(path) {
       path === "/api/start" && !state.running && !state.audioHydrated;
     const data = await request(path, {
       method: "POST",
-      body: JSON.stringify(payloadFromForm()),
+      body: JSON.stringify(payloadOverride || payloadFromForm()),
     });
     render(data);
     if (shouldPlayStartCueAfterRender && data.running) {
@@ -7022,6 +7153,61 @@ async function postAction(path) {
     state.busy = false;
     await refresh();
   }
+}
+
+async function enterNow() {
+  const status = state.latestStatus || {};
+  const symbol = status.routed_symbol;
+  const bot = status.active_bot;
+  if (!symbol || !bot) {
+    els.error.textContent =
+      "Enter Now needs a current routed symbol. Wait for the next live scan.";
+    return;
+  }
+  const sizing =
+    status.position_sizing_mode === "DYNAMIC"
+      ? `${status.position_allocation_percent || "--"}% of buying power`
+      : `${formatMoney(status.effective_position_notional)} fixed`;
+  const confirmed = window.confirm(
+    `Enter ${symbol} now under ${formatLabel(
+      bot,
+    )}? This uses ${sizing} (${formatMoney(
+      status.effective_position_notional,
+    )} effective) and starts a fresh 1.5% trailing stop. The trade will be classified as operator-initiated.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+  await postAction("/api/enter-now", {
+    expectedSymbol: symbol,
+    expectedBot: bot,
+    operatorActionId: newOperatorActionId(),
+  });
+}
+
+async function exitNow() {
+  const status = state.latestStatus || {};
+  const positionText = status.position_symbol
+    ? `${formatPositionQty(status.position_qty) || ""} ${
+        status.position_symbol
+      }`.trim()
+    : "the pending entry";
+  const confirmed = window.confirm(
+    `Exit ${positionText} now? Edgewalker will stay on and may re-enter on a later qualified cycle. This exit will be classified as operator-initiated.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+  await postAction("/api/exit-now", {
+    operatorActionId: newOperatorActionId(),
+  });
+}
+
+function newOperatorActionId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `operator-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 async function bankDay() {
@@ -7103,6 +7289,14 @@ els.toggle.addEventListener("click", () => {
 els.runOnce.addEventListener("click", () => {
   postAction("/api/run-once");
 });
+
+if (els.enterNow) {
+  els.enterNow.addEventListener("click", enterNow);
+}
+
+if (els.exitNow) {
+  els.exitNow.addEventListener("click", exitNow);
+}
 
 if (els.bankDay) {
   els.bankDay.addEventListener("click", bankDay);

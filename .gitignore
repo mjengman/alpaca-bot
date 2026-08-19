@@ -6,6 +6,7 @@
 .narrative_cache.json
 .notification_events.json
 .operator_bank_day.json
+.operator_exit_now.json
 logs/
 tmp/
 __pycache__/

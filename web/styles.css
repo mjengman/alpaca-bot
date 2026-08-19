@@ -853,10 +853,11 @@ h2 {
 
 .status-action-card {
   display: flex;
+  flex-direction: column;
   grid-column: span 4;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  justify-content: center;
+  gap: 10px;
   min-height: 116px;
   margin-top: 0;
   border: 1px solid var(--line);
@@ -867,7 +868,7 @@ h2 {
 }
 
 .status-action-copy {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   display: grid;
   justify-items: center;
   gap: 6px;
@@ -892,8 +893,9 @@ h2 {
   display: flex;
   flex: 0 0 auto;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 10px;
+  width: 100%;
 }
 
 .bank-day-status {
@@ -1174,7 +1176,7 @@ h2 {
 }
 
 .status-action-card.controls-action-row {
-  justify-content: space-between;
+  justify-content: center;
   margin-top: 0;
 }
 
@@ -1530,6 +1532,28 @@ button:disabled {
   background: var(--danger);
 }
 
+.operator-enter-button {
+  border-color: color-mix(in srgb, var(--green) 62%, var(--line));
+  background: color-mix(in srgb, var(--green) 14%, var(--input));
+  color: var(--green);
+}
+
+.operator-enter-button:hover:not(:disabled) {
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 24%, var(--input));
+}
+
+.operator-exit-button {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--line));
+  background: color-mix(in srgb, var(--danger) 12%, var(--input));
+  color: var(--danger);
+}
+
+.operator-exit-button:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 22%, var(--input));
+}
+
 .bank-day-button {
   border-color: color-mix(in srgb, var(--amber) 55%, var(--line));
   background: var(--amber-soft);
@@ -1540,6 +1564,10 @@ button:disabled {
   border-color: var(--amber);
   background: color-mix(in srgb, var(--amber-soft) 72%, var(--amber));
   color: var(--ink);
+}
+
+.operator-action-status {
+  color: var(--muted);
 }
 
 .secondary {

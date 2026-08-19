@@ -25,6 +25,7 @@ from bot import (
     BROKER_STATE_ORDER_PENDING,
     BROKER_STATE_RESTRICTED,
     EdgeWalkerBot,
+    ENTRY_INITIATOR_OPERATOR,
     LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
     LIFECYCLE_FULL_FILL,
@@ -45,6 +46,7 @@ from bot import (
     INVERSE_BOT,
     MOMENTUM_AUTHORITY_REVOKED_EXIT_REASON,
     MOMENTUM_BOT,
+    RISK_PROFILE_OPERATOR_FRESH_1_5,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
@@ -1686,6 +1688,109 @@ class EdgeWalkerBotTest(unittest.TestCase):
             state["max_favorable_excursion_percent"] = "2.00"
             state_store.set_inverse_cascade_state(state)
             self.assertEqual(bot._effective_trail_percent(SOXS), Decimal("1.50"))
+
+    def test_operator_entry_always_uses_fresh_one_point_five_percent_trail(
+        self,
+    ) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_position_context(
+                SOXS,
+                owner=INVERSE_BOT,
+                entry_initiator=ENTRY_INITIATOR_OPERATOR,
+                risk_profile=RISK_PROFILE_OPERATOR_FRESH_1_5,
+                operator_action_id="manual-1",
+            )
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "proven_at": (current_time - timedelta(minutes=5)).isoformat(),
+                    "max_favorable_excursion_percent": "0.99",
+                    "profit_lock_floor_percent": "2.00",
+                }
+            )
+            bot = TrailingStopBot(
+                replace(
+                    config(),
+                    trail_percent=Decimal("4.00"),
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_tiered_proven_trail_enabled=True,
+                    inverse_cascade_tiered_proven_trail_low_trail_percent=Decimal(
+                        "6.00"
+                    ),
+                ),
+                FakeClient({"SOXL": [], "SOXS": []}),
+                state_store,
+            )
+
+            self.assertEqual(
+                bot._effective_trail_percent(SOXS),
+                Decimal("1.5"),
+            )
+            self.assertEqual(
+                state_store.get_position_entry_initiator(SOXS),
+                ENTRY_INITIATOR_OPERATOR,
+            )
+            self.assertEqual(
+                state_store.get_position_risk_profile(SOXS),
+                RISK_PROFILE_OPERATOR_FRESH_1_5,
+            )
+
+    def test_operator_entry_does_not_inherit_inverse_profit_lock(self) -> None:
+        current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir, patched_bot_time(current_time):
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_position_context(
+                SOXS,
+                owner=INVERSE_BOT,
+                entry_initiator=ENTRY_INITIATOR_OPERATOR,
+                risk_profile=RISK_PROFILE_OPERATOR_FRESH_1_5,
+            )
+            state_store.set_inverse_cascade_state(
+                {
+                    "mode": INVERSE_CASCADE_MODE_SUSTAINED,
+                    "session_date": current_time.astimezone(bot_module.NY_TZ)
+                    .date()
+                    .isoformat(),
+                    "entered_at": (current_time - timedelta(minutes=10)).isoformat(),
+                    "proven_at": (current_time - timedelta(minutes=5)).isoformat(),
+                    "profit_lock_floor_percent": "1.50",
+                }
+            )
+            client = FakeClient(
+                {"SOXS": bars("100", "101.40", latest_at=current_time)},
+            )
+            bot = TrailingStopBot(
+                replace(
+                    config(),
+                    symbol=SOXS,
+                    inverse_cascade_mode=INVERSE_CASCADE_MODE_SUSTAINED,
+                    inverse_cascade_proven_profit_lock_enabled=True,
+                ),
+                client,
+                state_store,
+            )
+
+            bot._manage_trailing_stop(
+                SOXS,
+                {
+                    "symbol": SOXS,
+                    "qty": "1",
+                    "avg_entry_price": "100",
+                },
+                [],
+            )
+
+            self.assertEqual(client.sells, [])
+            self.assertEqual(
+                bot._effective_trail_percent(SOXS),
+                Decimal("1.5"),
+            )
 
     def test_inverse_cascade_profit_lock_ratchets_one_way(self) -> None:
         current_time = datetime(2026, 6, 5, 14, 0, tzinfo=timezone.utc)
@@ -3887,6 +3992,35 @@ class EdgeWalkerBotTest(unittest.TestCase):
 
 
 class AlpacaClientTest(unittest.TestCase):
+    def test_operator_orders_include_client_order_ids(self) -> None:
+        client = AlpacaClient(replace(config(), dry_run=False))
+        calls: list[dict[str, Any]] = []
+
+        def fake_trading_request(
+            _method: str,
+            _path: str,
+            *,
+            payload: dict[str, Any],
+        ) -> dict[str, Any]:
+            calls.append(payload)
+            return {"id": f"order-{len(calls)}"}
+
+        client._trading_request = fake_trading_request
+
+        client.submit_market_buy(
+            SOXL,
+            Decimal("95"),
+            client_order_id="edge-op-enter-test",
+        )
+        client.submit_market_sell_qty(
+            SOXL,
+            Decimal("1.25"),
+            client_order_id="edge-op-exit-test",
+        )
+
+        self.assertEqual(calls[0]["client_order_id"], "edge-op-enter-test")
+        self.assertEqual(calls[1]["client_order_id"], "edge-op-exit-test")
+
     def test_cancel_order_uses_delete_endpoint(self) -> None:
         client = AlpacaClient(replace(config(), dry_run=False))
         calls: list[tuple[str, str]] = []

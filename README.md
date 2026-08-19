@@ -39,6 +39,25 @@ connection tests, active environment selection, live-trading
 arming/disarming, notification settings, and operator spreadsheet settings.
 The local activity log is kept for 24 hours in `.bot_activity.json`, which is also ignored by git.
 
+### Operator Overrides
+
+While the repeating bot is running and the market is open, the dashboard exposes
+two non-halting operator controls:
+
+- `Enter [routed symbol] Now` submits an immediate market buy for the current
+  Edgewalker route. It uses the active fixed/dynamic size selection, starts a
+  fresh dedicated `1.5%` trail, and does not inherit specialist proven-state,
+  route-grace, profit-lock, or cooldown state.
+- `Exit Now` cancels a pending entry or flattens the current position, then
+  automatically returns control to Edgewalker. It does not bank the session or
+  add a manual cooldown, so the bot may enter again on a later qualified cycle.
+
+Operator actions and autonomous cycles share one execution lock so they cannot
+submit conflicting orders concurrently. Entry and exit fills record independent
+`bot`/`operator` initiators. Account P/L includes every fill, while specialist
+expectancy cards and archaeology include only `bot/bot` trades. Operator-affected
+records retain action IDs and counterfactual replay hooks.
+
 ### Bank Day
 
 While the repeating bot is running and the market is open, `Bank Day` is an

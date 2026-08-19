@@ -15,6 +15,7 @@ from bot import (
 
 
 NY_TZ = ZoneInfo("America/New_York")
+OPERATOR_EXIT_REASONS = {"operator_bank_day", "operator_exit_now"}
 
 
 def analyze_lifecycle_trades(
@@ -125,6 +126,24 @@ def analyze_lifecycle_trades(
         trade_entry_context = (
             matched_entry_contexts[0] if matched_entry_contexts else None
         )
+        exit_context = record.get("lifecycle_context")
+        trade_exit_context = exit_context if isinstance(exit_context, dict) else None
+        entry_initiator = trade_initiator(
+            (trade_entry_context or {}).get("entry_initiator"),
+            default="bot",
+        )
+        exit_initiator = trade_initiator(
+            (trade_exit_context or {}).get("exit_initiator"),
+            default=(
+                "operator"
+                if optional_text(record.get("reason")) in OPERATOR_EXIT_REASONS
+                else "bot"
+            ),
+        )
+        intervention_classification = classify_trade_intervention(
+            entry_initiator,
+            exit_initiator,
+        )
         entry_family = infer_entry_family(
             trade_bot,
             symbol,
@@ -155,10 +174,37 @@ def analyze_lifecycle_trades(
             "entry_order_ids": matched_entry_order_ids,
             "entry_reason": trade_entry_reason,
             "entry_lifecycle_context": trade_entry_context,
+            "exit_lifecycle_context": trade_exit_context,
             "entry_family": entry_family,
             "inverse_entry_family": inverse_entry_family,
             "exit_reason": record.get("reason"),
             "exit_order_id": record.get("order_id"),
+            "entry_initiator": entry_initiator,
+            "exit_initiator": exit_initiator,
+            "intervention_classification": intervention_classification,
+            "operator_affected": intervention_classification != "bot/bot",
+            "autonomous_expectancy_eligible": (
+                intervention_classification == "bot/bot"
+            ),
+            "strategy_owner": (
+                optional_text((trade_entry_context or {}).get("strategy_owner"))
+                or trade_bot
+            ),
+            "risk_profile": optional_text(
+                (trade_entry_context or {}).get("risk_profile")
+            ),
+            "operator_entry_action_id": optional_text(
+                (trade_entry_context or {}).get("operator_action_id")
+                or (trade_entry_context or {}).get("operator_entry_action_id")
+            ),
+            "operator_exit_action_id": optional_text(
+                (trade_exit_context or {}).get("operator_action_id")
+                or (trade_exit_context or {}).get("operator_exit_action_id")
+            ),
+            "counterfactual_hook": (
+                (trade_exit_context or {}).get("counterfactual_hook")
+                or (trade_entry_context or {}).get("counterfactual_hook")
+            ),
             "opened_at": entry_at.isoformat(timespec="seconds"),
             "closed_at": created_at.isoformat(timespec="seconds"),
         }
@@ -190,6 +236,20 @@ def analyze_lifecycle_trades(
         "unmatched_exit_qty": unmatched_exit_qty,
         "ignored_fill_count": ignored_fill_count,
     }
+
+
+def trade_initiator(value: Any, *, default: str) -> str:
+    normalized = optional_text(value)
+    if normalized and normalized.lower() in {"bot", "operator"}:
+        return normalized.lower()
+    return default
+
+
+def classify_trade_intervention(
+    entry_initiator: str,
+    exit_initiator: str,
+) -> str:
+    return f"{entry_initiator}/{exit_initiator}"
 
 
 def price_points_for_trade(

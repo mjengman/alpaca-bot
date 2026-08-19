@@ -188,8 +188,15 @@ LIFECYCLE_POSITION_OPENED = "POSITION_OPENED"
 LIFECYCLE_POSITION_CLOSED = "POSITION_CLOSED"
 LIFECYCLE_POSITION_MANAGED = "POSITION_MANAGED"
 LIFECYCLE_OPERATOR_BANK_DAY = "OPERATOR_BANK_DAY"
+LIFECYCLE_OPERATOR_ENTER_NOW = "OPERATOR_ENTER_NOW"
+LIFECYCLE_OPERATOR_EXIT_NOW = "OPERATOR_EXIT_NOW"
 LIFECYCLE_ADAPTIVE_POSTURE_SELECTED = "ADAPTIVE_POSTURE_SELECTED"
 LIFECYCLE_SHADOW_ENTRY_SUPPRESSED = "SHADOW_ENTRY_SUPPRESSED"
+ENTRY_INITIATOR_BOT = "bot"
+ENTRY_INITIATOR_OPERATOR = "operator"
+RISK_PROFILE_AUTONOMOUS = "autonomous_specialist"
+RISK_PROFILE_OPERATOR_FRESH_1_5 = "operator_fresh_1_5"
+OPERATOR_ENTRY_TRAIL_PERCENT = Decimal("1.5")
 POSITION_LIFECYCLE_OPENING = "OPENING"
 POSITION_LIFECYCLE_OPEN = "OPEN"
 POSITION_LIFECYCLE_CLOSING = "CLOSING"
@@ -1140,7 +1147,13 @@ class AlpacaClient:
             raise BotError(f"Unexpected latest quote response: {data!r}")
         return quote
 
-    def submit_market_buy(self, symbol: str, notional: Decimal) -> dict[str, Any] | None:
+    def submit_market_buy(
+        self,
+        symbol: str,
+        notional: Decimal,
+        *,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any] | None:
         payload = {
             "symbol": symbol,
             "notional": str(notional),
@@ -1148,6 +1161,8 @@ class AlpacaClient:
             "type": "market",
             "time_in_force": "day",
         }
+        if client_order_id:
+            payload["client_order_id"] = client_order_id
         if self.config.dry_run:
             print(f"[dry-run] Would submit market buy: {json.dumps(payload)}")
             return None
@@ -1166,7 +1181,13 @@ class AlpacaClient:
             return None
         return self._trading_request("POST", "/orders", payload=payload)
 
-    def submit_market_sell_qty(self, symbol: str, qty: Decimal) -> dict[str, Any] | None:
+    def submit_market_sell_qty(
+        self,
+        symbol: str,
+        qty: Decimal,
+        *,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any] | None:
         payload = {
             "symbol": symbol,
             "qty": format_decimal(qty),
@@ -1174,6 +1195,8 @@ class AlpacaClient:
             "type": "market",
             "time_in_force": "day",
         }
+        if client_order_id:
+            payload["client_order_id"] = client_order_id
         if self.config.dry_run:
             print(f"[dry-run] Would submit market sell: {json.dumps(payload)}")
             return None
@@ -1652,6 +1675,9 @@ class EdgeWalkerStatus:
     position_unrealized_pl_percent: str | None
     position_current_price: str | None
     position_owner: str | None
+    position_entry_initiator: str | None
+    position_risk_profile: str | None
+    position_operator_action_id: str | None
     high_water_mark: str | None
     trailing_exit_price: str | None
     risk_exit_kind: str | None
@@ -1744,6 +1770,64 @@ class BotStateStore:
         symbol_state["owner"] = owner
         symbol_state["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._write(data)
+
+    def get_position_context(self, symbol: str) -> dict[str, Any]:
+        data = self._read()
+        raw = data.get("trailing", {}).get(symbol, {})
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            key: raw.get(key)
+            for key in (
+                "owner",
+                "entry_initiator",
+                "risk_profile",
+                "operator_action_id",
+            )
+            if raw.get(key) not in (None, "")
+        }
+
+    def set_position_context(
+        self,
+        symbol: str,
+        *,
+        owner: str,
+        entry_initiator: str = ENTRY_INITIATOR_BOT,
+        risk_profile: str = RISK_PROFILE_AUTONOMOUS,
+        operator_action_id: str | None = None,
+    ) -> None:
+        data = self._read()
+        trailing = data.setdefault("trailing", {})
+        symbol_state = trailing.setdefault(symbol, {})
+        symbol_state.update(
+            {
+                "owner": owner,
+                "entry_initiator": entry_initiator,
+                "risk_profile": risk_profile,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        if operator_action_id:
+            symbol_state["operator_action_id"] = operator_action_id
+        else:
+            symbol_state.pop("operator_action_id", None)
+        self._write(data)
+
+    def get_position_entry_initiator(self, symbol: str) -> str:
+        return str(
+            self.get_position_context(symbol).get("entry_initiator")
+            or ENTRY_INITIATOR_BOT
+        )
+
+    def get_position_risk_profile(self, symbol: str) -> str:
+        return str(
+            self.get_position_context(symbol).get("risk_profile")
+            or RISK_PROFILE_AUTONOMOUS
+        )
+
+    def get_position_operator_action_id(self, symbol: str) -> str | None:
+        raw = self.get_position_context(symbol).get("operator_action_id")
+        return str(raw) if raw not in (None, "") else None
 
     def clear_symbol(self, symbol: str) -> None:
         data = self._read()
@@ -2428,11 +2512,18 @@ class TrailingStopBot:
         avg_entry_price = decimal_from_api(
             position.get("avg_entry_price", current_price), "avg entry price"
         )
-        self._maybe_update_inverse_cascade_proven_state(symbol, avg_entry_price)
-        profit_lock_status = self._inverse_cascade_profit_lock_status(
-            symbol,
-            avg_entry_price,
-            current_price,
+        entry_initiator = self._position_entry_initiator(symbol)
+        operator_entry = entry_initiator == ENTRY_INITIATOR_OPERATOR
+        if not operator_entry:
+            self._maybe_update_inverse_cascade_proven_state(symbol, avg_entry_price)
+        profit_lock_status = (
+            None
+            if operator_entry
+            else self._inverse_cascade_profit_lock_status(
+                symbol,
+                avg_entry_price,
+                current_price,
+            )
         )
         high_water_mark = self.state_store.get_high_water_mark(symbol)
         reference_price = max(current_price, avg_entry_price)
@@ -2491,9 +2582,14 @@ class TrailingStopBot:
         elif stop_breached:
             exit_reason = "trailing_stop_breached"
             print(f"[RISK] {symbol}: trailing stop breached; submitting fractional market sell.")
-            self._mark_inverse_cascade_trailing_stop_lockout(symbol)
+            if not operator_entry:
+                self._mark_inverse_cascade_trailing_stop_lockout(symbol)
 
         if exit_reason:
+            lifecycle_context = self._position_exit_lifecycle_context(
+                symbol,
+                exit_initiator=ENTRY_INITIATOR_BOT,
+            )
             self._record_lifecycle(
                 LIFECYCLE_INTENDED_EXIT,
                 symbol=symbol,
@@ -2505,6 +2601,7 @@ class TrailingStopBot:
                 trail_percent=trail_percent,
                 high_water_mark=high_water_mark,
                 profit_lock_status=profit_lock_status,
+                lifecycle_context=lifecycle_context,
             )
             try:
                 order = self.client.submit_market_sell_qty(symbol, qty)
@@ -2518,6 +2615,7 @@ class TrailingStopBot:
                     error=str(exc),
                     broker_constraint=self._broker_rejection_payload(exc, "sell", symbol),
                     profit_lock_status=profit_lock_status,
+                    lifecycle_context=lifecycle_context,
                 )
                 raise
             self._record_lifecycle(
@@ -2528,13 +2626,16 @@ class TrailingStopBot:
                 reason=exit_reason,
                 order=order,
                 profit_lock_status=profit_lock_status,
+                lifecycle_context=lifecycle_context,
             )
             self.order_tracker.track_submitted_order(
                 order,
-                None,
+                self.state_store.get_position_owner(symbol),
                 exit_reason,
+                lifecycle_context,
             )
-            self.state_store.clear_symbol(symbol)
+            if str((order or {}).get("status") or "").lower() == "filled":
+                self.state_store.clear_symbol(symbol)
         else:
             print(f"[RISK] {symbol}: trailing stop holding.")
 
@@ -2673,6 +2774,12 @@ class TrailingStopBot:
 
     def _effective_trail_percent(self, symbol: str) -> Decimal:
         if (
+            self._position_entry_initiator(symbol) == ENTRY_INITIATOR_OPERATOR
+            or self._position_risk_profile(symbol)
+            == RISK_PROFILE_OPERATOR_FRESH_1_5
+        ):
+            return OPERATOR_ENTRY_TRAIL_PERCENT
+        if (
             symbol == SOXS
             and self.config.inverse_cascade_mode == INVERSE_CASCADE_MODE_SUSTAINED
         ):
@@ -2700,6 +2807,42 @@ class TrailingStopBot:
                         return self.config.inverse_cascade_proven_trail_percent
                 return self.config.inverse_cascade_trail_percent
         return self.config.trail_percent
+
+    def _position_entry_initiator(self, symbol: str) -> str:
+        getter = getattr(self.state_store, "get_position_entry_initiator", None)
+        if callable(getter):
+            return str(getter(symbol) or ENTRY_INITIATOR_BOT)
+        return ENTRY_INITIATOR_BOT
+
+    def _position_risk_profile(self, symbol: str) -> str:
+        getter = getattr(self.state_store, "get_position_risk_profile", None)
+        if callable(getter):
+            return str(getter(symbol) or RISK_PROFILE_AUTONOMOUS)
+        return RISK_PROFILE_AUTONOMOUS
+
+    def _position_exit_lifecycle_context(
+        self,
+        symbol: str,
+        *,
+        exit_initiator: str,
+    ) -> dict[str, Any]:
+        action_getter = getattr(
+            self.state_store,
+            "get_position_operator_action_id",
+            None,
+        )
+        operator_action_id = action_getter(symbol) if callable(action_getter) else None
+        return {
+            "entry_initiator": self._position_entry_initiator(symbol),
+            "exit_initiator": exit_initiator,
+            "risk_profile": self._position_risk_profile(symbol),
+            "strategy_owner": self.state_store.get_position_owner(symbol),
+            "operator_entry_action_id": operator_action_id,
+            "operator_affected": (
+                self._position_entry_initiator(symbol) == ENTRY_INITIATOR_OPERATOR
+                or exit_initiator == ENTRY_INITIATOR_OPERATOR
+            ),
+        }
 
     def _latest_price(
         self,
@@ -3654,7 +3797,11 @@ class EdgeWalkerBot:
         lifecycle_context = self._entry_lifecycle_context(
             route,
             entry_decision.reason,
-        )
+        ) or {}
+        lifecycle_context.setdefault("entry_initiator", ENTRY_INITIATOR_BOT)
+        lifecycle_context.setdefault("risk_profile", RISK_PROFILE_AUTONOMOUS)
+        lifecycle_context.setdefault("strategy_owner", route.active_bot)
+        lifecycle_context.setdefault("operator_affected", False)
         self._record_lifecycle(
             LIFECYCLE_INTENDED_ENTRY,
             bot=route.active_bot,
@@ -3716,7 +3863,23 @@ class EdgeWalkerBot:
         self._mark_inverse_cascade_entry(route, entry_decision.reason)
         self._mark_momentum_entry(route, entry_decision.reason)
         if not self.config.dry_run:
-            self.state_store.set_position_owner(route.routed_symbol, route.active_bot)
+            set_position_context = getattr(
+                self.state_store,
+                "set_position_context",
+                None,
+            )
+            if callable(set_position_context):
+                set_position_context(
+                    route.routed_symbol,
+                    owner=route.active_bot,
+                    entry_initiator=ENTRY_INITIATOR_BOT,
+                    risk_profile=RISK_PROFILE_AUTONOMOUS,
+                )
+            else:
+                self.state_store.set_position_owner(
+                    route.routed_symbol,
+                    route.active_bot,
+                )
             self.state_store.set_last_entry_at(route.active_bot, route.routed_symbol)
         print("action_taken=market_buy")
         return self._build_status(
@@ -3749,12 +3912,45 @@ class EdgeWalkerBot:
     ) -> EdgeWalkerStatus:
         position_symbol, position = self._active_position(positions)
         position_owner = None
+        position_entry_initiator = None
+        position_risk_profile = None
+        position_operator_action_id = None
         high_water_mark = None
         trailing_exit_price = None
         trail_percent = None
 
         if position_symbol:
             position_owner = self.state_store.get_position_owner(position_symbol)
+            entry_initiator_getter = getattr(
+                self.state_store,
+                "get_position_entry_initiator",
+                None,
+            )
+            position_entry_initiator = (
+                entry_initiator_getter(position_symbol)
+                if callable(entry_initiator_getter)
+                else ENTRY_INITIATOR_BOT
+            )
+            risk_profile_getter = getattr(
+                self.state_store,
+                "get_position_risk_profile",
+                None,
+            )
+            position_risk_profile = (
+                risk_profile_getter(position_symbol)
+                if callable(risk_profile_getter)
+                else RISK_PROFILE_AUTONOMOUS
+            )
+            action_id_getter = getattr(
+                self.state_store,
+                "get_position_operator_action_id",
+                None,
+            )
+            position_operator_action_id = (
+                action_id_getter(position_symbol)
+                if callable(action_id_getter)
+                else None
+            )
             high_water_mark = self.state_store.get_high_water_mark(position_symbol)
             if high_water_mark is not None:
                 trail_percent = self._effective_trail_percent(position_symbol)
@@ -3842,6 +4038,9 @@ class EdgeWalkerBot:
                 self._raw_text(position.get("current_price")) if position else None
             ),
             position_owner=position_owner,
+            position_entry_initiator=position_entry_initiator,
+            position_risk_profile=position_risk_profile,
+            position_operator_action_id=position_operator_action_id,
             high_water_mark=self._decimal_text(high_water_mark),
             trailing_exit_price=self._decimal_text(trailing_exit_price),
             risk_exit_kind=risk_exit.get("kind"),
@@ -4018,12 +4217,23 @@ class EdgeWalkerBot:
             self.lifecycle_ledger,
         )._effective_trail_percent(symbol)
 
+    def _position_entry_initiator(self, symbol: str) -> str:
+        getter = getattr(self.state_store, "get_position_entry_initiator", None)
+        if callable(getter):
+            return str(getter(symbol) or ENTRY_INITIATOR_BOT)
+        return ENTRY_INITIATOR_BOT
+
     def _position_uses_proven_inverse_trail(
         self,
         position_symbol: str | None,
         position_owner: str | None,
     ) -> bool:
         if position_symbol != SOXS or position_owner != INVERSE_BOT:
+            return False
+        if (
+            self._position_entry_initiator(position_symbol)
+            == ENTRY_INITIATOR_OPERATOR
+        ):
             return False
         state = self.state_store.get_inverse_cascade_state()
         return bool(
@@ -4043,6 +4253,11 @@ class EdgeWalkerBot:
             or not position
             or not self.config.inverse_cascade_proven_profit_lock_enabled
             or self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
+            or (
+                position_symbol
+                and self._position_entry_initiator(position_symbol)
+                == ENTRY_INITIATOR_OPERATOR
+            )
         ):
             return None
 
@@ -8390,6 +8605,8 @@ class EdgeWalkerBot:
         owner: str | None,
     ) -> str | None:
         del regime, active_bot
+        if self._position_entry_initiator(symbol) == ENTRY_INITIATOR_OPERATOR:
+            return None
         if (
             self.config.inverse_cascade_mode != INVERSE_CASCADE_MODE_SUSTAINED
             or symbol != SOXS
@@ -8480,6 +8697,8 @@ class EdgeWalkerBot:
         owner: str | None,
     ) -> str | None:
         del regime, active_bot
+        if self._position_entry_initiator(symbol) == ENTRY_INITIATOR_OPERATOR:
+            return None
         if (
             not self.config.momentum_route_hold_enabled
             or symbol != SOXL
@@ -8619,6 +8838,8 @@ class EdgeWalkerBot:
 
         owner = self.state_store.get_position_owner(SOXL)
         if owner != MOMENTUM_BOT:
+            return None
+        if self._position_entry_initiator(SOXL) == ENTRY_INITIATOR_OPERATOR:
             return None
 
         block_reason = self._momentum_authority_block_reason()

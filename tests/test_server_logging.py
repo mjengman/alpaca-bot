@@ -14,14 +14,18 @@ from unittest.mock import patch
 from bot import (
     BotConfig,
     BotError,
+    BotStateStore,
     CHOP_BOT,
     EDGEWALKER_BOTS,
     EdgeWalkerBot,
     FRACTIONAL_QTY_STEP,
     INVERSE_BOT,
     LIFECYCLE_FULL_FILL,
+    LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
     LIFECYCLE_OPERATOR_BANK_DAY,
+    LIFECYCLE_OPERATOR_ENTER_NOW,
+    LIFECYCLE_OPERATOR_EXIT_NOW,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_SUBMITTED,
     LIFECYCLE_PARTIAL_FILL,
@@ -43,6 +47,8 @@ from server import (
     BotRunner,
     NY_TZ,
     OPERATOR_BANK_DAY_EXIT_REASON,
+    OPERATOR_ENTER_NOW_REASON,
+    OPERATOR_EXIT_NOW_REASON,
     _append_daily_jsonl,
     _build_summary_prompt,
     _current_ny_activity,
@@ -347,6 +353,101 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(summary["last_trade"], None)
         self.assertEqual(summary["reconciliation_confidence"], "HIGH")
         self.assertEqual(summary["open_lot_qty"], "0")
+
+    def test_lifecycle_performance_separates_operator_affected_expectancy(
+        self,
+    ) -> None:
+        now = datetime(2026, 5, 22, 16, 0, 0, tzinfo=NY_TZ)
+        records: list[dict[str, object]] = []
+        combinations = (
+            ("bot", "bot"),
+            ("operator", "bot"),
+            ("bot", "operator"),
+            ("operator", "operator"),
+        )
+        for index, (entry_initiator, exit_initiator) in enumerate(combinations):
+            minute = index * 10
+            entry_at = datetime(
+                2026,
+                5,
+                22,
+                14,
+                30,
+                tzinfo=timezone.utc,
+            ) + timedelta(minutes=minute)
+            records.extend(
+                [
+                    {
+                        "event_type": LIFECYCLE_FULL_FILL,
+                        "created_at": entry_at.isoformat(),
+                        "symbol": SOXL,
+                        "side": "buy",
+                        "bot": MOMENTUM_BOT,
+                        "order_id": f"buy-{index}",
+                        "fill_delta_qty": "1",
+                        "filled_avg_price": "100",
+                        "lifecycle_context": {
+                            "entry_initiator": entry_initiator,
+                            "strategy_owner": MOMENTUM_BOT,
+                            "risk_profile": (
+                                "operator_fresh_1_5"
+                                if entry_initiator == "operator"
+                                else "autonomous_specialist"
+                            ),
+                        },
+                    },
+                    {
+                        "event_type": LIFECYCLE_FULL_FILL,
+                        "created_at": (
+                            entry_at + timedelta(minutes=5)
+                        ).isoformat(),
+                        "symbol": SOXL,
+                        "side": "sell",
+                        "bot": MOMENTUM_BOT,
+                        "order_id": f"sell-{index}",
+                        "fill_delta_qty": "1",
+                        "filled_avg_price": "101",
+                        "reason": (
+                            OPERATOR_EXIT_NOW_REASON
+                            if exit_initiator == "operator"
+                            else "trailing_stop_breached"
+                        ),
+                        "lifecycle_context": {
+                            "exit_initiator": exit_initiator,
+                        },
+                    },
+                ]
+            )
+
+        summary = lifecycle_performance_summary(records, now)
+        classifications = {
+            trade["intervention_classification"]
+            for trade in summary["realized_trades"]
+        }
+        momentum = next(
+            row
+            for row in summary["bot_performance"]
+            if row["bot"] == MOMENTUM_BOT
+        )
+
+        self.assertEqual(summary["session_realized_pl"], "4")
+        self.assertEqual(summary["session_trade_count"], 4)
+        self.assertEqual(summary["autonomous_realized_pl"], "1")
+        self.assertEqual(summary["autonomous_trade_count"], 1)
+        self.assertEqual(summary["operator_affected_realized_pl"], "3")
+        self.assertEqual(summary["operator_affected_trade_count"], 3)
+        self.assertEqual(
+            classifications,
+            {"bot/bot", "operator/bot", "bot/operator", "operator/operator"},
+        )
+        self.assertEqual(momentum["trade_count"], 1)
+        self.assertEqual(momentum["realized_pl"], "1")
+        self.assertEqual(
+            summary["operator_performance"]["classifications"][
+                "operator/operator"
+            ]["trade_count"],
+            1,
+        )
 
     def test_research_bar_excursion_ignores_bars_after_exit(self) -> None:
         trades = [
@@ -4373,6 +4474,273 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(gate["status"], "veto")
         self.assertIn("operator banked", gate["detail"].lower())
 
+    def test_runner_enter_now_uses_current_route_size_and_operator_risk(
+        self,
+    ) -> None:
+        records: list[dict[str, object]] = []
+        submitted: list[tuple[str, Decimal, str | None]] = []
+
+        class FakeLifecycleLedger:
+            def record(self, event_type: str, **fields: object) -> None:
+                records.append({"event_type": event_type, **fields})
+
+            def read_all(self) -> list[dict[str, object]]:
+                return list(records)
+
+        class FakeMarketData:
+            def get_latest_quote(self, symbol: str) -> dict[str, object]:
+                self.symbol = symbol
+                return {
+                    "bp": "9.90",
+                    "ap": "10.10",
+                    "t": datetime.now(timezone.utc).isoformat(),
+                }
+
+            def get_latest_trade(self, _symbol: str) -> None:
+                return None
+
+        class FakeAlpacaClient:
+            def __init__(self, _config: BotConfig) -> None:
+                self.order = {
+                    "id": "operator-buy-1",
+                    "symbol": SOXS,
+                    "side": "buy",
+                    "status": "filled",
+                    "filled_qty": "95",
+                    "filled_avg_price": "10",
+                }
+
+            def get_clock(self) -> dict[str, object]:
+                return {"is_open": True}
+
+            def list_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def get_position(self, _symbol: str) -> None:
+                return None
+
+            def get_asset(self, symbol: str) -> dict[str, object]:
+                return {
+                    "symbol": symbol,
+                    "tradable": True,
+                    "fractionable": True,
+                }
+
+            def get_account(self) -> dict[str, object]:
+                return {"buying_power": "1000", "portfolio_value": "1000"}
+
+            def submit_market_buy(
+                self,
+                symbol: str,
+                notional: Decimal,
+                *,
+                client_order_id: str | None = None,
+            ) -> dict[str, object]:
+                submitted.append((symbol, notional, client_order_id))
+                return dict(self.order)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            runner = BotRunner.__new__(BotRunner)
+            runner._lock = threading.Lock()
+            runner._trade_action_lock = threading.Lock()
+            runner._running = True
+            runner._config = replace(
+                config(),
+                dry_run=False,
+                position_sizing_mode="DYNAMIC",
+                position_allocation_percent=Decimal("95"),
+            )
+            runner._operator_bank_state = {}
+            runner._operator_exit_state = {}
+            runner._edgewalker_status = {
+                "market_open": True,
+                "data_status": "LIVE",
+                "active_bot": INVERSE_BOT,
+                "routed_symbol": SOXS,
+                "regime": "DOWNTREND",
+                "trend_trust": {"score": 72},
+            }
+            runner._market_data = FakeMarketData()
+            runner._activity_log = []
+            runner._save_activity_log = lambda: None
+            runner._maybe_send_lifecycle_notifications = lambda _timestamp: None
+            runner.snapshot = lambda: {"ok": True}
+
+            with patch("server.AlpacaClient", FakeAlpacaClient), patch(
+                "server.BotStateStore",
+                lambda: state_store,
+            ), patch("server.LifecycleLedger", FakeLifecycleLedger):
+                result = runner.enter_now(
+                    expected_symbol=SOXS,
+                    expected_bot=INVERSE_BOT,
+                    operator_action_id="test-enter-action",
+                )
+
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(submitted[0][0], SOXS)
+            self.assertEqual(submitted[0][1], Decimal("950.00"))
+            self.assertEqual(
+                submitted[0][2],
+                "edge-op-enter-testenteraction",
+            )
+            self.assertEqual(
+                state_store.get_position_entry_initiator(SOXS),
+                "operator",
+            )
+            self.assertEqual(
+                state_store.get_position_risk_profile(SOXS),
+                "operator_fresh_1_5",
+            )
+            self.assertEqual(
+                state_store.get_position_owner(SOXS),
+                INVERSE_BOT,
+            )
+            self.assertEqual(
+                state_store.get_high_water_mark(SOXS),
+                Decimal("10"),
+            )
+            self.assertIsNone(
+                state_store.get_last_entry_at(INVERSE_BOT, SOXS)
+            )
+            event_types = [record["event_type"] for record in records]
+            self.assertIn(LIFECYCLE_OPERATOR_ENTER_NOW, event_types)
+            self.assertIn(LIFECYCLE_INTENDED_ENTRY, event_types)
+            full_fill = next(
+                record
+                for record in records
+                if record["event_type"] == LIFECYCLE_FULL_FILL
+            )
+            self.assertEqual(
+                full_fill["lifecycle_context"]["entry_initiator"],
+                "operator",
+            )
+
+    def test_runner_exit_now_flattens_without_bank_or_cooldown_reset(self) -> None:
+        records: list[dict[str, object]] = []
+        submitted: list[tuple[str, Decimal, str | None]] = []
+
+        class FakeLifecycleLedger:
+            def record(self, event_type: str, **fields: object) -> None:
+                records.append({"event_type": event_type, **fields})
+
+            def read_all(self) -> list[dict[str, object]]:
+                return list(records)
+
+        class FakeAlpacaClient:
+            def __init__(self, _config: BotConfig) -> None:
+                self.order = {
+                    "id": "operator-sell-1",
+                    "symbol": SOXL,
+                    "side": "sell",
+                    "status": "filled",
+                    "filled_qty": "2",
+                    "filled_avg_price": "102",
+                }
+
+            def get_clock(self) -> dict[str, object]:
+                return {"is_open": True}
+
+            def list_open_orders(self) -> list[dict[str, object]]:
+                return []
+
+            def get_position(self, symbol: str) -> dict[str, object] | None:
+                if symbol != SOXL:
+                    return None
+                return {
+                    "symbol": SOXL,
+                    "qty": "2",
+                    "avg_entry_price": "100",
+                    "current_price": "102",
+                }
+
+            def submit_market_sell_qty(
+                self,
+                symbol: str,
+                qty: Decimal,
+                *,
+                client_order_id: str | None = None,
+            ) -> dict[str, object]:
+                submitted.append((symbol, qty, client_order_id))
+                return dict(self.order)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            last_entry_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+            )
+            state_store.set_high_water_mark(SOXL, Decimal("103"))
+            state_store.set_last_entry_at(
+                MOMENTUM_BOT,
+                SOXL,
+                last_entry_at,
+            )
+            runner = BotRunner.__new__(BotRunner)
+            runner._lock = threading.Lock()
+            runner._trade_action_lock = threading.Lock()
+            runner._running = True
+            runner._config = replace(config(), dry_run=False)
+            runner._operator_bank_state = {}
+            runner._operator_exit_state = {}
+            runner._edgewalker_status = {
+                "market_open": True,
+                "active_bot": MOMENTUM_BOT,
+                "routed_symbol": SOXL,
+                "regime": "UPTREND",
+            }
+            runner._activity_log = []
+            runner._save_activity_log = lambda: None
+            runner._maybe_send_lifecycle_notifications = lambda _timestamp: None
+            runner.snapshot = lambda: {"ok": True}
+
+            with patch("server.AlpacaClient", FakeAlpacaClient), patch(
+                "server.BotStateStore",
+                lambda: state_store,
+            ), patch("server.LifecycleLedger", FakeLifecycleLedger), patch(
+                "server._save_operator_exit_state",
+                lambda _state: None,
+            ):
+                result = runner.exit_now(
+                    operator_action_id="test-exit-action",
+                )
+
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(submitted[0][0], SOXL)
+            self.assertEqual(submitted[0][1], Decimal("2.000000000"))
+            self.assertEqual(
+                submitted[0][2],
+                "edge-op-exit-testexitaction",
+            )
+            self.assertFalse(runner._operator_exit_state["active"])
+            self.assertEqual(
+                runner._operator_exit_state["flatten_status"],
+                "filled",
+            )
+            self.assertEqual(runner._operator_bank_state, {})
+            self.assertIsNone(state_store.get_position_owner(SOXL))
+            self.assertEqual(
+                state_store.get_last_entry_at(MOMENTUM_BOT, SOXL),
+                last_entry_at,
+            )
+            event_types = [record["event_type"] for record in records]
+            self.assertIn(LIFECYCLE_OPERATOR_EXIT_NOW, event_types)
+            self.assertIn(LIFECYCLE_INTENDED_EXIT, event_types)
+            full_fill = next(
+                record
+                for record in records
+                if record["event_type"] == LIFECYCLE_FULL_FILL
+            )
+            self.assertEqual(
+                full_fill["lifecycle_context"]["exit_initiator"],
+                "operator",
+            )
+            self.assertEqual(
+                full_fill["lifecycle_context"]["entry_initiator"],
+                "bot",
+            )
+
     def test_runner_bank_day_records_operator_event_and_sell_reason(self) -> None:
         records: list[dict[str, object]] = []
         submitted_orders: list[tuple[str, Decimal]] = []
@@ -4733,6 +5101,24 @@ class ServerLoggingTest(unittest.TestCase):
         )
 
         self.assertIsNone(payload)
+
+    def test_operator_entry_halt_payload_is_temporary_during_exit_now(
+        self,
+    ) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._operator_bank_state = {}
+        runner._operator_exit_state = {
+            "active": True,
+            "pressed_at": "2026-07-07T14:00:00+00:00",
+        }
+
+        payload = runner._operator_entry_halt_payload(
+            datetime(2026, 7, 7, 14, 0, 1, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(payload["reason"], "operator_exit_in_progress")
+        self.assertTrue(payload["active"])
 
 
 if __name__ == "__main__":

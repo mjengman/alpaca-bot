@@ -14,6 +14,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -27,18 +28,24 @@ from bot import (
     BotConfig,
     BotError,
     BotStateStore,
+    BUYING_POWER_ORDER_BUFFER_PERCENT,
     CHOP_BOT,
     CHOP_PERMISSION_MODES,
     DATA_BASE_URL_DEFAULT,
     EDGEWALKER_BOTS,
     EdgeWalkerBot,
     FRACTIONAL_QTY_STEP,
+    ENTRY_INITIATOR_BOT,
+    ENTRY_INITIATOR_OPERATOR,
     INVERSE_BOT,
     INVERSE_CASCADE_MODE_SUSTAINED,
     INVERSE_CASCADE_MODES,
+    LIFECYCLE_INTENDED_ENTRY,
     LIFECYCLE_INTENDED_EXIT,
     LIFECYCLE_FULL_FILL,
     LIFECYCLE_OPERATOR_BANK_DAY,
+    LIFECYCLE_OPERATOR_ENTER_NOW,
+    LIFECYCLE_OPERATOR_EXIT_NOW,
     LIFECYCLE_ORDER_ACCEPTED,
     LIFECYCLE_ORDER_REJECTED,
     LIFECYCLE_ORDER_SUBMITTED,
@@ -46,9 +53,13 @@ from bot import (
     LifecycleLedger,
     LIVE_TRADING_BASE_URL_DEFAULT,
     MOMENTUM_BOT,
+    MONEY_STEP,
+    OPERATOR_ENTRY_TRAIL_PERCENT,
     OrderLifecycleTracker,
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
+    POSITION_SIZING_DYNAMIC,
+    RISK_PROFILE_OPERATOR_FRESH_1_5,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_CLOSING,
     POSITION_LIFECYCLE_OPEN,
@@ -57,6 +68,7 @@ from bot import (
     SOXL,
     SOXS,
     TRADING_BASE_URL_DEFAULT,
+    age_seconds,
     broker_constraint_ok,
     broker_constraint_payload,
     classify_broker_error,
@@ -64,7 +76,10 @@ from bot import (
     load_dotenv,
     normalize_alpaca_base_url,
     normalize_enabled_bots,
+    optional_decimal_from_api,
+    parse_market_timestamp,
     parse_clock_time,
+    closeout_status,
 )
 from market_data import StreamingMarketDataService
 from research import (
@@ -90,6 +105,7 @@ ACTIVITY_PATH = PROJECT_ROOT / ".bot_activity.json"
 OPERATOR_SPREADSHEET_POST_STATE_PATH = PROJECT_ROOT / ".operator_spreadsheet_posts.json"
 NOTIFICATION_STATE_PATH = PROJECT_ROOT / ".notification_events.json"
 OPERATOR_BANK_STATE_PATH = PROJECT_ROOT / ".operator_bank_day.json"
+OPERATOR_EXIT_STATE_PATH = PROJECT_ROOT / ".operator_exit_now.json"
 NARRATIVE_CACHE_PATH = PROJECT_ROOT / ".narrative_cache.json"
 ENV_PATH = PROJECT_ROOT / ".env"
 LOGS_ROOT = PROJECT_ROOT / "logs"
@@ -108,6 +124,8 @@ NOTIFICATION_DEFAULT_ERROR_COOLDOWN_MINUTES = 30
 NOTIFICATION_SEND_TIMEOUT_SECONDS = 30
 NOTIFICATION_SENT_EVENT_LIMIT = 500
 OPERATOR_BANK_DAY_EXIT_REASON = "operator_bank_day"
+OPERATOR_ENTER_NOW_REASON = "operator_enter_now"
+OPERATOR_EXIT_NOW_REASON = "operator_exit_now"
 NARRATIVE_GROUNDING_VERSION = "deterministic-daily-v4"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
@@ -357,6 +375,7 @@ class RunnerSnapshot:
     order_state: dict[str, Any]
     preset_authority: dict[str, Any] | None
     notification_status: dict[str, Any]
+    operator_control_status: dict[str, Any]
     operator_bank_status: dict[str, Any]
     last_error: str | None
 
@@ -390,7 +409,10 @@ class BotRunner:
         self._spreadsheet_auto_post_attempted_dates: set[str] = set()
         self._notification_state = _load_notification_state()
         self._operator_bank_state = _load_operator_bank_state()
+        self._operator_exit_state = _load_operator_exit_state()
+        self._trade_action_lock = threading.Lock()
         self._operator_bank_enforcement_lock = threading.Lock()
+        self._operator_exit_enforcement_lock = threading.Lock()
         self._preset_authority_plan: dict[str, Any] | None = None
         self._preset_authority_state: dict[str, Any] = {}
         self._prior_close_preload_keys: set[tuple[str, str, str]] = set()
@@ -1523,6 +1545,18 @@ class BotRunner:
         *,
         send_warmup_notifications: bool = True,
     ) -> None:
+        with self._trade_action_guard():
+            self._run_cycle_unlocked(
+                config,
+                send_warmup_notifications=send_warmup_notifications,
+            )
+
+    def _run_cycle_unlocked(
+        self,
+        config: BotConfig,
+        *,
+        send_warmup_notifications: bool = True,
+    ) -> None:
         output = io.StringIO()
         error: str | None = None
         edgewalker_status: dict[str, Any] | None = None
@@ -1541,19 +1575,29 @@ class BotRunner:
                 for line in authority_lines:
                     print(line)
                 client = AlpacaClient(effective_config)
-                status = EdgeWalkerBot(
-                    effective_config,
-                    client,
-                    market_data=self._market_data,
-                    entry_halt=self._operator_entry_halt_payload(run_timestamp),
-                ).run_once()
-                edgewalker_status = asdict(status)
-                if authority_state:
-                    edgewalker_status["preset_authority"] = authority_state
-                self._continue_operator_bank_enforcement(
-                    effective_config,
-                    client,
-                )
+                if self._operator_exit_state_active():
+                    self._continue_operator_exit_enforcement(
+                        effective_config,
+                        client,
+                    )
+                    print(
+                        "[OPERATOR] Exit Now flatten is being enforced; "
+                        "autonomous cycle deferred."
+                    )
+                else:
+                    status = EdgeWalkerBot(
+                        effective_config,
+                        client,
+                        market_data=self._market_data,
+                        entry_halt=self._operator_entry_halt_payload(run_timestamp),
+                    ).run_once()
+                    edgewalker_status = asdict(status)
+                    if authority_state:
+                        edgewalker_status["preset_authority"] = authority_state
+                    self._continue_operator_bank_enforcement(
+                        effective_config,
+                        client,
+                    )
         except BotError as exc:
             error = str(exc)
             broker_state = self._broker_state_for_cycle_error(error, run_timestamp)
@@ -1604,32 +1648,507 @@ class BotRunner:
                 body=f"Edgewalker hit a cycle error:\n\n{error}",
             )
 
-    def bank_day(self) -> RunnerSnapshot:
-        with self._lock:
-            if not self._running:
-                raise BotError("Start Edgewalker before banking the day.")
-            if _operator_bank_state_active(self._operator_bank_state):
-                return self._snapshot_locked()
-            config = self._config
-            edgewalker_status = copy.deepcopy(self._edgewalker_status) or {}
-
-        client = AlpacaClient(config)
-        clock = client.get_clock()
-        if not bool(clock.get("is_open")):
-            raise BotError("Bank Day is available only while the market is open.")
-
-        with self._operator_bank_guard():
+    def enter_now(
+        self,
+        expected_symbol: str | None = None,
+        expected_bot: str | None = None,
+        operator_action_id: str | None = None,
+    ) -> RunnerSnapshot:
+        with self._trade_action_guard():
             with self._lock:
+                if not self._running:
+                    raise BotError("Start Edgewalker before using Enter Now.")
                 if _operator_bank_state_active(self._operator_bank_state):
-                    return self._snapshot_locked()
-            banked_at = self._execute_operator_bank(
+                    raise BotError(
+                        "Bank Day is active. New entries are halted until the next session."
+                    )
+                if self._operator_exit_state_active_locked():
+                    raise BotError(
+                        "Exit Now is still flattening the account. Wait until it is flat."
+                    )
+                config = self._config
+                edgewalker_status = copy.deepcopy(self._edgewalker_status) or {}
+
+            if (
+                not config.dry_run
+                and _live_trading_guard_required(config.trading_base_url)
+                and not live_trading_armed()
+            ):
+                raise BotError(
+                    'Live trading is not armed. Open Settings and type "LIVE" first.'
+                )
+
+            active_bot = _optional_text(edgewalker_status.get("active_bot"))
+            routed_symbol = _optional_text(edgewalker_status.get("routed_symbol"))
+            if active_bot not in EDGEWALKER_BOTS or routed_symbol not in {SOXL, SOXS}:
+                raise BotError(
+                    "Enter Now needs a current Edgewalker route. Wait for the next live scan."
+                )
+            if expected_symbol and expected_symbol.upper() != routed_symbol:
+                raise BotError(
+                    f"The route changed from {expected_symbol.upper()} to {routed_symbol}. "
+                    "Review it before entering."
+                )
+            if expected_bot and expected_bot != active_bot:
+                raise BotError(
+                    f"The active specialist changed from {expected_bot} to {active_bot}. "
+                    "Review it before entering."
+                )
+            if edgewalker_status.get("data_status") != "LIVE":
+                raise BotError(
+                    "Enter Now requires LIVE market data. Wait for the feed to become current."
+                )
+
+            client = AlpacaClient(config)
+            clock = client.get_clock()
+            if not bool(clock.get("is_open")):
+                raise BotError("Enter Now is available only while the market is open.")
+            _, _, closeout_due = closeout_status(
+                clock,
+                config.close_liquidate_minutes,
+            )
+            if closeout_due:
+                raise BotError(
+                    "Enter Now is disabled inside Edgewalker's end-of-day closeout window."
+                )
+
+            state_store = BotStateStore()
+            OrderLifecycleTracker(
+                client,
+                state_store,
+                LifecycleLedger(),
+                "Operator",
+                config.dry_run,
+            ).reconcile_pending_orders()
+            orders = client.list_open_orders()
+            if orders or state_store.get_pending_orders():
+                raise BotError(
+                    "Enter Now is waiting for the current order to resolve."
+                )
+            positions = {
+                symbol: client.get_position(symbol)
+                for symbol in (SOXL, SOXS)
+            }
+            active_position_symbol, _ = self._operator_active_position(positions)
+            if active_position_symbol:
+                raise BotError(
+                    f"Enter Now is unavailable while {active_position_symbol} is already open."
+                )
+
+            asset = client.get_asset(routed_symbol)
+            if not asset.get("tradable", True) or not asset.get("fractionable"):
+                raise BotError(
+                    f"{routed_symbol} is not currently available for fractional trading."
+                )
+            mark, mark_time = self._operator_live_mark(routed_symbol, client)
+            if mark is None or mark_time is None:
+                raise BotError(
+                    f"Enter Now requires a fresh {routed_symbol} quote or trade."
+                )
+
+            account = client.get_account()
+            effective_notional, requested_notional, buying_power = (
+                self._operator_position_notional(config, account)
+            )
+            if effective_notional is None or effective_notional <= 0:
+                raise BotError("Enter Now has insufficient buying power.")
+
+            pressed_at = datetime.now(timezone.utc)
+            action_id = self._operator_action_id(operator_action_id)
+            client_order_id = (
+                f"edge-op-enter-{action_id.replace('-', '')[:24]}"
+            )
+            context = {
+                "event": OPERATOR_ENTER_NOW_REASON,
+                "operator_action_id": action_id,
+                "pressed_at": pressed_at.isoformat(timespec="seconds"),
+                "session_date": _operator_session_date(pressed_at),
+                "entry_initiator": ENTRY_INITIATOR_OPERATOR,
+                "strategy_owner": active_bot,
+                "entry_family": "operator_override",
+                "risk_profile": RISK_PROFILE_OPERATOR_FRESH_1_5,
+                "trail_percent": format_decimal(OPERATOR_ENTRY_TRAIL_PERCENT),
+                "operator_affected": True,
+                "route_active_bot": active_bot,
+                "routed_symbol": routed_symbol,
+                "regime": edgewalker_status.get("regime"),
+                "trend_trust_score": self._operator_trend_trust_score(
+                    edgewalker_status
+                ),
+                "entry_block_reason_at_press": edgewalker_status.get(
+                    "entry_block_reason"
+                ),
+                "mark_at_press": format_decimal(mark),
+                "mark_time": mark_time.isoformat(timespec="seconds"),
+                "position_sizing_mode": config.position_sizing_mode,
+                "position_allocation_percent": format_decimal(
+                    config.position_allocation_percent
+                ),
+                "requested_notional": (
+                    format_decimal(requested_notional)
+                    if requested_notional is not None
+                    else None
+                ),
+                "effective_notional": format_decimal(effective_notional),
+                "buying_power": (
+                    format_decimal(buying_power)
+                    if buying_power is not None
+                    else None
+                ),
+                "counterfactual_hook": {
+                    "session_date": _operator_session_date(pressed_at),
+                    "operator_action_id": action_id,
+                    "requires_operator_window_replay": True,
+                    "route_at_press": routed_symbol,
+                },
+            }
+            ledger = LifecycleLedger()
+            ledger.record(
+                LIFECYCLE_OPERATOR_ENTER_NOW,
+                runtime="Operator",
+                dry_run=config.dry_run,
+                bot=active_bot,
+                symbol=routed_symbol,
+                reason=OPERATOR_ENTER_NOW_REASON,
+                lifecycle_context=context,
+            )
+            ledger.record(
+                LIFECYCLE_INTENDED_ENTRY,
+                runtime="Operator",
+                dry_run=config.dry_run,
+                bot=active_bot,
+                symbol=routed_symbol,
+                side="buy",
+                notional=effective_notional,
+                requested_notional=requested_notional,
+                buying_power=buying_power,
+                reason=OPERATOR_ENTER_NOW_REASON,
+                lifecycle_context=context,
+            )
+            try:
+                order = client.submit_market_buy(
+                    routed_symbol,
+                    effective_notional,
+                    client_order_id=client_order_id,
+                )
+            except BotError as exc:
+                ledger.record(
+                    LIFECYCLE_ORDER_REJECTED,
+                    runtime="Operator",
+                    dry_run=config.dry_run,
+                    bot=active_bot,
+                    symbol=routed_symbol,
+                    side="buy",
+                    notional=effective_notional,
+                    reason=OPERATOR_ENTER_NOW_REASON,
+                    lifecycle_context=context,
+                    error=str(exc),
+                    broker_constraint=broker_constraint_payload(
+                        classify_broker_error(
+                            str(exc),
+                            side="buy",
+                            symbol=routed_symbol,
+                        )
+                    ),
+                )
+                raise
+            ledger.record(
+                LIFECYCLE_ORDER_SUBMITTED,
+                runtime="Operator",
+                dry_run=config.dry_run,
+                bot=active_bot,
+                symbol=routed_symbol,
+                side="buy",
+                notional=effective_notional,
+                reason=OPERATOR_ENTER_NOW_REASON,
+                lifecycle_context=context,
+                order=order,
+            )
+            OrderLifecycleTracker(
+                client,
+                state_store,
+                ledger,
+                "Operator",
+                config.dry_run,
+            ).track_submitted_order(
+                order,
+                active_bot,
+                OPERATOR_ENTER_NOW_REASON,
+                lifecycle_context=context,
+            )
+            if not config.dry_run:
+                state_store.clear_symbol(routed_symbol)
+                state_store.set_position_context(
+                    routed_symbol,
+                    owner=active_bot,
+                    entry_initiator=ENTRY_INITIATOR_OPERATOR,
+                    risk_profile=RISK_PROFILE_OPERATOR_FRESH_1_5,
+                    operator_action_id=action_id,
+                )
+                fill_price = optional_decimal_from_api(
+                    (order or {}).get("filled_avg_price"),
+                    "operator entry fill price",
+                )
+                state_store.set_high_water_mark(
+                    routed_symbol,
+                    max(mark, fill_price or mark),
+                )
+
+            order_status = str((order or {}).get("status") or "dry_run").lower()
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        f"[OPERATOR] Enter Now {order_status}: {routed_symbol} "
+                        f"${format_decimal(effective_notional)} via {active_bot}; "
+                        f"fresh {format_decimal(OPERATOR_ENTRY_TRAIL_PERCENT)}% trail."
+                    ]
+                )
+
+        self._maybe_send_lifecycle_notifications(pressed_at)
+        return self.snapshot()
+
+    def exit_now(
+        self,
+        operator_action_id: str | None = None,
+    ) -> RunnerSnapshot:
+        with self._trade_action_guard():
+            with self._lock:
+                if not self._running:
+                    raise BotError("Start Edgewalker before using Exit Now.")
+                if _operator_bank_state_active(self._operator_bank_state):
+                    raise BotError(
+                        "Bank Day is already flattening and halting the session."
+                    )
+                config = self._config
+                edgewalker_status = copy.deepcopy(self._edgewalker_status) or {}
+                existing = self._operator_exit_state_active_locked()
+
+            client = AlpacaClient(config)
+            clock = client.get_clock()
+            if not bool(clock.get("is_open")):
+                raise BotError("Exit Now is available only while the market is open.")
+
+            if existing:
+                self._continue_operator_exit_enforcement(config, client)
+                return self.snapshot()
+
+            state_store = BotStateStore()
+            positions = {
+                symbol: client.get_position(symbol)
+                for symbol in (SOXL, SOXS)
+            }
+            orders = client.list_open_orders()
+            pressed_at = datetime.now(timezone.utc)
+            action_id = self._operator_action_id(operator_action_id)
+            active_symbol, active_position = self._operator_active_position(positions)
+            entry_initiator = (
+                self._state_position_entry_initiator(
+                    state_store,
+                    active_symbol,
+                )
+                if active_symbol
+                else ENTRY_INITIATOR_BOT
+            )
+            risk_profile = (
+                self._state_position_risk_profile(state_store, active_symbol)
+                if active_symbol
+                else None
+            )
+            owner = (
+                state_store.get_position_owner(active_symbol)
+                if active_symbol
+                else _optional_text(edgewalker_status.get("active_bot"))
+            )
+            context = {
+                "event": OPERATOR_EXIT_NOW_REASON,
+                "operator_action_id": action_id,
+                "operator_exit_action_id": action_id,
+                "pressed_at": pressed_at.isoformat(timespec="seconds"),
+                "session_date": _operator_session_date(pressed_at),
+                "entry_initiator": entry_initiator,
+                "exit_initiator": ENTRY_INITIATOR_OPERATOR,
+                "strategy_owner": owner,
+                "risk_profile": risk_profile,
+                "operator_affected": True,
+                "route_active_bot": edgewalker_status.get("active_bot"),
+                "routed_symbol": edgewalker_status.get("routed_symbol"),
+                "regime": edgewalker_status.get("regime"),
+                "position_symbol": active_symbol,
+                "position_qty": (
+                    _optional_text((active_position or {}).get("qty"))
+                    if active_position
+                    else None
+                ),
+                "mark_at_press": (
+                    _optional_text((active_position or {}).get("current_price"))
+                    if active_position
+                    else None
+                ),
+                "pending_order_count": len(orders),
+                "counterfactual_hook": {
+                    "session_date": _operator_session_date(pressed_at),
+                    "operator_action_id": action_id,
+                    "requires_operator_window_replay": True,
+                    "resume_autonomy_after_flat": True,
+                },
+            }
+            LifecycleLedger().record(
+                LIFECYCLE_OPERATOR_EXIT_NOW,
+                runtime="Operator",
+                dry_run=config.dry_run,
+                bot=owner,
+                symbol=active_symbol,
+                reason=OPERATOR_EXIT_NOW_REASON,
+                lifecycle_context=context,
+            )
+            with self._lock:
+                self._operator_exit_state = {
+                    "active": True,
+                    "reason": OPERATOR_EXIT_NOW_REASON,
+                    "session_date": context["session_date"],
+                    "pressed_at": context["pressed_at"],
+                    "action_id": action_id,
+                    "flatten_status": "pending",
+                    "position_symbol": active_symbol,
+                    "position_qty": context.get("position_qty"),
+                    "lifecycle_context": context,
+                }
+                self._save_operator_exit_state_locked()
+                self._append_activity_locked(
+                    [
+                        "[OPERATOR] Exit Now pressed; flattening current exposure. "
+                        "Autonomous trading will resume when flat."
+                    ]
+                )
+            enforcement = self._enforce_operator_exit(
                 config,
                 client,
-                edgewalker_status,
+                positions,
+                orders,
+                state_store,
+                context,
             )
+            with self._lock:
+                self._operator_exit_state.update(enforcement)
+                self._save_operator_exit_state_locked()
+
+        self._maybe_send_lifecycle_notifications(pressed_at)
+        return self.snapshot()
+
+    def _operator_position_notional(
+        self,
+        config: BotConfig,
+        account: dict[str, Any],
+    ) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+        buying_power = optional_decimal_from_api(
+            account.get("buying_power"),
+            "buying power",
+        )
+        if config.position_sizing_mode == POSITION_SIZING_DYNAMIC:
+            if buying_power is None:
+                return None, None, None
+            requested = buying_power * (
+                config.position_allocation_percent / Decimal("100")
+            )
+        else:
+            requested = config.position_notional
+        effective = requested
+        if buying_power is not None:
+            max_notional = buying_power * (
+                (Decimal("100") - BUYING_POWER_ORDER_BUFFER_PERCENT)
+                / Decimal("100")
+            )
+            effective = min(effective, max_notional)
+        return (
+            effective.quantize(MONEY_STEP, rounding=ROUND_DOWN),
+            requested.quantize(MONEY_STEP, rounding=ROUND_DOWN),
+            buying_power,
+        )
+
+    def _operator_action_id(self, proposed: str | None = None) -> str:
+        candidate = (proposed or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", candidate):
+            return candidate
+        return uuid.uuid4().hex
+
+    def _operator_live_mark(
+        self,
+        symbol: str,
+        client: AlpacaClient,
+    ) -> tuple[Decimal | None, datetime | None]:
+        quote = self._market_data.get_latest_quote(symbol)
+        quote_time = parse_market_timestamp((quote or {}).get("t"))
+        if quote_time is not None and (age_seconds(quote_time) or 0) <= 90:
+            bid = optional_decimal_from_api((quote or {}).get("bp"), "bid price")
+            ask = optional_decimal_from_api((quote or {}).get("ap"), "ask price")
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                return (bid + ask) / Decimal("2"), quote_time
+
+        trade = self._market_data.get_latest_trade(symbol)
+        trade_time = parse_market_timestamp((trade or {}).get("t"))
+        if trade_time is not None and (age_seconds(trade_time) or 0) <= 90:
+            price = optional_decimal_from_api((trade or {}).get("p"), "trade price")
+            if price is not None and price > 0:
+                return price, trade_time
+
+        quote = client.get_latest_quote(symbol)
+        quote_time = parse_market_timestamp((quote or {}).get("t"))
+        if quote_time is not None and (age_seconds(quote_time) or 0) <= 90:
+            bid = optional_decimal_from_api((quote or {}).get("bp"), "bid price")
+            ask = optional_decimal_from_api((quote or {}).get("ap"), "ask price")
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                return (bid + ask) / Decimal("2"), quote_time
+        trade = client.get_latest_trade(symbol)
+        trade_time = parse_market_timestamp((trade or {}).get("t"))
+        price = optional_decimal_from_api((trade or {}).get("p"), "trade price")
+        if (
+            trade_time is not None
+            and (age_seconds(trade_time) or 0) <= 90
+            and price is not None
+            and price > 0
+        ):
+            return price, trade_time
+        return None, None
+
+    def bank_day(self) -> RunnerSnapshot:
+        with self._trade_action_guard():
+            with self._lock:
+                if not self._running:
+                    raise BotError("Start Edgewalker before banking the day.")
+                if _operator_bank_state_active(self._operator_bank_state):
+                    return self._snapshot_locked()
+                if self._operator_exit_state_active_locked():
+                    raise BotError(
+                        "Exit Now is still flattening the account. "
+                        "Wait for it to finish before banking the day."
+                    )
+                config = self._config
+                edgewalker_status = copy.deepcopy(self._edgewalker_status) or {}
+
+            client = AlpacaClient(config)
+            clock = client.get_clock()
+            if not bool(clock.get("is_open")):
+                raise BotError("Bank Day is available only while the market is open.")
+
+            with self._operator_bank_guard():
+                with self._lock:
+                    if _operator_bank_state_active(self._operator_bank_state):
+                        return self._snapshot_locked()
+                banked_at = self._execute_operator_bank(
+                    config,
+                    client,
+                    edgewalker_status,
+                )
 
         self._maybe_send_lifecycle_notifications(banked_at)
         return self.snapshot()
+
+    def _trade_action_guard(self) -> threading.Lock:
+        lock = getattr(self, "_trade_action_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._trade_action_lock = lock
+        return lock
 
     def _operator_bank_guard(self) -> threading.Lock:
         lock = getattr(self, "_operator_bank_enforcement_lock", None)
@@ -1637,6 +2156,270 @@ class BotRunner:
             lock = threading.Lock()
             self._operator_bank_enforcement_lock = lock
         return lock
+
+    def _operator_exit_guard(self) -> threading.Lock:
+        lock = getattr(self, "_operator_exit_enforcement_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._operator_exit_enforcement_lock = lock
+        return lock
+
+    def _operator_exit_state_active_locked(self) -> bool:
+        return bool(getattr(self, "_operator_exit_state", {}).get("active"))
+
+    def _operator_exit_state_active(self) -> bool:
+        with self._lock:
+            return self._operator_exit_state_active_locked()
+
+    def _continue_operator_exit_enforcement(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+    ) -> None:
+        with self._lock:
+            if not self._operator_exit_state_active_locked():
+                return
+            context = self._operator_exit_state.get("lifecycle_context")
+            context = copy.deepcopy(context) if isinstance(context, dict) else {}
+
+        guard = self._operator_exit_guard()
+        if not guard.acquire(blocking=False):
+            return
+        try:
+            positions = {
+                symbol: client.get_position(symbol)
+                for symbol in (SOXL, SOXS)
+            }
+            orders = client.list_open_orders()
+            try:
+                enforcement = self._enforce_operator_exit(
+                    config,
+                    client,
+                    positions,
+                    orders,
+                    BotStateStore(),
+                    context,
+                )
+            except BotError as exc:
+                with self._lock:
+                    self._operator_exit_state.update(
+                        {
+                            "flatten_status": "error",
+                            "flatten_error": str(exc),
+                        }
+                    )
+                    self._save_operator_exit_state_locked()
+                raise
+            with self._lock:
+                self._operator_exit_state.update(enforcement)
+                self._save_operator_exit_state_locked()
+        finally:
+            guard.release()
+
+    def _enforce_operator_exit(
+        self,
+        config: BotConfig,
+        client: AlpacaClient,
+        positions: dict[str, dict[str, Any] | None],
+        orders: list[dict[str, Any]],
+        state_store: BotStateStore,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        open_entry_orders = [
+            order
+            for order in orders
+            if str(order.get("side") or "").lower() == "buy" and order.get("id")
+        ]
+        if open_entry_orders:
+            canceled_order_ids: list[str] = []
+            for order in open_entry_orders:
+                order_id = str(order["id"])
+                client.cancel_order(order_id)
+                canceled_order_ids.append(order_id)
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        "[OPERATOR] Exit Now canceled pending entry order(s): "
+                        + ", ".join(canceled_order_ids)
+                        + "."
+                    ]
+                )
+            return {
+                "active": True,
+                "flatten_status": "canceling_entry_orders",
+                "canceled_entry_order_ids": canceled_order_ids,
+                "flatten_error": None,
+            }
+
+        if orders:
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        "[OPERATOR] Exit Now is waiting for the open order to resolve; "
+                        "no duplicate sell was submitted."
+                    ]
+                )
+            return {
+                "active": True,
+                "flatten_status": "pending",
+                "flatten_error": None,
+            }
+
+        active_symbol, active_position = self._operator_active_position(positions)
+        if not active_symbol or not active_position:
+            position_symbol = _optional_text(context.get("position_symbol"))
+            if position_symbol in {SOXL, SOXS}:
+                state_store.clear_symbol(position_symbol)
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        "[OPERATOR] Exit Now confirmed the account is flat; "
+                        "autonomous trading resumed."
+                    ]
+                )
+            return {
+                "active": False,
+                "flatten_status": "flat",
+                "flatten_error": None,
+                "resumed_at": now_iso(),
+            }
+
+        qty = _decimal_from_value(active_position.get("qty"))
+        if qty is None or qty <= 0:
+            raise BotError(
+                f"Exit Now could not flatten {active_symbol}: position quantity is unavailable."
+            )
+        qty = qty.quantize(FRACTIONAL_QTY_STEP, rounding=ROUND_DOWN)
+        if qty <= 0:
+            raise BotError(
+                f"Exit Now could not flatten {active_symbol}: position quantity rounds to zero."
+            )
+
+        owner = (
+            state_store.get_position_owner(active_symbol)
+            or _optional_text(context.get("strategy_owner"))
+            or "Operator"
+        )
+        entry_initiator = self._state_position_entry_initiator(
+            state_store,
+            active_symbol,
+        )
+        exit_context = {
+            **context,
+            "position_symbol": active_symbol,
+            "position_qty": format_decimal(qty),
+            "entry_initiator": entry_initiator,
+            "exit_initiator": ENTRY_INITIATOR_OPERATOR,
+            "strategy_owner": owner,
+            "risk_profile": self._state_position_risk_profile(
+                state_store,
+                active_symbol,
+            ),
+            "operator_affected": True,
+        }
+        ledger = LifecycleLedger()
+        ledger.record(
+            LIFECYCLE_INTENDED_EXIT,
+            runtime="Operator",
+            dry_run=config.dry_run,
+            bot=owner,
+            symbol=active_symbol,
+            side="sell",
+            qty=qty,
+            reason=OPERATOR_EXIT_NOW_REASON,
+            lifecycle_context=exit_context,
+        )
+        action_id = _optional_text(exit_context.get("operator_action_id"))
+        client_order_id = (
+            f"edge-op-exit-{action_id.replace('-', '')[:24]}"
+            if action_id
+            else f"edge-op-exit-{uuid.uuid4().hex[:24]}"
+        )
+        try:
+            order = client.submit_market_sell_qty(
+                active_symbol,
+                qty,
+                client_order_id=client_order_id,
+            )
+        except BotError as exc:
+            ledger.record(
+                LIFECYCLE_ORDER_REJECTED,
+                runtime="Operator",
+                dry_run=config.dry_run,
+                bot=owner,
+                symbol=active_symbol,
+                side="sell",
+                qty=qty,
+                reason=OPERATOR_EXIT_NOW_REASON,
+                lifecycle_context=exit_context,
+                error=str(exc),
+                broker_constraint=broker_constraint_payload(
+                    classify_broker_error(
+                        str(exc),
+                        side="sell",
+                        symbol=active_symbol,
+                    )
+                ),
+            )
+            raise
+        ledger.record(
+            LIFECYCLE_ORDER_SUBMITTED,
+            runtime="Operator",
+            dry_run=config.dry_run,
+            bot=owner,
+            symbol=active_symbol,
+            side="sell",
+            qty=qty,
+            reason=OPERATOR_EXIT_NOW_REASON,
+            lifecycle_context=exit_context,
+            order=order,
+        )
+        OrderLifecycleTracker(
+            client,
+            state_store,
+            ledger,
+            "Operator",
+            config.dry_run,
+        ).track_submitted_order(
+            order,
+            owner,
+            OPERATOR_EXIT_NOW_REASON,
+            lifecycle_context=exit_context,
+        )
+        if config.dry_run and order is None:
+            with self._lock:
+                self._append_activity_locked(
+                    [
+                        f"[OPERATOR] Exit Now dry run simulated market sell for "
+                        f"{active_symbol} qty={format_decimal(qty)}."
+                    ]
+                )
+            return {
+                "active": False,
+                "flatten_status": "dry_run",
+                "flatten_error": None,
+            }
+
+        order_status = str((order or {}).get("status") or "submitted").lower()
+        filled = order_status == "filled"
+        if filled:
+            state_store.clear_symbol(active_symbol)
+        with self._lock:
+            self._append_activity_locked(
+                [
+                    f"[OPERATOR] Exit Now {order_status} market sell for "
+                    f"{active_symbol} qty={format_decimal(qty)}."
+                ]
+            )
+        return {
+            "active": not filled,
+            "flatten_status": "filled" if filled else "pending",
+            "flatten_error": None,
+            "exit_order_id": _optional_text((order or {}).get("id")),
+            "exit_price": _optional_text((order or {}).get("filled_avg_price")),
+            "filled_qty": _optional_text((order or {}).get("filled_qty")),
+            "resumed_at": now_iso() if filled else None,
+        }
 
     def _execute_operator_bank(
         self,
@@ -1767,6 +2550,8 @@ class BotRunner:
         )
         context: dict[str, Any] = {
             "event": OPERATOR_BANK_DAY_EXIT_REASON,
+            "exit_initiator": ENTRY_INITIATOR_OPERATOR,
+            "operator_affected": True,
             "banked_at": banked_at.isoformat(timespec="seconds"),
             "session_date": _operator_session_date(banked_at),
             "account_equity": account_equity,
@@ -1795,6 +2580,14 @@ class BotRunner:
                     "100"
                 )
             owner = state_store.get_position_owner(active_symbol)
+            entry_initiator = self._state_position_entry_initiator(
+                state_store,
+                active_symbol,
+            )
+            risk_profile = self._state_position_risk_profile(
+                state_store,
+                active_symbol,
+            )
             inverse_state = (
                 state_store.get_inverse_cascade_state()
                 if active_symbol == SOXS
@@ -1817,6 +2610,8 @@ class BotRunner:
                 if mfe_percent is not None
                 else None,
                 "owner": owner,
+                "entry_initiator": entry_initiator,
+                "risk_profile": risk_profile,
                 "inverse_proven": bool(inverse_state.get("proven_at")),
                 "inverse_state": inverse_state if active_symbol == SOXS else None,
             }
@@ -1917,6 +2712,26 @@ class BotRunner:
                 return symbol, position
         return None, None
 
+    def _state_position_entry_initiator(
+        self,
+        state_store: BotStateStore,
+        symbol: str,
+    ) -> str:
+        getter = getattr(state_store, "get_position_entry_initiator", None)
+        if callable(getter):
+            return str(getter(symbol) or ENTRY_INITIATOR_BOT)
+        return ENTRY_INITIATOR_BOT
+
+    def _state_position_risk_profile(
+        self,
+        state_store: BotStateStore,
+        symbol: str,
+    ) -> str | None:
+        getter = getattr(state_store, "get_position_risk_profile", None)
+        if callable(getter):
+            return _optional_text(getter(symbol))
+        return None
+
     def _enforce_operator_bank(
         self,
         config: BotConfig,
@@ -1992,6 +2807,20 @@ class BotRunner:
             if isinstance(context.get("position"), dict)
             else None
         ) or "Operator"
+        exit_context = {
+            **context,
+            "entry_initiator": self._state_position_entry_initiator(
+                state_store,
+                active_symbol,
+            ),
+            "exit_initiator": ENTRY_INITIATOR_OPERATOR,
+            "strategy_owner": owner,
+            "risk_profile": self._state_position_risk_profile(
+                state_store,
+                active_symbol,
+            ),
+            "operator_affected": True,
+        }
         ledger = LifecycleLedger()
         ledger.record(
             LIFECYCLE_INTENDED_EXIT,
@@ -2002,7 +2831,7 @@ class BotRunner:
             side="sell",
             qty=qty,
             reason=OPERATOR_BANK_DAY_EXIT_REASON,
-            lifecycle_context=context,
+            lifecycle_context=exit_context,
         )
         try:
             order = client.submit_market_sell_qty(active_symbol, qty)
@@ -2016,7 +2845,7 @@ class BotRunner:
                 side="sell",
                 qty=qty,
                 reason=OPERATOR_BANK_DAY_EXIT_REASON,
-                lifecycle_context=context,
+                lifecycle_context=exit_context,
                 error=str(exc),
                 broker_constraint=broker_constraint_payload(
                     classify_broker_error(str(exc), side="sell", symbol=active_symbol)
@@ -2033,7 +2862,7 @@ class BotRunner:
             side="sell",
             qty=qty,
             reason=OPERATOR_BANK_DAY_EXIT_REASON,
-            lifecycle_context=context,
+            lifecycle_context=exit_context,
             order=order,
         )
         OrderLifecycleTracker(
@@ -2046,7 +2875,7 @@ class BotRunner:
             order,
             owner,
             OPERATOR_BANK_DAY_EXIT_REASON,
-            lifecycle_context=context,
+            lifecycle_context=exit_context,
         )
         if config.dry_run and order is None:
             with self._lock:
@@ -2108,22 +2937,49 @@ class BotRunner:
     def _save_operator_bank_state_locked(self) -> None:
         _save_operator_bank_state(self._operator_bank_state)
 
+    def _save_operator_exit_state_locked(self) -> None:
+        _save_operator_exit_state(getattr(self, "_operator_exit_state", {}))
+
+    def _operator_control_status_locked(self) -> dict[str, Any]:
+        exit_state = copy.deepcopy(getattr(self, "_operator_exit_state", {}))
+        return {
+            "exit_now": {
+                key: value
+                for key, value in exit_state.items()
+                if key != "lifecycle_context"
+            },
+            "exit_in_progress": bool(exit_state.get("active")),
+            "operator_trail_percent": format_decimal(
+                OPERATOR_ENTRY_TRAIL_PERCENT
+            ),
+            "entry_risk_profile": RISK_PROFILE_OPERATOR_FRESH_1_5,
+        }
+
     def _operator_entry_halt_payload(
         self,
         run_timestamp: datetime,
     ) -> dict[str, Any] | None:
         with self._lock:
             state = copy.deepcopy(self._operator_bank_state)
+            exit_state = copy.deepcopy(
+                getattr(self, "_operator_exit_state", {})
+            )
         status = _operator_bank_status_from_state(state, run_timestamp)
-        if not status.get("active"):
-            return None
-        return {
-            "active": True,
-            "reason": "operator_banked",
-            "banked_at": status.get("banked_at"),
-            "day_pl": status.get("day_pl"),
-            "day_pl_percent": status.get("day_pl_percent"),
-        }
+        if status.get("active"):
+            return {
+                "active": True,
+                "reason": "operator_banked",
+                "banked_at": status.get("banked_at"),
+                "day_pl": status.get("day_pl"),
+                "day_pl_percent": status.get("day_pl_percent"),
+            }
+        if exit_state.get("active"):
+            return {
+                "active": True,
+                "reason": "operator_exit_in_progress",
+                "pressed_at": exit_state.get("pressed_at"),
+            }
+        return None
 
     def _broker_state_for_cycle_error(
         self,
@@ -2365,6 +3221,7 @@ class BotRunner:
             ),
             preset_authority=self._preset_authority_snapshot_locked(),
             notification_status=self._notification_delivery_status_locked(),
+            operator_control_status=self._operator_control_status_locked(),
             operator_bank_status=self._operator_bank_status_locked(performance),
             last_error=self._last_error,
         )
@@ -2396,6 +3253,16 @@ def lifecycle_performance_summary(
     session_date = _ny_date_text(now)
     analysis = analyze_lifecycle_trades(records, session_date, session_tz=NY_TZ)
     realized_trades = analysis["realized_trades"]
+    autonomous_trades = [
+        trade
+        for trade in realized_trades
+        if trade.get("autonomous_expectancy_eligible") is not False
+    ]
+    operator_affected_trades = [
+        trade
+        for trade in realized_trades
+        if trade.get("operator_affected") is True
+    ]
 
     total_realized = sum(
         (
@@ -2417,13 +3284,22 @@ def lifecycle_performance_summary(
         if (_record_decimal(trade, "realized_pl") or Decimal("0")) < 0
     )
     last_trade = realized_trades[-1] if realized_trades else None
-    bot_performance = bot_performance_summary(realized_trades)
+    autonomous_realized = sum(
+        (
+            _record_decimal(trade, "realized_pl") or Decimal("0")
+            for trade in autonomous_trades
+        ),
+        Decimal("0"),
+    )
+    operator_affected_realized = total_realized - autonomous_realized
+    bot_performance = bot_performance_summary(autonomous_trades)
     reconciliation_confidence, reconciliation_notes = _pl_reconciliation_confidence(
         open_qty,
         analysis["unmatched_exit_qty"],
         analysis["ignored_fill_count"],
     )
-    quality = trade_quality_averages(realized_trades)
+    account_quality = trade_quality_averages(realized_trades)
+    quality = trade_quality_averages(autonomous_trades)
 
     return {
         "source": "position_lifecycle",
@@ -2432,6 +3308,15 @@ def lifecycle_performance_summary(
         "reconciliation_confidence": reconciliation_confidence,
         "reconciliation_notes": reconciliation_notes,
         "session_trade_count": len(realized_trades),
+        "autonomous_realized_pl": format_decimal(autonomous_realized),
+        "autonomous_trade_count": len(autonomous_trades),
+        "operator_affected_realized_pl": format_decimal(
+            operator_affected_realized
+        ),
+        "operator_affected_trade_count": len(operator_affected_trades),
+        "operator_performance": operator_intervention_performance_summary(
+            operator_affected_trades
+        ),
         "session_wins": wins,
         "session_losses": losses,
         "last_trade": last_trade,
@@ -2441,14 +3326,54 @@ def lifecycle_performance_summary(
         "bot_performance": bot_performance,
         "realized_trades": realized_trades,
         "trade_quality": quality,
+        "autonomous_trade_quality": quality,
+        "account_trade_quality": account_quality,
         "inversebot_archaeology": bot_archaeology_report(
-            realized_trades,
+            autonomous_trades,
             INVERSE_BOT,
         ),
         "open_lot_qty": format_decimal(open_qty),
         "open_lot_cost_basis": format_decimal(open_cost_basis),
         "unmatched_exit_qty": format_decimal(analysis["unmatched_exit_qty"]),
         "ignored_fill_count": analysis["ignored_fill_count"],
+    }
+
+
+def operator_intervention_performance_summary(
+    trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    classifications: dict[str, dict[str, Any]] = {}
+    for trade in trades:
+        classification = (
+            _optional_text(trade.get("intervention_classification"))
+            or "operator_affected"
+        )
+        bucket = classifications.setdefault(
+            classification,
+            {"trade_count": 0, "realized_pl": Decimal("0")},
+        )
+        bucket["trade_count"] += 1
+        bucket["realized_pl"] += (
+            _record_decimal(trade, "realized_pl") or Decimal("0")
+        )
+    return {
+        "trade_count": len(trades),
+        "realized_pl": format_decimal(
+            sum(
+                (
+                    _record_decimal(trade, "realized_pl") or Decimal("0")
+                    for trade in trades
+                ),
+                Decimal("0"),
+            )
+        ),
+        "classifications": {
+            key: {
+                "trade_count": value["trade_count"],
+                "realized_pl": format_decimal(value["realized_pl"]),
+            }
+            for key, value in sorted(classifications.items())
+        },
     }
 
 
@@ -3301,6 +4226,25 @@ def _load_operator_bank_state(path: Path = OPERATOR_BANK_STATE_PATH) -> dict[str
 def _save_operator_bank_state(
     state: dict[str, Any],
     path: Path = OPERATOR_BANK_STATE_PATH,
+) -> None:
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _load_operator_exit_state(
+    path: Path = OPERATOR_EXIT_STATE_PATH,
+) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_operator_exit_state(
+    state: dict[str, Any],
+    path: Path = OPERATOR_EXIT_STATE_PATH,
 ) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -10314,6 +11258,40 @@ class AppHandler(BaseHTTPRequestHandler):
             if self.path == "/api/notifications/daily-summary":
                 self.require_local_ui_request("notification recovery requests")
                 self.send_json(self.runner.send_daily_summary_notification())
+                return
+            if self.path == "/api/enter-now":
+                self.require_local_ui_request("Enter Now requests")
+                self.send_json(
+                    asdict(
+                        self.runner.enter_now(
+                            expected_symbol=_optional_text(
+                                payload.get("expected_symbol")
+                                or payload.get("expectedSymbol")
+                            ),
+                            expected_bot=_optional_text(
+                                payload.get("expected_bot")
+                                or payload.get("expectedBot")
+                            ),
+                            operator_action_id=_optional_text(
+                                payload.get("operator_action_id")
+                                or payload.get("operatorActionId")
+                            ),
+                        )
+                    )
+                )
+                return
+            if self.path == "/api/exit-now":
+                self.require_local_ui_request("Exit Now requests")
+                self.send_json(
+                    asdict(
+                        self.runner.exit_now(
+                            operator_action_id=_optional_text(
+                                payload.get("operator_action_id")
+                                or payload.get("operatorActionId")
+                            )
+                        )
+                    )
+                )
                 return
             if self.path == "/api/bank-day":
                 self.require_local_ui_request("bank day requests")

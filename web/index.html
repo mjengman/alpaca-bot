@@ -242,7 +242,12 @@
             <div id="controlsActionRow" class="button-row controls-action-row status-action-card">
               <div class="status-action-copy">
                 <span>Controls</span>
-                <small>Check or run the locked build.</small>
+                <small>Run autonomously or use an explicit operator override.</small>
+                <small
+                  id="operatorActionStatus"
+                  class="operator-action-status has-tooltip"
+                  hidden
+                ></small>
                 <small
                   id="bankDayStatus"
                   class="bank-day-status has-tooltip"
@@ -250,6 +255,24 @@
                 ></small>
               </div>
               <div class="status-action-buttons">
+                <button
+                  id="enterNowButton"
+                  type="button"
+                  class="operator-enter-button has-tooltip"
+                  data-tooltip="Enter the currently routed symbol using the selected position size and a fresh 1.5% trailing stop."
+                  hidden
+                >
+                  Enter Now
+                </button>
+                <button
+                  id="exitNowButton"
+                  type="button"
+                  class="operator-exit-button has-tooltip"
+                  data-tooltip="Exit the current position now, then let Edgewalker resume autonomous trading."
+                  hidden
+                >
+                  Exit Now
+                </button>
                 <button
                   id="bankDayButton"
                   type="button"
