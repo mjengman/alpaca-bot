@@ -41,13 +41,16 @@ The local activity log is kept for 24 hours in `.bot_activity.json`, which is al
 
 ### Operator Overrides
 
-While the repeating bot is running and the market is open, the dashboard exposes
-two non-halting operator controls:
+While the repeating bot is running, the dashboard exposes three non-halting
+operator controls. They remain visible but disabled outside regular market hours:
 
-- `Enter [routed symbol] Now` submits an immediate market buy for the current
-  Edgewalker route. It uses the active fixed/dynamic size selection, starts a
-  fresh dedicated `1.5%` trail, and does not inherit specialist proven-state,
-  route-grace, profit-lock, or cooldown state.
+- `Buy SOXL Now` and `Buy SOXS Now` submit an immediate market buy for the
+  selected ticker without requiring an autonomous route, warmup, ORB, authority,
+  setup, or confirmation gate. They use the active fixed/dynamic size selection,
+  start a fresh dedicated `0.75%` manual trail, and do not inherit specialist
+  proven-state, route-grace, profit-lock, or cooldown state. Autonomous route
+  changes do not close an operator-entered position; the manual trail, `Exit Now`,
+  Auto Bank, and closeout protection remain authoritative.
 - `Exit Now` cancels a pending entry or flattens the current position, then
   automatically returns control to Edgewalker. It does not bank the session or
   add a manual cooldown, so the bot may enter again on a later qualified cycle.

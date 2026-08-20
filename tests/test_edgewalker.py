@@ -50,6 +50,7 @@ from bot import (
     OPENING_ORB_TIME_EXIT_REASON,
     RISK_PROFILE_OPENING_ORB,
     RISK_PROFILE_OPERATOR_FRESH_1_5,
+    RISK_PROFILE_OPERATOR_TIGHT_0_75,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
@@ -1509,6 +1510,78 @@ class EdgeWalkerBotTest(unittest.TestCase):
         self.assertEqual(status.action_taken, "close_route_invalidated_position_no_same_cycle_reversal")
         self.assertEqual(status.position_symbol, "SOXL")
 
+    def test_route_change_keeps_operator_position_under_manual_trail(self) -> None:
+        client = FakeClient(
+            {"SOXL": bars("100", "99", "98", "97")},
+            {
+                "SOXL": {
+                    "symbol": "SOXL",
+                    "qty": "0.25",
+                    "avg_entry_price": "97",
+                }
+            },
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+                entry_initiator=ENTRY_INITIATOR_OPERATOR,
+                risk_profile=RISK_PROFILE_OPERATOR_TIGHT_0_75,
+                operator_action_id="manual-soxl",
+            )
+            state_store.set_high_water_mark(SOXL, Decimal("97.20"))
+
+        output, status = self.run_bot(client, setup_state)
+
+        self.assertEqual(client.sells, [])
+        self.assertIn("manual position ignores route changes", output)
+        self.assertIn("trail=0.75%", output)
+        self.assertEqual(status.regime, "DOWNTREND")
+        self.assertEqual(status.active_bot, INVERSE_BOT)
+        self.assertEqual(status.routed_symbol, SOXS)
+        self.assertEqual(status.action_taken, "manage_operator_position")
+        self.assertEqual(status.position_symbol, SOXL)
+
+    def test_warmup_keeps_operator_position_under_live_manual_trail(self) -> None:
+        current_time = datetime.now(timezone.utc)
+        client = FakeClient(
+            {SOXL: bars("100", "100", latest_at=current_time)},
+            {
+                SOXL: {
+                    "symbol": SOXL,
+                    "qty": "0.25",
+                    "avg_entry_price": "100",
+                }
+            },
+            latest_quotes={
+                SOXL: {
+                    "bp": "99.99",
+                    "ap": "100.01",
+                    "t": current_time.isoformat(),
+                }
+            },
+        )
+
+        def setup_state(state_store: BotStateStore) -> None:
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+                entry_initiator=ENTRY_INITIATOR_OPERATOR,
+                risk_profile=RISK_PROFILE_OPERATOR_TIGHT_0_75,
+                operator_action_id="manual-open",
+            )
+            state_store.set_high_water_mark(SOXL, Decimal("100.40"))
+
+        output, status = self.run_bot(client, setup_state)
+
+        self.assertEqual(client.sells, [])
+        self.assertIn("warmup does not pause manual position risk", output)
+        self.assertIn("trail=0.75%", output)
+        self.assertEqual(status.regime, "WARMUP")
+        self.assertEqual(status.action_taken, "manage_operator_position")
+        self.assertEqual(status.position_symbol, SOXL)
+
     def test_route_invalidation_exit_records_outcome_scaffold(self) -> None:
         client = FakeClient(
             {"SOXL": bars("100", "99", "98", "97")},
@@ -2266,6 +2339,29 @@ class EdgeWalkerBotTest(unittest.TestCase):
             self.assertEqual(
                 state_store.get_position_risk_profile(SOXS),
                 RISK_PROFILE_OPERATOR_FRESH_1_5,
+            )
+
+    def test_directional_operator_entry_uses_tight_point_seven_five_percent_trail(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_store = BotStateStore(Path(tmpdir) / "state.json")
+            state_store.set_position_context(
+                SOXL,
+                owner=MOMENTUM_BOT,
+                entry_initiator=ENTRY_INITIATOR_OPERATOR,
+                risk_profile=RISK_PROFILE_OPERATOR_TIGHT_0_75,
+                operator_action_id="manual-2",
+            )
+            bot = TrailingStopBot(
+                replace(config(), trail_percent=Decimal("4.00")),
+                FakeClient({"SOXL": [], "SOXS": []}),
+                state_store,
+            )
+
+            self.assertEqual(
+                bot._effective_trail_percent(SOXL),
+                Decimal("0.75"),
             )
 
     def test_operator_entry_does_not_inherit_inverse_profit_lock(self) -> None:

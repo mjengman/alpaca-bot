@@ -281,13 +281,22 @@
               </div>
               <div class="status-action-buttons">
                 <button
-                  id="enterNowButton"
+                  id="enterSoxlButton"
                   type="button"
                   class="operator-enter-button has-tooltip"
-                  data-tooltip="Enter the currently routed symbol using the selected position size and a fresh 1.5% trailing stop."
+                  data-tooltip="Buy SOXL immediately using the selected position size and a fresh 0.75% manual trailing stop."
                   hidden
                 >
-                  Enter Now
+                  Buy SOXL Now
+                </button>
+                <button
+                  id="enterSoxsButton"
+                  type="button"
+                  class="operator-enter-button operator-enter-inverse-button has-tooltip"
+                  data-tooltip="Buy SOXS immediately using the selected position size and a fresh 0.75% manual trailing stop."
+                  hidden
+                >
+                  Buy SOXS Now
                 </button>
                 <button
                   id="exitNowButton"
@@ -1375,7 +1384,10 @@
               Directional mode controls how selective trend entries are.
               Position sizing chooses fixed dollars or a percent of buying
               power, including a custom percent when the presets are too
-              coarse. Trail percent controls the protective trailing exit.
+              coarse. Buy SOXL Now and Buy SOXS Now are manual entries that
+              bypass autonomous signal gates and use a dedicated 0.75% trail;
+              Exit Now flattens without stopping later autonomous trades.
+              Trail percent controls the autonomous protective trailing exit.
               Regime gap and regime exit tune trend routing and hysteresis.
               Chop discount controls how deep a sideways pullback must be.
             </p>

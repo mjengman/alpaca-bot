@@ -225,7 +225,8 @@ const els = {
   researchResults: document.querySelector("#researchResults"),
   applyGoLiveRouter: document.querySelector("#applyGoLiveRouterButton"),
   liveStrategyBadge: document.querySelector("#liveStrategyBadge"),
-  enterNow: document.querySelector("#enterNowButton"),
+  enterSoxl: document.querySelector("#enterSoxlButton"),
+  enterSoxs: document.querySelector("#enterSoxsButton"),
   exitNow: document.querySelector("#exitNowButton"),
   operatorActionStatus: document.querySelector("#operatorActionStatus"),
   bankDay: document.querySelector("#bankDayButton"),
@@ -794,8 +795,6 @@ function renderOperatorControls(data) {
     controls.exit_in_progress || exitState.active,
   );
   const marketOpen = Boolean(status.market_open);
-  const routeSymbol = status.routed_symbol || "";
-  const routeBot = status.active_bot || "";
   const hasPosition =
     Boolean(status.position_symbol) &&
     (numberOrNull(status.position_qty) || 0) > 0;
@@ -803,48 +802,51 @@ function renderOperatorControls(data) {
     ? data.order_state.pending_orders
     : [];
   const hasPendingOrder = pendingOrders.length > 0;
-  const visible =
-    state.running &&
-    !bankActive &&
-    !state.researchModeEnabled;
+  const visible = state.running && !state.researchModeEnabled;
   const enterReady =
     visible &&
     marketOpen &&
+    !bankActive &&
     !exitInProgress &&
     !hasPosition &&
-    !hasPendingOrder &&
-    Boolean(routeSymbol && routeBot) &&
-    status.data_status === "LIVE";
+    !hasPendingOrder;
   const exitReady =
     visible &&
     marketOpen &&
+    !bankActive &&
     !exitInProgress &&
     (hasPosition || hasPendingOrder);
 
-  if (els.enterNow) {
-    els.enterNow.hidden = !visible;
-    els.enterNow.disabled = state.busy || !enterReady;
-    els.enterNow.textContent = routeSymbol
-      ? `Enter ${routeSymbol} Now`
-      : "Enter Now";
-    const sizing =
-      status.position_sizing_mode === "DYNAMIC"
-        ? `${status.position_allocation_percent || "--"}% of buying power`
-        : `${formatMoney(status.effective_position_notional)} fixed`;
-    els.enterNow.dataset.tooltip = !marketOpen
-      ? "Enter Now is unavailable while the market is closed."
+  const sizing =
+    status.position_sizing_mode === "DYNAMIC"
+      ? `${status.position_allocation_percent || "--"}% of buying power`
+      : `${formatMoney(status.effective_position_notional)} fixed`;
+  const manualTrail = controls.operator_trail_percent || "0.75";
+  const renderEntryButton = (button, symbol) => {
+    if (!button) return;
+    button.hidden = !visible;
+    button.disabled = state.busy || !enterReady;
+    button.textContent = `Buy ${symbol} Now`;
+    button.setAttribute("aria-label", `Buy ${symbol} now`);
+    button.dataset.operatorSymbol = symbol;
+    button.dataset.tooltip = !marketOpen
+      ? `Buy ${symbol} Now is unavailable while the market is closed.`
+      : bankActive
+      ? "Bank Day is active; new entries are halted until the next session."
       : enterReady
-      ? `Enter ${routeSymbol} immediately using ${sizing} (${formatMoney(
+      ? `Buy ${symbol} immediately using ${sizing} (${formatMoney(
           status.effective_position_notional,
-        )} effective) with a fresh 1.5% trailing stop. This trade is classified as operator-initiated.`
+        )} effective) with a fresh ${manualTrail}% manual trailing stop. This bypasses autonomous entry gates and is classified as operator-initiated.`
       : hasPosition
       ? `A ${status.position_symbol} position is already open.`
       : hasPendingOrder
       ? "Wait for the pending order to resolve."
       : exitInProgress
       ? "Exit Now is still flattening the account."
-      : "Enter Now requires an open market, a current route, and LIVE data.";
-  }
+      : `Buy ${symbol} Now is temporarily unavailable.`;
+  };
+  renderEntryButton(els.enterSoxl, "SOXL");
+  renderEntryButton(els.enterSoxs, "SOXS");
 
   if (els.exitNow) {
     els.exitNow.hidden = !visible;
@@ -7208,8 +7210,11 @@ async function postAction(path, payloadOverride = null) {
   state.busy = true;
   els.toggle.disabled = true;
   els.runOnce.disabled = true;
-  if (els.enterNow) {
-    els.enterNow.disabled = true;
+  if (els.enterSoxl) {
+    els.enterSoxl.disabled = true;
+  }
+  if (els.enterSoxs) {
+    els.enterSoxs.disabled = true;
   }
   if (els.exitNow) {
     els.exitNow.disabled = true;
@@ -7236,13 +7241,10 @@ async function postAction(path, payloadOverride = null) {
   }
 }
 
-async function enterNow() {
+async function enterNow(symbol) {
   const status = state.latestStatus || {};
-  const symbol = status.routed_symbol;
-  const bot = status.active_bot;
-  if (!symbol || !bot) {
-    els.error.textContent =
-      "Enter Now needs a current routed symbol. Wait for the next live scan.";
+  if (!["SOXL", "SOXS"].includes(symbol)) {
+    els.error.textContent = "Choose SOXL or SOXS for the manual entry.";
     return;
   }
   const sizing =
@@ -7250,18 +7252,15 @@ async function enterNow() {
       ? `${status.position_allocation_percent || "--"}% of buying power`
       : `${formatMoney(status.effective_position_notional)} fixed`;
   const confirmed = window.confirm(
-    `Enter ${symbol} now under ${formatLabel(
-      bot,
-    )}? This uses ${sizing} (${formatMoney(
+    `Buy ${symbol} now? This bypasses Edgewalker's autonomous entry gates, uses ${sizing} (${formatMoney(
       status.effective_position_notional,
-    )} effective) and starts a fresh 1.5% trailing stop. The trade will be classified as operator-initiated.`,
+    )} effective), and starts a fresh 0.75% manual trailing stop. The trade will be classified as operator-initiated.`,
   );
   if (!confirmed) {
     return;
   }
   await postAction("/api/enter-now", {
-    expectedSymbol: symbol,
-    expectedBot: bot,
+    symbol,
     operatorActionId: newOperatorActionId(),
   });
 }
@@ -7371,8 +7370,12 @@ els.runOnce.addEventListener("click", () => {
   postAction("/api/run-once");
 });
 
-if (els.enterNow) {
-  els.enterNow.addEventListener("click", enterNow);
+if (els.enterSoxl) {
+  els.enterSoxl.addEventListener("click", () => enterNow("SOXL"));
+}
+
+if (els.enterSoxs) {
+  els.enterSoxs.addEventListener("click", () => enterNow("SOXS"));
 }
 
 if (els.exitNow) {

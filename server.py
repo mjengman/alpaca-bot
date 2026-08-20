@@ -60,7 +60,7 @@ from bot import (
     DIRECTIONAL_MODES,
     POSITION_SIZING_MODES,
     POSITION_SIZING_DYNAMIC,
-    RISK_PROFILE_OPERATOR_FRESH_1_5,
+    RISK_PROFILE_OPERATOR_TIGHT_0_75,
     POSITION_LIFECYCLE_CLOSED,
     POSITION_LIFECYCLE_CLOSING,
     POSITION_LIFECYCLE_OPEN,
@@ -437,6 +437,7 @@ class BotRunner:
         self._trade_action_lock = threading.Lock()
         self._operator_bank_enforcement_lock = threading.Lock()
         self._operator_exit_enforcement_lock = threading.Lock()
+        self._rescan_event = threading.Event()
         self._preset_authority_plan: dict[str, Any] | None = None
         self._preset_authority_state: dict[str, Any] = {}
         self._prior_close_preload_keys: set[tuple[str, str, str]] = set()
@@ -487,6 +488,7 @@ class BotRunner:
             self._next_run_at = None
             self._next_run_reason = None
             self._market_idle_logged_for = None
+            self._rescan_event.clear()
             self._last_output = ["Bot started."]
             self._append_activity_locked(self._last_output)
             stop_event = threading.Event()
@@ -504,6 +506,7 @@ class BotRunner:
         with self._lock:
             if self._stop_event:
                 self._stop_event.set()
+            self._rescan_event.set()
             self._running = False
             self._next_run_at = None
             self._next_run_reason = None
@@ -558,6 +561,7 @@ class BotRunner:
             if self._idle_if_market_closed(config, stop_event):
                 continue
 
+            self._rescan_event.clear()
             self._run_cycle(config)
             scan_seconds = self._next_scan_seconds(config)
             next_run = datetime.now() + timedelta(seconds=scan_seconds)
@@ -565,7 +569,7 @@ class BotRunner:
                 if self._stop_event is stop_event and self._running:
                     self._next_run_at = next_run.isoformat(timespec="seconds")
                     self._next_run_reason = "poll"
-            stop_event.wait(scan_seconds)
+            self._rescan_event.wait(scan_seconds)
 
         with self._lock:
             if self._stop_event is stop_event:
@@ -1709,8 +1713,7 @@ class BotRunner:
 
     def enter_now(
         self,
-        expected_symbol: str | None = None,
-        expected_bot: str | None = None,
+        symbol: str | None = None,
         operator_action_id: str | None = None,
     ) -> RunnerSnapshot:
         with self._trade_action_guard():
@@ -1737,26 +1740,14 @@ class BotRunner:
                     'Live trading is not armed. Open Settings and type "LIVE" first.'
                 )
 
-            active_bot = _optional_text(edgewalker_status.get("active_bot"))
-            routed_symbol = _optional_text(edgewalker_status.get("routed_symbol"))
-            if active_bot not in EDGEWALKER_BOTS or routed_symbol not in {SOXL, SOXS}:
-                raise BotError(
-                    "Enter Now needs a current Edgewalker route. Wait for the next live scan."
-                )
-            if expected_symbol and expected_symbol.upper() != routed_symbol:
-                raise BotError(
-                    f"The route changed from {expected_symbol.upper()} to {routed_symbol}. "
-                    "Review it before entering."
-                )
-            if expected_bot and expected_bot != active_bot:
-                raise BotError(
-                    f"The active specialist changed from {expected_bot} to {active_bot}. "
-                    "Review it before entering."
-                )
-            if edgewalker_status.get("data_status") != "LIVE":
-                raise BotError(
-                    "Enter Now requires LIVE market data. Wait for the feed to become current."
-                )
+            selected_symbol = (symbol or "").strip().upper()
+            if selected_symbol not in {SOXL, SOXS}:
+                raise BotError("Choose SOXL or SOXS for the manual entry.")
+            strategy_owner = (
+                MOMENTUM_BOT if selected_symbol == SOXL else INVERSE_BOT
+            )
+            route_active_bot = _optional_text(edgewalker_status.get("active_bot"))
+            route_symbol = _optional_text(edgewalker_status.get("routed_symbol"))
 
             client = AlpacaClient(config)
             clock = client.get_clock()
@@ -1794,15 +1785,15 @@ class BotRunner:
                     f"Enter Now is unavailable while {active_position_symbol} is already open."
                 )
 
-            asset = client.get_asset(routed_symbol)
+            asset = client.get_asset(selected_symbol)
             if not asset.get("tradable", True) or not asset.get("fractionable"):
                 raise BotError(
-                    f"{routed_symbol} is not currently available for fractional trading."
+                    f"{selected_symbol} is not currently available for fractional trading."
                 )
-            mark, mark_time = self._operator_live_mark(routed_symbol, client)
+            mark, mark_time = self._operator_live_mark(selected_symbol, client)
             if mark is None or mark_time is None:
                 raise BotError(
-                    f"Enter Now requires a fresh {routed_symbol} quote or trade."
+                    f"Enter Now requires a fresh {selected_symbol} quote or trade."
                 )
 
             account = client.get_account()
@@ -1823,13 +1814,17 @@ class BotRunner:
                 "pressed_at": pressed_at.isoformat(timespec="seconds"),
                 "session_date": _operator_session_date(pressed_at),
                 "entry_initiator": ENTRY_INITIATOR_OPERATOR,
-                "strategy_owner": active_bot,
-                "entry_family": "operator_override",
-                "risk_profile": RISK_PROFILE_OPERATOR_FRESH_1_5,
+                "strategy_owner": strategy_owner,
+                "entry_family": "operator_directional",
+                "risk_profile": RISK_PROFILE_OPERATOR_TIGHT_0_75,
                 "trail_percent": format_decimal(OPERATOR_ENTRY_TRAIL_PERCENT),
                 "operator_affected": True,
-                "route_active_bot": active_bot,
-                "routed_symbol": routed_symbol,
+                "operator_selected_symbol": selected_symbol,
+                "operator_direction": (
+                    "bullish" if selected_symbol == SOXL else "bearish"
+                ),
+                "route_active_bot": route_active_bot,
+                "routed_symbol": route_symbol,
                 "regime": edgewalker_status.get("regime"),
                 "trend_trust_score": self._operator_trend_trust_score(
                     edgewalker_status
@@ -1858,7 +1853,8 @@ class BotRunner:
                     "session_date": _operator_session_date(pressed_at),
                     "operator_action_id": action_id,
                     "requires_operator_window_replay": True,
-                    "route_at_press": routed_symbol,
+                    "selected_symbol": selected_symbol,
+                    "route_at_press": route_symbol,
                 },
             }
             ledger = LifecycleLedger()
@@ -1866,8 +1862,8 @@ class BotRunner:
                 LIFECYCLE_OPERATOR_ENTER_NOW,
                 runtime="Operator",
                 dry_run=config.dry_run,
-                bot=active_bot,
-                symbol=routed_symbol,
+                bot=strategy_owner,
+                symbol=selected_symbol,
                 reason=OPERATOR_ENTER_NOW_REASON,
                 lifecycle_context=context,
             )
@@ -1875,8 +1871,8 @@ class BotRunner:
                 LIFECYCLE_INTENDED_ENTRY,
                 runtime="Operator",
                 dry_run=config.dry_run,
-                bot=active_bot,
-                symbol=routed_symbol,
+                bot=strategy_owner,
+                symbol=selected_symbol,
                 side="buy",
                 notional=effective_notional,
                 requested_notional=requested_notional,
@@ -1886,7 +1882,7 @@ class BotRunner:
             )
             try:
                 order = client.submit_market_buy(
-                    routed_symbol,
+                    selected_symbol,
                     effective_notional,
                     client_order_id=client_order_id,
                 )
@@ -1895,8 +1891,8 @@ class BotRunner:
                     LIFECYCLE_ORDER_REJECTED,
                     runtime="Operator",
                     dry_run=config.dry_run,
-                    bot=active_bot,
-                    symbol=routed_symbol,
+                    bot=strategy_owner,
+                    symbol=selected_symbol,
                     side="buy",
                     notional=effective_notional,
                     reason=OPERATOR_ENTER_NOW_REASON,
@@ -1906,7 +1902,7 @@ class BotRunner:
                         classify_broker_error(
                             str(exc),
                             side="buy",
-                            symbol=routed_symbol,
+                            symbol=selected_symbol,
                         )
                     ),
                 )
@@ -1915,8 +1911,8 @@ class BotRunner:
                 LIFECYCLE_ORDER_SUBMITTED,
                 runtime="Operator",
                 dry_run=config.dry_run,
-                bot=active_bot,
-                symbol=routed_symbol,
+                bot=strategy_owner,
+                symbol=selected_symbol,
                 side="buy",
                 notional=effective_notional,
                 reason=OPERATOR_ENTER_NOW_REASON,
@@ -1931,17 +1927,17 @@ class BotRunner:
                 config.dry_run,
             ).track_submitted_order(
                 order,
-                active_bot,
+                strategy_owner,
                 OPERATOR_ENTER_NOW_REASON,
                 lifecycle_context=context,
             )
             if not config.dry_run:
-                state_store.clear_symbol(routed_symbol)
+                state_store.clear_symbol(selected_symbol)
                 state_store.set_position_context(
-                    routed_symbol,
-                    owner=active_bot,
+                    selected_symbol,
+                    owner=strategy_owner,
                     entry_initiator=ENTRY_INITIATOR_OPERATOR,
-                    risk_profile=RISK_PROFILE_OPERATOR_FRESH_1_5,
+                    risk_profile=RISK_PROFILE_OPERATOR_TIGHT_0_75,
                     operator_action_id=action_id,
                 )
                 fill_price = optional_decimal_from_api(
@@ -1949,7 +1945,7 @@ class BotRunner:
                     "operator entry fill price",
                 )
                 state_store.set_high_water_mark(
-                    routed_symbol,
+                    selected_symbol,
                     max(mark, fill_price or mark),
                 )
 
@@ -1957,11 +1953,14 @@ class BotRunner:
             with self._lock:
                 self._append_activity_locked(
                     [
-                        f"[OPERATOR] Enter Now {order_status}: {routed_symbol} "
-                        f"${format_decimal(effective_notional)} via {active_bot}; "
+                        f"[OPERATOR] Buy {selected_symbol} Now {order_status}: "
+                        f"${format_decimal(effective_notional)} via {strategy_owner}; "
                         f"fresh {format_decimal(OPERATOR_ENTRY_TRAIL_PERCENT)}% trail."
                     ]
                 )
+            rescan_event = getattr(self, "_rescan_event", None)
+            if rescan_event is not None:
+                rescan_event.set()
 
         self._maybe_send_lifecycle_notifications(pressed_at)
         return self.snapshot()
@@ -3147,7 +3146,8 @@ class BotRunner:
             "operator_trail_percent": format_decimal(
                 OPERATOR_ENTRY_TRAIL_PERCENT
             ),
-            "entry_risk_profile": RISK_PROFILE_OPERATOR_FRESH_1_5,
+            "entry_risk_profile": RISK_PROFILE_OPERATOR_TIGHT_0_75,
+            "entry_symbols": [SOXL, SOXS],
         }
 
     def _operator_entry_halt_payload(
@@ -11714,13 +11714,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json(
                     asdict(
                         self.runner.enter_now(
-                            expected_symbol=_optional_text(
-                                payload.get("expected_symbol")
+                            symbol=_optional_text(
+                                payload.get("symbol")
+                                or payload.get("expected_symbol")
                                 or payload.get("expectedSymbol")
-                            ),
-                            expected_bot=_optional_text(
-                                payload.get("expected_bot")
-                                or payload.get("expectedBot")
                             ),
                             operator_action_id=_optional_text(
                                 payload.get("operator_action_id")

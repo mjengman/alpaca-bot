@@ -221,8 +221,10 @@ ENTRY_INITIATOR_BOT = "bot"
 ENTRY_INITIATOR_OPERATOR = "operator"
 RISK_PROFILE_AUTONOMOUS = "autonomous_specialist"
 RISK_PROFILE_OPERATOR_FRESH_1_5 = "operator_fresh_1_5"
+RISK_PROFILE_OPERATOR_TIGHT_0_75 = "operator_tight_0_75"
 RISK_PROFILE_OPENING_ORB = "opening_orb_1_0"
-OPERATOR_ENTRY_TRAIL_PERCENT = Decimal("1.5")
+OPERATOR_ENTRY_TRAIL_PERCENT = Decimal("0.75")
+OPERATOR_LEGACY_ENTRY_TRAIL_PERCENT = Decimal("1.5")
 POSITION_LIFECYCLE_OPENING = "OPENING"
 POSITION_LIFECYCLE_OPEN = "OPEN"
 POSITION_LIFECYCLE_CLOSING = "CLOSING"
@@ -3129,10 +3131,12 @@ class TrailingStopBot:
         }
 
     def _effective_trail_percent(self, symbol: str) -> Decimal:
+        risk_profile = self._position_risk_profile(symbol)
+        if risk_profile == RISK_PROFILE_OPERATOR_FRESH_1_5:
+            return OPERATOR_LEGACY_ENTRY_TRAIL_PERCENT
         if (
             self._position_entry_initiator(symbol) == ENTRY_INITIATOR_OPERATOR
-            or self._position_risk_profile(symbol)
-            == RISK_PROFILE_OPERATOR_FRESH_1_5
+            or risk_profile == RISK_PROFILE_OPERATOR_TIGHT_0_75
         ):
             return OPERATOR_ENTRY_TRAIL_PERCENT
         if (
@@ -3652,7 +3656,7 @@ class EdgeWalkerBot:
             self._print_market_data_status(SOXL)
             print(
                 "[REGIME] regime=WARMUP active_bot=NONE routed_symbol=NONE "
-                "entry_signal=False action_taken=collecting_data"
+                "entry_signal=False"
             )
             positions = {
                 symbol: self.client.get_position(symbol)
@@ -3679,6 +3683,52 @@ class EdgeWalkerBot:
                     regime_override=WARMUP,
                 )
 
+            active_symbol, active_position = self._active_position(positions)
+            if (
+                market_open
+                and active_symbol
+                and active_position
+                and self._position_entry_initiator(active_symbol)
+                == ENTRY_INITIATOR_OPERATOR
+            ):
+                orders = self.client.list_open_orders()
+                symbol_orders = [
+                    order
+                    for order in orders
+                    if order.get("symbol") == active_symbol
+                ]
+                risk_bot = TrailingStopBot(
+                    config_for_symbol(self.config, active_symbol),
+                    self.client,
+                    self.state_store,
+                    self.market_data,
+                    self.lifecycle_ledger,
+                )
+                risk_bot._manage_trailing_stop(
+                    active_symbol,
+                    active_position,
+                    symbol_orders,
+                    require_live_mark=True,
+                )
+                print(
+                    f"[OPERATOR] {active_symbol}: warmup does not pause manual "
+                    "position risk; dedicated trailing risk remains active."
+                )
+                return self._build_status(
+                    checked_at,
+                    market_open,
+                    next_open,
+                    next_close,
+                    account,
+                    None,
+                    None,
+                    positions,
+                    False,
+                    "manage_operator_position",
+                    regime_override=WARMUP,
+                )
+
+            print("entry_signal=False action_taken=collecting_data")
             return self._build_status(
                 checked_at,
                 market_open,
@@ -3884,6 +3934,43 @@ class EdgeWalkerBot:
         stale_symbol = self._stale_symbol(route, positions)
         if stale_symbol:
             stale_owner = self.state_store.get_position_owner(stale_symbol)
+            if (
+                self._position_entry_initiator(stale_symbol)
+                == ENTRY_INITIATOR_OPERATOR
+            ):
+                symbol_orders = [
+                    order
+                    for order in orders
+                    if order.get("symbol") == stale_symbol
+                ]
+                risk_bot = TrailingStopBot(
+                    config_for_symbol(self.config, stale_symbol),
+                    self.client,
+                    self.state_store,
+                    self.market_data,
+                    self.lifecycle_ledger,
+                )
+                risk_bot._manage_trailing_stop(
+                    stale_symbol,
+                    positions[stale_symbol] or {},
+                    symbol_orders,
+                )
+                print(
+                    f"[OPERATOR] {stale_symbol}: manual position ignores route "
+                    "changes; dedicated trailing risk remains active."
+                )
+                return self._build_status(
+                    checked_at,
+                    market_open,
+                    next_open,
+                    next_close,
+                    account,
+                    signal,
+                    route,
+                    positions,
+                    False,
+                    "manage_operator_position",
+                )
             momentum_grace_action = self._maybe_hold_momentum_route_invalidated_position(
                 stale_symbol,
                 positions[stale_symbol],

@@ -37,6 +37,7 @@ from bot import (
     POSITION_LIFECYCLE_CLOSING,
     POSITION_LIFECYCLE_OPEN,
     POSITION_LIFECYCLE_OPENING,
+    RISK_PROFILE_OPERATOR_TIGHT_0_75,
     SOXL,
     SOXS,
     V10_NO_AUTHORITY_DIRECTIONAL_SUPPRESSION_REASON,
@@ -4476,7 +4477,7 @@ class ServerLoggingTest(unittest.TestCase):
         self.assertEqual(gate["status"], "veto")
         self.assertIn("operator banked", gate["detail"].lower())
 
-    def test_runner_enter_now_uses_current_route_size_and_operator_risk(
+    def test_runner_enter_now_uses_selected_symbol_size_and_operator_risk(
         self,
     ) -> None:
         records: list[dict[str, object]] = []
@@ -4555,12 +4556,13 @@ class ServerLoggingTest(unittest.TestCase):
             )
             runner._operator_bank_state = {}
             runner._operator_exit_state = {}
+            runner._rescan_event = threading.Event()
             runner._edgewalker_status = {
                 "market_open": True,
-                "data_status": "LIVE",
-                "active_bot": INVERSE_BOT,
-                "routed_symbol": SOXS,
-                "regime": "DOWNTREND",
+                "data_status": "WARMUP",
+                "active_bot": MOMENTUM_BOT,
+                "routed_symbol": SOXL,
+                "regime": "UPTREND",
                 "trend_trust": {"score": 72},
             }
             runner._market_data = FakeMarketData()
@@ -4574,12 +4576,12 @@ class ServerLoggingTest(unittest.TestCase):
                 lambda: state_store,
             ), patch("server.LifecycleLedger", FakeLifecycleLedger):
                 result = runner.enter_now(
-                    expected_symbol=SOXS,
-                    expected_bot=INVERSE_BOT,
+                    symbol=SOXS,
                     operator_action_id="test-enter-action",
                 )
 
             self.assertEqual(result, {"ok": True})
+            self.assertTrue(runner._rescan_event.is_set())
             self.assertEqual(submitted[0][0], SOXS)
             self.assertEqual(submitted[0][1], Decimal("950.00"))
             self.assertEqual(
@@ -4592,7 +4594,7 @@ class ServerLoggingTest(unittest.TestCase):
             )
             self.assertEqual(
                 state_store.get_position_risk_profile(SOXS),
-                "operator_fresh_1_5",
+                RISK_PROFILE_OPERATOR_TIGHT_0_75,
             )
             self.assertEqual(
                 state_store.get_position_owner(SOXS),
@@ -4617,6 +4619,31 @@ class ServerLoggingTest(unittest.TestCase):
                 full_fill["lifecycle_context"]["entry_initiator"],
                 "operator",
             )
+            self.assertEqual(
+                full_fill["lifecycle_context"]["operator_selected_symbol"],
+                SOXS,
+            )
+            self.assertEqual(
+                full_fill["lifecycle_context"]["routed_symbol"],
+                SOXL,
+            )
+            self.assertEqual(
+                full_fill["lifecycle_context"]["trail_percent"],
+                "0.75",
+            )
+
+    def test_runner_enter_now_rejects_symbols_outside_manual_pair(self) -> None:
+        runner = BotRunner.__new__(BotRunner)
+        runner._lock = threading.Lock()
+        runner._trade_action_lock = threading.Lock()
+        runner._running = True
+        runner._config = config()
+        runner._operator_bank_state = {}
+        runner._operator_exit_state = {}
+        runner._edgewalker_status = {}
+
+        with self.assertRaisesRegex(BotError, "Choose SOXL or SOXS"):
+            runner.enter_now(symbol="SPY")
 
     def test_runner_exit_now_flattens_without_bank_or_cooldown_reset(self) -> None:
         records: list[dict[str, object]] = []

@@ -1574,6 +1574,17 @@ button:disabled {
   background: color-mix(in srgb, var(--green) 24%, var(--input));
 }
 
+.operator-enter-inverse-button {
+  border-color: color-mix(in srgb, var(--amber) 62%, var(--line));
+  background: color-mix(in srgb, var(--amber) 14%, var(--input));
+  color: var(--amber);
+}
+
+.operator-enter-inverse-button:hover:not(:disabled) {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 24%, var(--input));
+}
+
 .operator-exit-button {
   border-color: color-mix(in srgb, var(--danger) 58%, var(--line));
   background: color-mix(in srgb, var(--danger) 12%, var(--input));
